@@ -1,0 +1,360 @@
+/* ── AltCarbon Grants Intelligence — Adaptive Light / Dark Theme ──────────── *
+ * Variables are defined for both themes.
+ * Streamlit 1.28+ sets  html[data-theme="dark"] / html[data-theme="light"]  when
+ * the user toggles via ⋮ → Settings → Theme.
+ * Our sidebar toggle writes the same attribute, so the CSS responds identically.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/* ── Dark theme (default) ────────────────────────────────────────────────── */
+:root,
+html[data-theme="dark"] {
+    --bg:              #0d0f1a;
+    --bg-card:         #141726;
+    --bg-elevated:     #1a1d2e;
+    --bg-hover:        #1e2235;
+    --border:          #2d3748;
+    --border-subtle:   rgba(255,255,255,0.06);
+
+    --text:            #e2e8f0;
+    --text-2:          #a0aec0;
+    --text-3:          #718096;
+    --text-4:          #4a5568;
+
+    --accent:          #4299e1;
+    --accent-bg:       #1a2340;
+    --accent-border:   #2d5a8a;
+
+    --green:           #48bb78;
+    --green-bg:        #1a4731;
+    --green-border:    #276749;
+    --green-2:         #9ae6b4;
+
+    --orange:          #ed8936;
+    --orange-bg:       #3d2c10;
+    --orange-border:   #744210;
+    --orange-2:        #fbd38d;
+
+    --red:             #fc8181;
+    --red-bg:          #2d1515;
+    --red-border:      #742a2a;
+    --red-2:           #fed7d7;
+
+    --purple:          #b794f4;
+    --purple-bg:       #2d1f4a;
+    --purple-border:   #553c9a;
+    --purple-2:        #e9d8fd;
+
+    --sidebar-bg:      #0a0c14;
+    --sidebar-border:  #1e2130;
+    --nav-active-bg:   #1a2340;
+    --nav-active-text: #4299e1;
+    --nav-text:        #718096;
+
+    --shadow:          rgba(0,0,0,0.4);
+    --scrollbar-bg:    #0d0f1a;
+    --scrollbar-thumb: #2d3748;
+}
+
+/* ── Light theme ─────────────────────────────────────────────────────────── */
+html[data-theme="light"] {
+    --bg:              #f0f4f8;
+    --bg-card:         #ffffff;
+    --bg-elevated:     #f7fafc;
+    --bg-hover:        #edf2f7;
+    --border:          #e2e8f0;
+    --border-subtle:   rgba(0,0,0,0.08);
+
+    --text:            #1a202c;
+    --text-2:          #4a5568;
+    --text-3:          #718096;
+    --text-4:          #a0aec0;
+
+    --accent:          #3182ce;
+    --accent-bg:       #ebf8ff;
+    --accent-border:   #bee3f8;
+
+    --green:           #276749;
+    --green-bg:        #f0fff4;
+    --green-border:    #c6f6d5;
+    --green-2:         #22543d;
+
+    --orange:          #c05621;
+    --orange-bg:       #fffaf0;
+    --orange-border:   #feebc8;
+    --orange-2:        #7b341e;
+
+    --red:             #c53030;
+    --red-bg:          #fff5f5;
+    --red-border:      #fed7d7;
+    --red-2:           #742a2a;
+
+    --purple:          #553c9a;
+    --purple-bg:       #faf5ff;
+    --purple-border:   #e9d8fd;
+    --purple-2:        #322659;
+
+    --sidebar-bg:      #f7fafc;
+    --sidebar-border:  #e2e8f0;
+    --nav-active-bg:   #ebf8ff;
+    --nav-active-text: #2b6cb0;
+    --nav-text:        #718096;
+
+    --shadow:          rgba(0,0,0,0.08);
+    --scrollbar-bg:    #f0f4f8;
+    --scrollbar-thumb: #cbd5e0;
+}
+
+/* ── OS-preference fallback (no data-theme set yet) ─────────────────────── */
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme]) {
+        --bg: #f0f4f8; --bg-card: #ffffff; --bg-elevated: #f7fafc;
+        --bg-hover: #edf2f7; --border: #e2e8f0; --border-subtle: rgba(0,0,0,0.08);
+        --text: #1a202c; --text-2: #4a5568; --text-3: #718096; --text-4: #a0aec0;
+        --accent: #3182ce; --accent-bg: #ebf8ff; --accent-border: #bee3f8;
+        --green: #276749; --green-bg: #f0fff4; --green-border: #c6f6d5; --green-2: #22543d;
+        --orange: #c05621; --orange-bg: #fffaf0; --orange-border: #feebc8; --orange-2: #7b341e;
+        --red: #c53030; --red-bg: #fff5f5; --red-border: #fed7d7; --red-2: #742a2a;
+        --purple: #553c9a; --purple-bg: #faf5ff; --purple-border: #e9d8fd; --purple-2: #322659;
+        --sidebar-bg: #f7fafc; --sidebar-border: #e2e8f0;
+        --nav-active-bg: #ebf8ff; --nav-active-text: #2b6cb0; --nav-text: #718096;
+        --shadow: rgba(0,0,0,0.08); --scrollbar-bg: #f0f4f8; --scrollbar-thumb: #cbd5e0;
+    }
+}
+
+/* ── Streamlit app frame background + base text ──────────────────────────── */
+.stApp, [data-testid="stAppViewContainer"] {
+    background-color: var(--bg) !important;
+    color: var(--text);
+}
+[data-testid="stHeader"] {
+    background-color: var(--bg) !important;
+}
+
+/* ── Text color — override Streamlit's hardcoded theme values ─────────────── */
+
+/* Main content text (st.write, st.markdown plain text) */
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] td,
+[data-testid="stMarkdownContainer"] th,
+[data-testid="stText"] p {
+    color: var(--text) !important;
+}
+
+/* Headers inside st.markdown() */
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3,
+[data-testid="stMarkdownContainer"] h4,
+[data-testid="stMarkdownContainer"] h5,
+[data-testid="stMarkdownContainer"] h6 {
+    color: var(--text) !important;
+}
+
+/* Captions (st.caption) */
+[data-testid="stCaptionContainer"] p,
+[data-testid="stCaptionContainer"] span {
+    color: var(--text-3) !important;
+}
+
+/* Widget labels (the label above selectbox, slider, text_input, etc.) */
+[data-testid="stWidgetLabel"] p,
+[data-testid="stFormLabel"] p {
+    color: var(--text-2) !important;
+}
+
+/* Radio and checkbox option text */
+[data-testid="stRadio"] span,
+[data-testid="stCheckbox"] span {
+    color: var(--text-2) !important;
+}
+
+/* Slider min/max labels */
+[data-testid="stSlider"] p { color: var(--text-3) !important; }
+
+/* Textarea */
+[data-testid="stTextArea"] textarea {
+    color: var(--text) !important;
+    background: var(--bg-card) !important;
+    border-color: var(--border) !important;
+}
+
+/* Number input */
+[data-testid="stNumberInput"] input { color: var(--text) !important; }
+
+/* Alert/info boxes */
+[data-testid="stAlert"] p { color: var(--text) !important; }
+
+/* Dataframe cell text */
+[data-testid="stDataFrame"] { color: var(--text); }
+
+/* Selectbox dropdown options */
+[data-baseweb="popover"] li {
+    color: var(--text) !important;
+    background: var(--bg-card) !important;
+}
+[data-baseweb="popover"] li:hover {
+    background: var(--bg-hover) !important;
+}
+
+/* Secondary buttons */
+button[kind="secondary"] {
+    color: var(--text-2) !important;
+    border-color: var(--border) !important;
+    background: transparent !important;
+}
+button[kind="secondary"]:hover {
+    color: var(--text) !important;
+    background: var(--bg-hover) !important;
+    border-color: var(--text-3) !important;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background-color: var(--sidebar-bg) !important;
+    border-right: 1px solid var(--sidebar-border) !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] span,
+[data-testid="stSidebar"] [data-testid="stText"] p,
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+    color: var(--text-2) !important;
+}
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
+    color: var(--text-3) !important;
+}
+[data-testid="stSidebar"] [data-testid="stMetricValue"] {
+    color: var(--text) !important;
+}
+[data-testid="stSidebar"] [data-testid="stMetricLabel"] {
+    color: var(--text-3) !important;
+}
+
+/* ── Sidebar navigation (radio as pill nav) ──────────────────────────────── */
+[data-testid="stSidebar"] [data-testid="stRadio"] > div {
+    gap: 2px;
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] label {
+    display: flex !important;
+    align-items: center;
+    padding: 9px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--nav-text);
+    font-size: 0.9em;
+    font-weight: 500;
+    transition: background 0.15s, color 0.15s;
+    width: 100%;
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+    background: var(--bg-hover);
+    color: var(--text-2);
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
+    background: var(--nav-active-bg);
+    color: var(--nav-active-text);
+    font-weight: 600;
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] input[type="radio"] {
+    display: none !important;
+}
+
+/* ── Sidebar buttons ─────────────────────────────────────────────────────── */
+[data-testid="stSidebar"] .stButton > button {
+    border-radius: 8px;
+    font-size: 0.88em;
+    font-weight: 500;
+    transition: all 0.15s;
+}
+
+/* ── Metric cards ────────────────────────────────────────────────────────── */
+[data-testid="metric-container"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 10px !important;
+    padding: 16px !important;
+    box-shadow: 0 1px 3px var(--shadow) !important;
+}
+[data-testid="stMetricLabel"] { color: var(--text-3) !important; font-size: 0.78em !important; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+[data-testid="stMetricValue"] { color: var(--text) !important; font-size: 1.7em !important; font-weight: 700; }
+
+/* ── Expanders ───────────────────────────────────────────────────────────── */
+[data-testid="stExpander"] {
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    background: var(--bg-card) !important;
+}
+[data-testid="stExpander"] summary {
+    color: var(--text-2) !important;
+}
+
+/* ── Dividers ────────────────────────────────────────────────────────────── */
+hr { border-color: var(--border) !important; }
+
+/* ── Containers with border ─────────────────────────────────────────────── */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-color: var(--border) !important;
+    border-radius: 10px !important;
+    background: var(--bg-card) !important;
+}
+
+/* ── Tabs ────────────────────────────────────────────────────────────────── */
+[data-testid="stTabs"] button[data-baseweb="tab"] {
+    color: var(--text-3) !important;
+    font-size: 0.9em;
+    font-weight: 500;
+}
+[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
+    color: var(--accent) !important;
+    font-weight: 600;
+}
+
+/* ── Inputs & Selects ────────────────────────────────────────────────────── */
+[data-testid="stTextInput"] input,
+[data-testid="stSelectbox"] [data-baseweb="select"] {
+    background: var(--bg-card) !important;
+    border-color: var(--border) !important;
+    color: var(--text) !important;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--scrollbar-bg); }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
+
+/* ── Activity feed ───────────────────────────────────────────────────────── */
+.activity-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88em;
+    color: var(--text-2);
+}
+.activity-icon {
+    background: var(--accent-bg);
+    border-radius: 8px;
+    padding: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+/* ── Kanban cards ────────────────────────────────────────────────────────── */
+.kanban-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    font-size: 0.85em;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+.kanban-card:hover {
+    border-color: var(--text-4);
+    box-shadow: 0 2px 8px var(--shadow);
+}

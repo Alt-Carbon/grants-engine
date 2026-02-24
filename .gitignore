@@ -1,0 +1,27 @@
+# Only track Grant_engine-2 — ignore all sibling projects
+/*
+!/Grant_engine-2/
+!.gitignore
+
+# Inside Grant_engine-2 — Python
+Grant_engine-2/**/__pycache__/
+Grant_engine-2/**/*.py[cod]
+Grant_engine-2/**/*.pyo
+Grant_engine-2/.venv/
+Grant_engine-2/venv/
+Grant_engine-2/.env
+
+# Secrets / local config
+*.env
+.env.*
+!.env.example
+
+# Generated outputs
+Grant_engine-2/*.xlsx
+Grant_engine-2/*.csv
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
