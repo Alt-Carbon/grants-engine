@@ -395,69 +395,270 @@ def _render_table(grants: list):
 
 # ── Kanban view ───────────────────────────────────────────────────────────────
 
+_KANBAN_CSS = """
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:transparent; font-size:13px;
+}
+#kb-bar {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:0 2px 8px; gap:8px;
+}
+.kb-hint { color:#94a3b8; font-size:0.76em; display:flex; align-items:center; gap:5px; }
+.kb-btn {
+  background:#f8fafc; border:1px solid #e2e8f0; color:#475569;
+  border-radius:6px; padding:4px 12px; cursor:pointer; font-size:0.8em;
+  transition:all 0.15s; white-space:nowrap;
+}
+.kb-btn:hover { border-color:#16a34a; color:#16a34a; background:#f0fdf4; }
+#kb-wrap { width:100%; overflow-x:auto; overflow-y:hidden; padding-bottom:8px; }
+#kb-board { display:flex; gap:10px; min-width:max-content; padding:0 2px; }
+
+.kb-col { width:190px; flex-shrink:0; display:flex; flex-direction:column; }
+.kb-hdr {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:6px 10px; border-radius:8px; margin-bottom:8px;
+  font-size:0.68em; font-weight:700; text-transform:uppercase; letter-spacing:0.05em;
+}
+.kb-cnt {
+  background:rgba(255,255,255,0.55); border-radius:10px;
+  padding:1px 7px; font-size:1.05em; font-weight:800; min-width:18px; text-align:center;
+}
+.kb-cards {
+  overflow-y:auto; overflow-x:hidden; max-height:560px; min-height:64px; padding:1px;
+  border-radius:8px; transition:background 0.15s, outline 0.15s;
+}
+.kb-cards::-webkit-scrollbar { width:3px; }
+.kb-cards::-webkit-scrollbar-thumb { background:#e2e8f0; border-radius:3px; }
+.kb-col.drag-over .kb-cards {
+  background:rgba(22,163,74,0.05);
+  outline:2px dashed #16a34a; outline-offset:-2px;
+}
+.card {
+  background:#fff; border:1.5px solid #e8eef4; border-radius:10px;
+  padding:9px 10px 8px; margin-bottom:6px; cursor:grab;
+  transition:box-shadow 0.15s, border-color 0.15s, opacity 0.12s, transform 0.12s;
+  user-select:none;
+}
+.card:hover { box-shadow:0 3px 10px rgba(0,0,0,0.08); border-color:#c8d8e8; }
+.card.dragging { opacity:0.35; cursor:grabbing; transform:scale(0.97); }
+.c-badges { display:flex; align-items:center; gap:4px; margin-bottom:5px; flex-wrap:wrap; }
+.c-score {
+  font-size:0.69em; font-weight:800; padding:2px 7px;
+  border-radius:5px; letter-spacing:0.01em;
+}
+.c-type {
+  font-size:0.64em; font-weight:600; padding:2px 6px;
+  border-radius:5px; background:#f1f5f9; color:#64748b;
+}
+.c-title { font-size:0.8em; font-weight:700; color:#1e293b; line-height:1.35; margin-bottom:3px; }
+.c-funder { font-size:0.7em; color:#64748b; margin-bottom:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.c-meta { font-size:0.65em; color:#94a3b8; }
+.kb-extra { font-size:0.68em; color:#94a3b8; text-align:center; padding:5px 0; font-style:italic; }
+#toast {
+  position:fixed; bottom:12px; right:12px; z-index:9999;
+  padding:8px 14px; border-radius:8px; font-size:0.8em; font-weight:600;
+  color:#fff; opacity:0; transform:translateY(6px);
+  transition:opacity 0.2s, transform 0.2s; pointer-events:none; white-space:nowrap;
+}
+#toast.show { opacity:1; transform:translateY(0); }
+#toast.s-info    { background:#3b82f6; }
+#toast.s-success { background:#16a34a; }
+#toast.s-error   { background:#dc2626; }
+"""
+
+_KANBAN_JS = """
+const SC = {
+  triage:         {bg:'#fffbeb', color:'#b45309'},
+  pursue:         {bg:'#eff6ff', color:'#2563eb'},
+  pursuing:       {bg:'#f5f3ff', color:'#7c3aed'},
+  drafting:       {bg:'#ecfeff', color:'#0891b2'},
+  draft_complete: {bg:'#f0fdf4', color:'#16a34a'},
+  submitted:      {bg:'#eef2ff', color:'#4338ca'},
+  won:            {bg:'#dcfce7', color:'#166534'},
+  passed:         {bg:'#f8fafc', color:'#64748b'},
+};
+
+function esc(s) {
+  return String(s||'')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function scoreStyle(s) {
+  if (s >= 7.5) return 'background:#dcfce7;color:#15803d';
+  if (s >= 6.5) return 'background:#f0fdf4;color:#16a34a';
+  if (s >= 5.0) return 'background:#fff7ed;color:#ea580c';
+  return 'background:#fef2f2;color:#dc2626';
+}
+
+let dragged = null, fromStage = null;
+
+function buildBoard() {
+  const board = document.getElementById('kb-board');
+  DATA.forEach(col => {
+    const sc = SC[col.stage] || {bg:'#f8fafc', color:'#64748b'};
+    const colEl = document.createElement('div');
+    colEl.className = 'kb-col';
+    colEl.dataset.stage = col.stage;
+    colEl.innerHTML =
+      '<div class="kb-hdr" style="background:' + sc.bg + ';color:' + sc.color + '">'
+      + '<span>' + esc(col.label) + '</span>'
+      + '<span class="kb-cnt" id="cnt-' + col.stage + '">' + col.count + '</span>'
+      + '</div>'
+      + '<div class="kb-cards" id="cards-' + col.stage + '"></div>';
+
+    const cardsEl = colEl.querySelector('.kb-cards');
+    col.cards.forEach(c => cardsEl.appendChild(mkCard(c, col.stage)));
+    if (col.extra > 0) {
+      const d = document.createElement('div');
+      d.className = 'kb-extra';
+      d.textContent = '+ ' + col.extra + ' more';
+      cardsEl.appendChild(d);
+    }
+
+    colEl.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      colEl.classList.add('drag-over');
+    });
+    colEl.addEventListener('dragleave', e => {
+      if (!colEl.contains(e.relatedTarget)) colEl.classList.remove('drag-over');
+    });
+    colEl.addEventListener('drop', e => onDrop(e, col.stage, colEl));
+    board.appendChild(colEl);
+  });
+}
+
+function mkCard(c, stage) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.draggable = true;
+  el.dataset.id = c.id;
+  el.dataset.stage = stage;
+  el.innerHTML =
+    '<div class="c-badges">'
+    + '<span class="c-score" style="' + scoreStyle(c.score) + '">' + c.score + '</span>'
+    + '<span class="c-type">' + esc(c.grant_type) + '</span>'
+    + '</div>'
+    + '<div class="c-title">' + esc(c.title) + '</div>'
+    + '<div class="c-funder">' + esc(c.funder) + '</div>'
+    + '<div class="c-meta">📅 ' + esc(c.deadline) + ' · 🌍 ' + esc(c.geography || '–') + '</div>';
+
+  el.addEventListener('dragstart', e => {
+    dragged = el; fromStage = stage;
+    el.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', c.id);
+  });
+  el.addEventListener('dragend', () => {
+    el.classList.remove('dragging');
+    document.querySelectorAll('.kb-col').forEach(x => x.classList.remove('drag-over'));
+  });
+  return el;
+}
+
+function onDrop(e, toStage, colEl) {
+  e.preventDefault();
+  colEl.classList.remove('drag-over');
+  const id = e.dataTransfer.getData('text/plain');
+  if (!dragged || !id || fromStage === toStage) return;
+
+  // Optimistic: move card in the DOM
+  const cardsEl = colEl.querySelector('.kb-cards');
+  cardsEl.insertBefore(dragged, cardsEl.firstChild);
+  const prev = fromStage;
+  dragged.dataset.stage = toStage;
+  fromStage = toStage;
+  bump('cnt-' + prev, -1);
+  bump('cnt-' + toStage, +1);
+  toast('Moving to ' + toStage.replace(/_/g, ' ') + '...', 'info');
+
+  fetch(API_URL, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'x-internal-secret': API_KEY},
+    body: JSON.stringify({grant_id: id, status: toStage})
+  })
+  .then(r => r.ok ? r.json() : Promise.reject(r.status))
+  .then(() => {
+    toast('Moved to ' + toStage.replace(/_/g, ' '), 'success');
+    setTimeout(() => { try { window.parent.location.reload(); } catch(err) {} }, 1600);
+  })
+  .catch(err => toast('Update failed (' + err + ')', 'error'));
+}
+
+function bump(id, d) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = Math.max(0, parseInt(el.textContent || '0') + d);
+}
+
+function toast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show s-' + type;
+  clearTimeout(window._tt);
+  window._tt = setTimeout(() => { t.className = ''; }, 2600);
+}
+
+buildBoard();
+"""
+
+
 def _render_kanban(grants: list):
+    import json
+    import os
+    import streamlit.components.v1 as components
+
+    RAILWAY_URL = os.environ.get("RAILWAY_URL", "http://localhost:8000")
+    INTERNAL_SECRET = os.environ.get("INTERNAL_SECRET", "dev-internal-secret")
+
     buckets: dict[str, list] = {s: [] for s in KANBAN_STAGES}
     for g in grants:
         s = g.get("status", "triage")
         buckets[s if s in buckets else "triage"].append(g)
 
-    cols = st.columns(len(KANBAN_STAGES))
+    columns_data = []
+    for stage in KANBAN_STAGES:
+        cards = []
+        for g in buckets[stage][:10]:
+            cards.append({
+                "id":         str(g["_id"]),
+                "title":      (g.get("title") or "Untitled")[:52],
+                "funder":     (g.get("funder") or "–")[:30],
+                "deadline":   (g.get("deadline") or "–")[:16],
+                "score":      round(g.get("weighted_total", 0), 1),
+                "geography":  (g.get("geography") or "")[:22],
+                "grant_type": (g.get("grant_type") or "grant")[:10],
+            })
+        columns_data.append({
+            "stage": stage,
+            "label": stage.replace("_", " ").title(),
+            "count": len(buckets[stage]),
+            "extra": max(0, len(buckets[stage]) - 10),
+            "cards": cards,
+        })
 
-    for col, stage in zip(cols, KANBAN_STAGES):
-        color, bg, icon_name = icons._STATUS_STYLES.get(
-            stage, ("var(--text-3)", "var(--bg-elevated)", "circle")
-        )
+    # Inject dynamic data as JS constants; keep CSS/JS as plain strings (no f-string escaping needed)
+    data_block = (
+        "const DATA="    + json.dumps(columns_data) + ";"
+        "const API_URL=" + json.dumps(f"{RAILWAY_URL}/update/grant-status") + ";"
+        "const API_KEY=" + json.dumps(INTERNAL_SECRET) + ";"
+    )
 
-        with col:
-            st.markdown(
-                f"<div style='background:{bg};border-radius:8px;padding:8px 10px;"
-                f"margin-bottom:8px;display:flex;align-items:center;gap:6px;'>"
-                f"{icons.svg(icon_name, 13, color)}"
-                f"<span style='color:{color};font-size:0.72em;font-weight:700;"
-                f"text-transform:uppercase;letter-spacing:0.06em;'>"
-                f"{stage.replace('_',' ')}</span>"
-                f"<span style='color:{color};font-size:0.72em;margin-left:auto;'>"
-                f"{len(buckets[stage])}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+    html = (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<style>" + _KANBAN_CSS + "</style>"
+        "<script>" + data_block + "</script>"
+        "</head><body>"
+        "<div id='kb-bar'>"
+        "  <span class='kb-hint'>&#9776;&nbsp;Drag cards between columns to move stages</span>"
+        "  <button class='kb-btn' onclick='try{window.parent.location.reload()}catch(e){}'>&#8635; Refresh</button>"
+        "</div>"
+        "<div id='kb-wrap'><div id='kb-board'></div></div>"
+        "<div id='toast'></div>"
+        "<script>" + _KANBAN_JS + "</script>"
+        "</body></html>"
+    )
 
-            for g in buckets[stage][:10]:
-                score     = g.get("weighted_total", 0)
-                deadline  = g.get("deadline") or "–"
-                geography = (g.get("geography") or "")[:28]
-                grant_type = g.get("grant_type", "grant")
-
-                with st.container(border=True):
-                    st.markdown(
-                        icons.score_badge(score) + "&nbsp;" +
-                        icons.grant_type_badge(grant_type),
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"<div style='font-size:0.8em;font-weight:600;"
-                        f"color:var(--text);line-height:1.3;margin:4px 0;'>"
-                        f"{g.get('title','Untitled')[:44]}</div>",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"<div style='font-size:0.72em;color:var(--text-3);'>"
-                        f"{g.get('funder','–')[:28]}</div>"
-                        f"<div style='font-size:0.72em;color:var(--text-4);margin-top:2px;'>"
-                        f"{icons.svg('calendar',11,'var(--text-4)')} {deadline} "
-                        f"· {icons.svg('globe',11,'var(--text-4)')} {geography or '–'}"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-
-                    move_opts = [s for s in KANBAN_STAGES if s != stage]
-                    choice = st.selectbox(
-                        "Move", move_opts, index=None, placeholder="Move to…",
-                        key=f"kb_{g['_id']}_{stage}", label_visibility="collapsed",
-                    )
-                    if choice:
-                        update_grant_status(g["_id"], choice)
-                        st.rerun()
-
-            if len(buckets[stage]) > 10:
-                st.caption(f"+ {len(buckets[stage]) - 10} more")
+    components.html(html, height=670, scrolling=False)

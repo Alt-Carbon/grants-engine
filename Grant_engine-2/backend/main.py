@@ -95,6 +95,11 @@ class StartDraftRequest(BaseModel):
     thread_id: Optional[str] = None
 
 
+class UpdateGrantStatusRequest(BaseModel):
+    grant_id: str
+    status: str
+
+
 # ── Seed default agent config ──────────────────────────────────────────────────
 
 async def _seed_default_agent_config():
@@ -413,6 +418,39 @@ async def admin_deduplicate(
     """Remove duplicate grants from grants_raw and grants_scored collections."""
     background_tasks.add_task(run_deduplication)
     return {"status": "deduplication_started", "ts": datetime.now(timezone.utc).isoformat()}
+
+
+# ── Grant management ───────────────────────────────────────────────────────────
+
+_VALID_STATUSES = {
+    "triage", "pursue", "pursuing", "watch", "drafting",
+    "draft_complete", "submitted", "won", "passed", "auto_pass", "reported",
+}
+
+
+@app.post("/update/grant-status")
+async def update_grant_status_api(
+    body: UpdateGrantStatusRequest,
+    _: None = Depends(verify_internal),
+):
+    """Move a grant to a new Kanban stage (called by the drag-and-drop UI)."""
+    from backend.db.mongo import grants_scored
+    from bson import ObjectId
+
+    if body.status not in _VALID_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status: {body.status!r}")
+    try:
+        oid = ObjectId(body.grant_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid grant_id")
+
+    result = await grants_scored().update_one(
+        {"_id": oid},
+        {"$set": {"status": body.status, "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Grant not found")
+    return {"status": "updated", "grant_id": body.grant_id, "new_status": body.status}
 
 
 @app.get("/drafts/{thread_id}/download")
