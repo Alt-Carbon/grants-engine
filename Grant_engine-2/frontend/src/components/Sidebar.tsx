@@ -12,6 +12,7 @@ import {
   Leaf,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AgentControls } from "./AgentControls";
 
 const NAV = [
   { href: "/dashboard", label: "Dashboard",  icon: BarChart3  },
@@ -54,6 +55,11 @@ export function Sidebar() {
           );
         })}
       </nav>
+
+      {/* Agent run controls */}
+      <div className="border-t border-gray-800">
+        <AgentControls />
+      </div>
 
       {/* Footer */}
       <div className="border-t border-gray-800 px-4 py-3">

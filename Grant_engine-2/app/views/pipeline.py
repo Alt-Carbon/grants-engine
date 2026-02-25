@@ -8,6 +8,7 @@ from app.db.queries import (
     export_grants_csv,
     get_all_pipeline_grants,
     report_grant,
+    save_manual_grant,
     update_grant_status,
     REPORT_REASONS,
 )
@@ -85,11 +86,74 @@ def _report_popover(g: dict, key_suffix: str):
             st.rerun()
 
 
+# ── Manual grant entry ────────────────────────────────────────────────────────
+
+def _render_manual_entry():
+    """Expandable form — paste a URL, we fetch + save it for the analyst to score."""
+    with st.expander("➕  Add a grant manually", expanded=False):
+        st.caption(
+            "Scout didn't find it? Paste the grant URL below. "
+            "We'll fetch the page content and queue it for analyst scoring."
+        )
+
+        col_url, col_funder = st.columns([3, 1])
+        with col_url:
+            url = st.text_input(
+                "Grant URL",
+                placeholder="https://example.org/grant-call-2026",
+                key="manual_url",
+                label_visibility="collapsed",
+            )
+        with col_funder:
+            funder_override = st.text_input(
+                "Funder (optional)",
+                placeholder="e.g. EU EIC",
+                key="manual_funder",
+                label_visibility="collapsed",
+            )
+
+        col_title, col_notes = st.columns([2, 2])
+        with col_title:
+            title_override = st.text_input(
+                "Title override (optional)",
+                placeholder="Leave blank to auto-detect from page",
+                key="manual_title",
+                label_visibility="collapsed",
+            )
+        with col_notes:
+            notes = st.text_input(
+                "Notes (optional)",
+                placeholder="Why you're adding this…",
+                key="manual_notes",
+                label_visibility="collapsed",
+            )
+
+        if st.button("Fetch & Queue for Analyst", type="primary", key="manual_submit",
+                     disabled=not url):
+            import os
+            jina_key = os.environ.get("JINA_API_KEY", "")
+            with st.spinner("Fetching page content…"):
+                ok, msg = save_manual_grant(
+                    url=url,
+                    title_override=title_override,
+                    funder_override=funder_override,
+                    notes=notes,
+                    jina_key=jina_key,
+                )
+            if ok:
+                st.success(f"✅ {msg}\n\nRun the Analyst from the sidebar to score it.")
+            else:
+                st.error(f"❌ {msg}")
+
+
 # ── Page ──────────────────────────────────────────────────────────────────────
 
 def render():
     icons.page_header("git-branch", "Grants Pipeline",
                       "Full visibility across all tracked opportunities")
+
+    _render_manual_entry()
+    st.markdown("")
 
     # ── Row 1: primary filters ─────────────────────────────────────────────────
     c1, c2, c3, c4, c5, c6 = st.columns([2.5, 1.2, 1.2, 1.2, 1.5, 0.7])

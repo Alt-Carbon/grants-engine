@@ -222,6 +222,120 @@ def get_top_grants(limit: int = 5) -> List[Dict]:
     return grants
 
 
+# ── Manual Grant Entry ─────────────────────────────────────────────────────────
+
+def save_manual_grant(
+    url: str,
+    title_override: str = "",
+    funder_override: str = "",
+    notes: str = "",
+    jina_key: str = "",
+) -> tuple:
+    """Fetch a grant URL via Jina, detect themes, and save to grants_raw.
+
+    Returns (success: bool, message: str).
+    """
+    import hashlib
+    import httpx
+    from urllib.parse import urlparse
+
+    url = url.strip()
+    if not url.startswith("http"):
+        return False, "URL must start with http:// or https://"
+
+    url_hash = hashlib.md5(url.lower().encode()).hexdigest()
+
+    existing = _db()["grants_raw"].find_one({"url_hash": url_hash})
+    if existing:
+        return False, f"Already in database (added {existing.get('scraped_at','previously')[:10]})."
+
+    # Fetch via Jina first, fall back to plain HTTP
+    raw_content = ""
+    jina_url = f"https://r.jina.ai/{url}"
+    headers = {"X-Return-Format": "markdown", "X-With-Links-Summary": "false"}
+    if jina_key:
+        headers["Authorization"] = f"Bearer {jina_key}"
+    try:
+        r = httpx.get(jina_url, headers=headers, timeout=30.0, follow_redirects=True)
+        r.raise_for_status()
+        raw_content = r.text.strip()[:80_000]
+    except Exception as e:
+        try:
+            r2 = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20.0, follow_redirects=True)
+            r2.raise_for_status()
+            raw_content = r2.text[:60_000]
+        except Exception:
+            return False, f"Could not fetch URL: {e}"
+
+    if len(raw_content) < 100:
+        return False, "Page returned too little content. Check the URL."
+
+    # Theme detection
+    text_lower = (raw_content + " " + title_override).lower()
+    themes = []
+    if any(k in text_lower for k in ["climate", "carbon", "net zero", "decarboni", "emission", "cdr", "mrv", "cleantech", "renewable"]):
+        themes.append("climatetech")
+    if any(k in text_lower for k in ["agri", "soil", "farm", "crop", "food", "land use", "regenerative"]):
+        themes.append("agritech")
+    if any(k in text_lower for k in ["artificial intelligence", "machine learning", "ai for", "deep learning", "nlp"]):
+        themes.append("ai_for_sciences")
+    if any(k in text_lower for k in ["earth science", "remote sensing", "satellite", "geology", "geospatial", "subsurface"]):
+        themes.append("applied_earth_sciences")
+    if any(k in text_lower for k in ["social impact", "community", "rural", "livelihood", "inclusive", "women", "development"]):
+        themes.append("social_impact")
+    if not themes:
+        themes = ["climatetech"]
+
+    # Auto-extract title from content if not provided
+    title = title_override.strip()
+    if not title:
+        import re as _re
+        # Try <title> tag first (for raw HTML fallback)
+        m = _re.search(r"<title[^>]*>([^<]+)</title>", raw_content, _re.IGNORECASE)
+        if m:
+            title = m.group(1).strip()[:120]
+        else:
+            # For markdown (Jina output), use the first non-empty heading or line
+            for line in raw_content.split("\n"):
+                line = line.lstrip("#").strip()
+                if len(line) > 10:
+                    title = line[:120]
+                    break
+        if not title:
+            title = url
+
+    # Auto-extract funder from domain if not provided
+    funder = funder_override.strip()
+    if not funder:
+        try:
+            domain = urlparse(url).netloc.replace("www.", "")
+            funder = domain.split(".")[0].upper()
+        except Exception:
+            funder = "Unknown"
+
+    doc = {
+        "title": title,
+        "url": url,
+        "url_hash": url_hash,
+        "funder": funder,
+        "raw_content": raw_content,
+        "themes_detected": themes,
+        "source": "manual",
+        "deadline": None,
+        "max_funding": None,
+        "currency": "USD",
+        "eligibility_raw": "",
+        "processed": False,
+        "notes": notes,
+        "scraped_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _db()["grants_raw"].insert_one(doc)
+    return True, (
+        f"Saved **{title[:70]}** · {len(raw_content):,} chars fetched · "
+        f"themes: {', '.join(themes)}"
+    )
+
+
 # ── Grants Pipeline ────────────────────────────────────────────────────────────
 
 def get_all_pipeline_grants(
