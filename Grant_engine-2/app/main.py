@@ -106,13 +106,16 @@ with st.sidebar:
     # Branding
     st.markdown(
         f"""
-        <div style="display:flex;align-items:center;gap:10px;padding:4px 0 12px;">
-            <div style="background:#1a3a2a;border-radius:10px;padding:8px;display:flex;">
-                {icons.svg('leaf', 22, '#48bb78')}
+        <div style="display:flex;align-items:center;gap:10px;padding:4px 0 14px;">
+            <div style="background:var(--green-bg);border:1.5px solid var(--green-border);
+                        border-radius:10px;padding:8px;display:flex;align-items:center;">
+                {icons.svg('leaf', 22, 'var(--green)')}
             </div>
             <div>
-                <div style="font-size:1.05rem;font-weight:700;color:#e2e8f0;line-height:1.1;">AltCarbon</div>
-                <div style="font-size:0.75rem;color:#718096;letter-spacing:0.04em;">Grants Intelligence</div>
+                <div style="font-size:1.06rem;font-weight:800;color:var(--text);line-height:1.1;
+                            letter-spacing:-0.01em;">AltCarbon</div>
+                <div style="font-size:0.72rem;color:var(--text-3);letter-spacing:0.04em;
+                            margin-top:1px;">Grants Intelligence</div>
             </div>
         </div>
         """,
@@ -124,10 +127,11 @@ with st.sidebar:
     if st.session_state.scout_banner == "running":
         elapsed = st.session_state.scout_elapsed
         st.markdown(
-            f"""<div style="display:flex;align-items:center;gap:8px;background:#1a2340;
-                            border:1px solid #2d5a8a;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
-                    {icons.svg('loader', 16, '#4299e1')}
-                    <span style="font-size:0.85em;color:#90cdf4;font-weight:500;">
+            f"""<div style="display:flex;align-items:center;gap:8px;
+                            background:var(--accent-bg);border:1px solid var(--accent-border);
+                            border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+                    {icons.svg('loader', 16, 'var(--accent)')}
+                    <span style="font-size:0.85em;color:var(--accent);font-weight:500;">
                         Scout running… {elapsed}
                     </span>
                 </div>""",
@@ -135,10 +139,11 @@ with st.sidebar:
         )
     elif st.session_state.scout_banner == "done":
         st.markdown(
-            f"""<div style="display:flex;align-items:center;gap:8px;background:#1a4731;
-                            border:1px solid #276749;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
-                    {icons.svg('check-circle', 16, '#48bb78')}
-                    <span style="font-size:0.82em;color:#9ae6b4;font-weight:500;">
+            f"""<div style="display:flex;align-items:center;gap:8px;
+                            background:var(--green-bg);border:1px solid var(--green-border);
+                            border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+                    {icons.svg('check-circle', 16, 'var(--green)')}
+                    <span style="font-size:0.82em;color:var(--green-2);font-weight:500;">
                         {st.session_state.scout_done_msg}
                     </span>
                 </div>""",
@@ -152,20 +157,39 @@ with st.sidebar:
     # ── Quick stats ───────────────────────────────────────────────────────────
     try:
         stats = get_quick_stats()
-        col1, col2 = st.columns(2)
-        col1.metric("Discovered", stats["total_grants"])
-        col2.metric("In Triage", stats["in_triage"])
-        col1.metric("Pursuing", stats["pursuing"])
         last_scout = stats["last_scout"]
         if last_scout and last_scout != "Never":
             last_scout = str(last_scout)[:10]
-        col2.metric("Last Scout", last_scout)
+        else:
+            last_scout = "–"
+        st.markdown(
+            f"""<div class="sidebar-stats">
+                <div class="sidebar-stat">
+                    <div class="sidebar-stat-value">{stats["total_grants"]}</div>
+                    <div class="sidebar-stat-label">Discovered</div>
+                </div>
+                <div class="sidebar-stat">
+                    <div class="sidebar-stat-value" style="color:var(--orange);">{stats["in_triage"]}</div>
+                    <div class="sidebar-stat-label">In Triage</div>
+                </div>
+                <div class="sidebar-stat">
+                    <div class="sidebar-stat-value" style="color:var(--green);">{stats["pursuing"]}</div>
+                    <div class="sidebar-stat-label">Pursuing</div>
+                </div>
+                <div class="sidebar-stat">
+                    <div class="sidebar-stat-value" style="color:var(--text-3);font-size:0.9rem;">{last_scout}</div>
+                    <div class="sidebar-stat-label">Last Scout</div>
+                </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
     except Exception:
         st.caption("Connecting to database...")
 
     st.divider()
 
     # ── Navigation ────────────────────────────────────────────────────────────
+    st.markdown('<div class="sidebar-section-label">Navigation</div>', unsafe_allow_html=True)
     # Nav items: (radio_label, icon_name, display_label)
     _NAV = [
         ("Dashboard",       "layout-dashboard", "Dashboard"),
@@ -228,12 +252,14 @@ with st.sidebar:
     st.divider()
 
     # ── Run Scout button ──────────────────────────────────────────────────────
+    st.markdown('<div class="sidebar-section-label">Actions</div>', unsafe_allow_html=True)
     if st.session_state.scout_running:
         st.markdown(
             f"""<div style="display:flex;align-items:center;justify-content:center;gap:8px;
-                            background:#1a2340;border:1px solid #2d3748;border-radius:8px;
-                            padding:10px;color:#718096;font-size:0.88em;margin-bottom:8px;">
-                    {icons.svg('loader', 15, '#718096')} Scout running…
+                            background:var(--bg-elevated);border:1px solid var(--border);
+                            border-radius:8px;padding:10px;color:var(--text-3);
+                            font-size:0.88em;margin-bottom:8px;">
+                    {icons.svg('loader', 15, 'var(--text-3)')} Scout running…
                 </div>""",
             unsafe_allow_html=True,
         )
@@ -281,38 +307,39 @@ with st.sidebar:
         if st.button("Refresh", use_container_width=True, key="refresh_btn"):
             st.rerun(scope="app")
 
-    # ── DB maintenance row ────────────────────────────────────────────────────
-    col_bf, col_dd = st.columns(2)
-    with col_bf:
-        if st.button("Backfill Fields", use_container_width=True, key="backfill_btn",
-                     help="Extract grant_type, geography, eligibility, amount, deadline, rationale on existing grants"):
-            try:
-                r = httpx.post(
-                    f"{RAILWAY_URL}/admin/backfill-fields",
-                    headers={"x-internal-secret": INTERNAL_SECRET},
-                    timeout=10.0,
-                )
-                st.success("Backfill started!") if r.status_code == 200 else st.error(f"Error: {r.status_code}")
-            except Exception as e:
-                st.error(f"Cannot reach backend: {e}")
-    with col_dd:
-        if st.button("Deduplicate", use_container_width=True, key="dedup_btn",
-                     help="Remove duplicate grants from the database"):
-            try:
-                r = httpx.post(
-                    f"{RAILWAY_URL}/admin/deduplicate",
-                    headers={"x-internal-secret": INTERNAL_SECRET},
-                    timeout=10.0,
-                )
-                st.success("Dedup started!") if r.status_code == 200 else st.error(f"Error: {r.status_code}")
-            except Exception as e:
-                st.error(f"Cannot reach backend: {e}")
+    # ── DB maintenance (admin expander) ───────────────────────────────────────
+    with st.expander("Admin / Maintenance"):
+        col_bf, col_dd = st.columns(2)
+        with col_bf:
+            if st.button("Backfill Fields", use_container_width=True, key="backfill_btn",
+                         help="Extract grant_type, geography, eligibility, amount, deadline, rationale on existing grants"):
+                try:
+                    r = httpx.post(
+                        f"{RAILWAY_URL}/admin/backfill-fields",
+                        headers={"x-internal-secret": INTERNAL_SECRET},
+                        timeout=10.0,
+                    )
+                    st.success("Backfill started!") if r.status_code == 200 else st.error(f"Error: {r.status_code}")
+                except Exception as e:
+                    st.error(f"Cannot reach backend: {e}")
+        with col_dd:
+            if st.button("Deduplicate", use_container_width=True, key="dedup_btn",
+                         help="Remove duplicate grants from the database"):
+                try:
+                    r = httpx.post(
+                        f"{RAILWAY_URL}/admin/deduplicate",
+                        headers={"x-internal-secret": INTERNAL_SECRET},
+                        timeout=10.0,
+                    )
+                    st.success("Dedup started!") if r.status_code == 200 else st.error(f"Error: {r.status_code}")
+                except Exception as e:
+                    st.error(f"Cannot reach backend: {e}")
 
     st.divider()
     render_toggle()
     st.markdown(
-        f"<div style='color:#4a5568;font-size:0.72em;text-align:center;margin-top:4px;'>"
-        f"AltCarbon Grants Intelligence v2.0</div>",
+        "<div style='color:var(--text-4);font-size:0.72em;text-align:center;margin-top:4px;'>"
+        "AltCarbon Grants Intelligence v2.0</div>",
         unsafe_allow_html=True,
     )
 

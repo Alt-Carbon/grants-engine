@@ -1,0 +1,8 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "app/Dockerfile"
+
+[deploy]
+healthcheckPath = "/_stcore/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"

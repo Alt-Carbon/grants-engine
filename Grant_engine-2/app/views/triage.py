@@ -233,12 +233,15 @@ def _render_cards(grants: list):
                 )
 
             with score_col:
+                ring_cls = (
+                    "score-ring-pursue" if score >= 6.5
+                    else "score-ring-watch" if score >= 5.0
+                    else "score-ring-low"
+                )
                 st.markdown(
-                    f"<div style='text-align:center;'>"
-                    f"<div style='font-size:0.68em;color:var(--text-3);font-weight:700;"
-                    f"text-transform:uppercase;letter-spacing:0.07em;margin-bottom:4px;'>Score</div>"
-                    f"{icons.score_badge(score)}"
-                    f"<div style='font-size:0.68em;color:var(--text-4);margin-top:2px;'>/ 10</div>"
+                    f"<div style='display:flex;flex-direction:column;align-items:center;'>"
+                    f"<div class='score-ring {ring_cls}'>{score:.1f}</div>"
+                    f"<div style='font-size:0.68em;color:var(--text-4);margin-top:4px;'>/ 10</div>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
@@ -373,6 +376,7 @@ def _render_cards(grants: list):
                     )
 
             # ── Decision buttons ───────────────────────────────────────────────
+            st.markdown('<div class="decision-section-label">Your decision</div>', unsafe_allow_html=True)
             dec1, dec2, dec3, rep_col, notes_col = st.columns([1, 1, 1, 1, 2.5])
             notes_key = f"notes_{grant_id}"
             notes = st.session_state.get(notes_key, "")

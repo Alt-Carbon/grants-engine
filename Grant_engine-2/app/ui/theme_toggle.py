@@ -93,8 +93,8 @@ _TOGGLE_HTML = """
 
   function getParentTheme() {
     try {
-      return window.parent.document.documentElement.getAttribute('data-theme') || 'dark';
-    } catch(e) { return localStorage.getItem('alt_theme') || 'dark'; }
+      return window.parent.document.documentElement.getAttribute('data-theme') || 'light';
+    } catch(e) { return localStorage.getItem('alt_theme') || 'light'; }
   }
 
   function applyTheme(theme) {
@@ -112,9 +112,9 @@ _TOGGLE_HTML = """
     applyTheme(current === 'dark' ? 'light' : 'dark');
   }
 
-  // On load: restore saved theme
+  // On load: restore saved theme, default to light
   (function init() {
-    const saved = localStorage.getItem('alt_theme') || getParentTheme();
+    const saved = localStorage.getItem('alt_theme') || 'light';
     applyTheme(saved);
   })();
 </script>
@@ -132,12 +132,10 @@ def render_toggle():
 _INIT_HTML = """
 <script>
   (function() {
-    const saved = localStorage.getItem('alt_theme');
-    if (saved) {
-      try {
-        window.parent.document.documentElement.setAttribute('data-theme', saved);
-      } catch(e) {}
-    }
+    const saved = localStorage.getItem('alt_theme') || 'light';
+    try {
+      window.parent.document.documentElement.setAttribute('data-theme', saved);
+    } catch(e) {}
   })();
 </script>
 """

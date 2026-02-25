@@ -29,6 +29,18 @@ from app.ui.filters import (
 
 PURSUE_THRESHOLD = 6.5
 
+
+def _metric_card(icon_name: str, icon_color: str, label: str, value: str) -> str:
+    """Returns an HTML block for a premium metric card using .alt-metric CSS classes."""
+    svg = icons.svg(icon_name, 22, icon_color)
+    return (
+        f"<div class='alt-metric'>"
+        f"<div class='alt-metric-icon' style='background:{icon_color}20;'>{svg}</div>"
+        f"<div class='alt-metric-label'>{label}</div>"
+        f"<div class='alt-metric-value' style='color:{icon_color};'>{value}</div>"
+        f"</div>"
+    )
+
 _ACTIVITY_ICONS: dict[str, str] = {
     "scout":           "search",
     "analyst":         "activity",
@@ -432,13 +444,17 @@ def render():
         return
 
     # ── Top metrics ───────────────────────────────────────────────────────────
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Grants Discovered", stats["total_discovered"])
-    c2.metric("In Triage", stats["in_triage"])
-    c3.metric("Pursuing", stats["pursuing"])
-    c4.metric("Drafts Complete", stats["draft_complete"])
     capital = stats["capital_targeted"]
-    c5.metric("Capital Targeted", f"${capital:,.0f}" if capital else "–")
+    st.markdown(
+        "<div style='display:flex;gap:12px;flex-wrap:wrap;margin-bottom:4px;'>"
+        + _metric_card("search",       "var(--accent)",  "Discovered",      str(stats["total_discovered"]))
+        + _metric_card("inbox",        "var(--orange)",  "In Triage",        str(stats["in_triage"]))
+        + _metric_card("check-circle", "var(--green)",   "Pursuing",         str(stats["pursuing"]))
+        + _metric_card("file-text",    "var(--purple)",  "Drafts Complete",  str(stats["draft_complete"]))
+        + _metric_card("banknote",     "var(--green)",   "Capital Targeted", f"${capital:,.0f}" if capital else "–")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
 
     st.divider()
 
