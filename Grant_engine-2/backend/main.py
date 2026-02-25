@@ -41,9 +41,14 @@ _scout_started_at: Optional[str] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await ensure_indexes()
-    await _seed_default_agent_config()
-    logger.info("AltCarbon Grants Intelligence backend started")
+    # Non-fatal startup: if MongoDB is unreachable (e.g. env var not yet
+    # propagated on Railway), the app still starts and /health responds.
+    try:
+        await ensure_indexes()
+        await _seed_default_agent_config()
+        logger.info("AltCarbon Grants Intelligence backend started")
+    except Exception as exc:
+        logger.error("Startup DB init failed (non-fatal — check MONGODB_URI): %s", exc)
     yield
     logger.info("Backend shutting down")
 
