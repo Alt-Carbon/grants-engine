@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SyncButton } from "./SyncButton";
 import { Database, FileText, Cloud, CheckCircle, AlertTriangle, XCircle } from "lucide-react";
 
-export const revalidate = 60;
+export const dynamic = "force-dynamic";
 
 function StatusChip({ status }: { status: "healthy" | "thin" | "critical" }) {
   const map = {
