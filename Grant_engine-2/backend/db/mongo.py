@@ -14,7 +14,7 @@ def get_client() -> AsyncIOMotorClient:
     global _client
     if _client is None:
         from backend.config.settings import get_settings
-        uri = get_settings().mongodb_uri
+        uri = get_settings().mongodb_uri.strip()
         _client = AsyncIOMotorClient(uri)
     return _client
 
