@@ -102,6 +102,13 @@ class UpdateGrantStatusRequest(BaseModel):
     status: str
 
 
+class ManualGrantRequest(BaseModel):
+    url: str
+    title_override: Optional[str] = ""
+    funder_override: Optional[str] = ""
+    notes: Optional[str] = ""
+
+
 # ── Seed default agent config ──────────────────────────────────────────────────
 
 async def _seed_default_agent_config():
@@ -225,6 +232,88 @@ async def manual_knowledge_sync(
 ):
     background_tasks.add_task(run_knowledge_sync)
     return {"status": "knowledge_sync_started"}
+
+
+# ── Analyst job state ─────────────────────────────────────────────────────────
+_analyst_running: bool = False
+_analyst_started_at: Optional[str] = None
+
+
+@app.get("/status/analyst")
+async def analyst_status():
+    """Current analyst job state + last run info."""
+    from backend.db.mongo import get_db
+    db = get_db()
+    last = await db["audit_logs"].find_one(
+        {"event": "analyst_run_complete"},
+        sort=[("created_at", -1)],
+    )
+    pending = await db["grants_raw"].count_documents({"processed": False})
+    return {
+        "running": _analyst_running,
+        "started_at": _analyst_started_at,
+        "last_run_at": last["created_at"] if last else None,
+        "last_run_scored": last.get("scored_count", 0) if last else 0,
+        "pending_unprocessed": pending,
+    }
+
+
+@app.post("/run/analyst")
+async def manual_analyst(
+    background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
+):
+    """Run the Analyst on all unprocessed grants_raw entries (including manually
+    added ones). Idempotent — already-scored grants are skipped automatically."""
+    global _analyst_running, _analyst_started_at
+    if _analyst_running:
+        return {"status": "analyst_already_running", "started_at": _analyst_started_at}
+
+    _analyst_running = True
+    _analyst_started_at = datetime.now(timezone.utc).isoformat()
+
+    async def _run():
+        global _analyst_running, _analyst_started_at
+        try:
+            from backend.agents.analyst import AnalystAgent
+            from backend.config.settings import get_settings
+            from backend.db.mongo import grants_raw, agent_config, get_db
+
+            s = get_settings()
+            cfg_doc = await agent_config().find_one({"agent": "analyst"}) or {}
+            from backend.agents.analyst import DEFAULT_WEIGHTS
+            weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
+            min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
+
+            # Fetch ALL unprocessed raw grants
+            raw_docs = await grants_raw().find({"processed": False}).to_list(length=2000)
+            logger.info("Analyst run: %d unprocessed grants found", len(raw_docs))
+
+            agent = AnalystAgent(
+                perplexity_api_key=s.perplexity_api_key,
+                weights=weights,
+                min_funding=min_funding,
+            )
+            scored = await agent.run(raw_docs)
+            scored_count = len(scored)
+            logger.info("Analyst run: %d grants scored", scored_count)
+
+            # Write run audit entry so /status/analyst can report last run
+            db = get_db()
+            await db["audit_logs"].insert_one({
+                "event": "analyst_run_complete",
+                "scored_count": scored_count,
+                "input_count": len(raw_docs),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.error("Analyst run failed: %s", e)
+        finally:
+            _analyst_running = False
+            _analyst_started_at = None
+
+    background_tasks.add_task(_run)
+    return {"status": "analyst_job_started", "started_at": _analyst_started_at}
 
 
 # ── Resume endpoints ───────────────────────────────────────────────────────────
@@ -479,6 +568,126 @@ _VALID_STATUSES = {
     "triage", "pursue", "pursuing", "watch", "drafting",
     "draft_complete", "submitted", "won", "passed", "auto_pass", "hold", "reported",
 }
+
+
+@app.post("/grants/manual")
+async def add_manual_grant(
+    body: ManualGrantRequest,
+    _: None = Depends(verify_internal),
+):
+    """Save a manually entered grant URL — fetches content via Jina, detects themes,
+    saves to grants_raw as an unprocessed entry ready for the analyst."""
+    import hashlib
+    import re
+    from urllib.parse import urlparse
+
+    import httpx
+
+    from backend.db.mongo import get_db
+    from backend.config.settings import get_settings
+
+    url = body.url.strip()
+    if not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+
+    url_hash = hashlib.md5(url.lower().encode()).hexdigest()
+    db = get_db()
+    existing = await db["grants_raw"].find_one({"url_hash": url_hash})
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Already in database (added {str(existing.get('scraped_at', 'previously'))[:10]}).",
+        )
+
+    s = get_settings()
+    raw_content = ""
+    jina_url = f"https://r.jina.ai/{url}"
+    headers: dict = {"X-Return-Format": "markdown", "X-With-Links-Summary": "false"}
+    if s.jina_api_key:
+        headers["Authorization"] = f"Bearer {s.jina_api_key}"
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        try:
+            r = await client.get(jina_url, headers=headers)
+            r.raise_for_status()
+            raw_content = r.text.strip()[:80_000]
+        except Exception:
+            try:
+                r2 = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                r2.raise_for_status()
+                raw_content = r2.text[:60_000]
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"Could not fetch URL: {e}")
+
+    if len(raw_content) < 100:
+        raise HTTPException(status_code=422, detail="Page returned too little content. Check the URL.")
+
+    # Theme detection
+    text_lower = (raw_content + " " + (body.title_override or "")).lower()
+    themes: list[str] = []
+    if any(k in text_lower for k in ["climate", "carbon", "net zero", "decarboni", "emission", "cdr", "mrv", "cleantech", "renewable"]):
+        themes.append("climatetech")
+    if any(k in text_lower for k in ["agri", "soil", "farm", "crop", "food", "land use", "regenerative"]):
+        themes.append("agritech")
+    if any(k in text_lower for k in ["artificial intelligence", "machine learning", "ai for", "deep learning", "nlp"]):
+        themes.append("ai_for_sciences")
+    if any(k in text_lower for k in ["earth science", "remote sensing", "satellite", "geology", "geospatial", "subsurface"]):
+        themes.append("applied_earth_sciences")
+    if any(k in text_lower for k in ["social impact", "community", "rural", "livelihood", "inclusive", "women", "development"]):
+        themes.append("social_impact")
+    if not themes:
+        themes = ["climatetech"]
+
+    # Title extraction
+    title = (body.title_override or "").strip()
+    if not title:
+        m = re.search(r"<title[^>]*>([^<]+)</title>", raw_content, re.IGNORECASE)
+        if m:
+            title = m.group(1).strip()[:120]
+        else:
+            for line in raw_content.split("\n"):
+                line = line.lstrip("#").strip()
+                if len(line) > 10:
+                    title = line[:120]
+                    break
+        if not title:
+            title = url
+
+    # Funder extraction
+    funder = (body.funder_override or "").strip()
+    if not funder:
+        try:
+            domain = urlparse(url).netloc.replace("www.", "")
+            funder = domain.split(".")[0].upper()
+        except Exception:
+            funder = "Unknown"
+
+    doc = {
+        "title": title,
+        "url": url,
+        "url_hash": url_hash,
+        "funder": funder,
+        "raw_content": raw_content,
+        "themes_detected": themes,
+        "source": "manual",
+        "deadline": None,
+        "max_funding": None,
+        "currency": "USD",
+        "eligibility_raw": "",
+        "processed": False,
+        "notes": body.notes or "",
+        "scraped_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db["grants_raw"].insert_one(doc)
+
+    return {
+        "success": True,
+        "title": title,
+        "funder": funder,
+        "themes": themes,
+        "chars_fetched": len(raw_content),
+        "message": f"Saved '{title[:70]}' · {len(raw_content):,} chars · themes: {', '.join(themes)}",
+    }
 
 
 @app.post("/update/grant-status")
