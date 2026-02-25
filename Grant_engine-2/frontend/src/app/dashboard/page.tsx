@@ -1,7 +1,8 @@
-import { getDashboardStats, getGrantsActivity } from "@/lib/queries";
+import { getDashboardStats, getGrantsActivity, getPipelineGrants } from "@/lib/queries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WarningsBanner } from "@/components/WarningsBanner";
 import { ActivityChart } from "@/components/ActivityChart";
+import { PipelineTable } from "@/components/PipelineTable";
 import {
   Telescope,
   ListChecks,
@@ -10,12 +11,13 @@ import {
   Clock,
 } from "lucide-react";
 
-export const revalidate = 60; // revalidate every 60s
+export const revalidate = 60;
 
 export default async function DashboardPage() {
-  const [stats, activity] = await Promise.all([
+  const [stats, activity, grants] = await Promise.all([
     getDashboardStats(),
     getGrantsActivity(30),
+    getPipelineGrants(),
   ]);
 
   const kpis = [
@@ -116,6 +118,12 @@ export default async function DashboardPage() {
             <p className="mt-1 text-2xl font-bold text-indigo-600">{stats.draft_complete}</p>
           </CardContent>
         </Card>
+      </div>
+
+      {/* All discovered grants */}
+      <div>
+        <h2 className="mb-3 text-lg font-semibold text-gray-900">All Discovered Grants</h2>
+        <PipelineTable initialGrants={grants} />
       </div>
     </div>
   );
