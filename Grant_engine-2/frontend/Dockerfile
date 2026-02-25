@@ -12,17 +12,8 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Build-time env vars (Railway injects these)
-ARG MONGODB_URI
-ARG FASTAPI_URL
-ARG INTERNAL_SECRET
-ARG CRON_SECRET
-
-ENV MONGODB_URI=$MONGODB_URI
-ENV FASTAPI_URL=$FASTAPI_URL
-ENV INTERNAL_SECRET=$INTERNAL_SECRET
-ENV CRON_SECRET=$CRON_SECRET
-
+# ENV vars are injected at runtime by Railway, not needed at build time
+# (all pages are force-dynamic, no pre-rendering requires DB/API)
 RUN npm run build
 
 # --- Production ---
@@ -33,10 +24,9 @@ ENV NODE_ENV=production
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
-# Copy standalone output + static/public assets
+# Copy standalone output + static assets
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public 2>/dev/null || true
 
 USER nextjs
 EXPOSE 3000
