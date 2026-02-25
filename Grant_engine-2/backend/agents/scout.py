@@ -71,11 +71,23 @@ DEFAULT_TAVILY_QUERIES: List[str] = [
     "applied earth sciences remote sensing grant 2026",
     "geospatial satellite land use grant 2026",
     "subsurface geology technology grant 2026",
-    # India-specific
-    "startup India grant climatetech 2026",
-    "BIRAC ANRF DST grant open call 2026",
+    # India-specific — targeted by exact program names so Tavily returns program pages, not news
+    "BIRAC BIG Biotechnology Ignition Grant open 2026",
+    "BIRAC BIPP Biotechnology Industry Partnership Programme 2026",
+    "BIRAC SBIRI Small Business Innovation Research Initiative open call 2026",
+    "BIRAC ACE Accelerating Circular Economy startup grant 2026",
+    "ANRF DPIIT startup grant call for proposals 2026",
+    "ANRF Seed Grant new investigator 2026",
+    "DST NIDHI PRAYAS startup grant application 2026",
+    "DST SEED TIDE Technology Incubation grant 2026",
+    "DST SERB startup research grant 2026 apply",
+    "DST Climate Change Programme grant India open call 2026",
+    "DBT Agribioinformatics soil carbon research grant 2026",
+    "AIM Atal Innovation Mission startup grant India 2026",
+    "MeitY startup tech grant India 2026",
+    "TDB Technology Development Board India grant apply 2026",
+    "Startup India SISFS seed fund startup grant 2026 apply",
     "India deep tech climate startup grant 2026",
-    "SISFS startup India seed fund 2026",
     # India state government grants
     "Karnataka KSCST KBITS startup grant open call 2026",
     "Maharashtra MSINS startup innovation grant 2026",
@@ -84,6 +96,13 @@ DEFAULT_TAVILY_QUERIES: List[str] = [
     "KSUM Kerala startup mission grant 2026",
     "iStart Rajasthan Gujarat i-Create grant 2026",
     "India state government startup grant climatetech agritech 2026",
+    # Indian philanthropic & impact orgs
+    "Tata Trusts climate environment grant India open call 2026",
+    "Rohini Nilekani Philanthropies grant open application 2026",
+    "Azim Premji Foundation environment climate grant India 2026",
+    "Social Alpha innovation grant India climatetech apply 2026",
+    "Villgro innovation fellowship grant India agritech 2026",
+    "India Climate Collaborative grant open call 2026",
     # Social Impact
     "social impact climate startup funding 2026",
     "inclusive climate solutions grant 2026",
@@ -206,10 +225,20 @@ DEFAULT_EXA_QUERIES: List[str] = [
     "EU Horizon Europe EIC Accelerator climate deep tech grant",
     "ARPA-E DOE energy innovation grant program open calls",
     "UKRI Innovate UK sustainability and net zero funding competition",
-    # India
-    "BIRAC DBT biotechnology grant agritech climate India",
+    # India — specific program searches to surface actual program pages, not news
+    "BIRAC BIG Biotechnology Ignition Grant open call for proposals",
+    "BIRAC SBIRI Small Business Innovation Research Initiative grant application",
+    "ANRF India open grant call for startups and innovators",
+    "DST NIDHI PRAYAS TIDE startup grant application open India",
+    "DBT Department Biotechnology climate agritech grant India apply",
+    "DST SERB Science Engineering Research Board startup grant",
+    "AIM Atal Innovation Mission grant open call India startup",
+    "TDB Technology Development Board India startup grant apply",
     "India startup grant for climate technology social impact",
+    "Social Alpha Villgro India climate agritech startup grant open call",
     "Tata Trusts Rohini Nilekani grant India climate livelihoods",
+    "India Climate Collaborative grant application open call",
+    "CSRBOX India CSR grant for climate environment NGO startup",
     # Australia & Pacific
     "ARENA Australia renewable energy grant startup open call",
     "Australian clean energy climate startup grant funding program",
@@ -255,7 +284,7 @@ DEFAULT_PERPLEXITY_QUERIES: List[str] = [
     "Which foundations or government programs fund climate startups in India or globally right now?",
     "World Bank ADB IFC AIIB climate finance grant open calls 2026",
     "Bezos Earth Fund Grantham Foundation ClimateWorks open grant applications 2026",
-    "BIRAC ANRF DST DBT India startup grant open applications 2026",
+    "Which BIRAC ANRF DST DBT AIM India government programs have open grant calls for startups in 2026? List with URLs",
     "EU Horizon EIC UKRI climate deep tech grant open calls 2026",
     "XPRIZE Google.org Microsoft climate innovation grant competition 2026",
     # New global coverage
@@ -361,17 +390,32 @@ DIRECT_SOURCE_URLS: Dict[str, List[Dict[str, str]]] = {
         {"funder": "DOE ARPA-E", "url": "https://arpa-e.energy.gov/technologies/programs"},
         {"funder": "USAID", "url": "https://www.usaid.gov/work-usaid/find-a-funding-opportunity"},
         {"funder": "UKRI Innovate UK", "url": "https://www.ukri.org/opportunity/"},
-        # BIRAC: use the CFP hub listing page (not homepage) so sub-grant expansion picks up all calls
+        # BIRAC — CFP hub + known major programs (plain HTTP used, bypasses Jina 402)
         {"funder": "BIRAC", "url": "https://birac.nic.in/cfp.php"},
-        # DST: use the dedicated call-for-proposals listing page
+        {"funder": "BIRAC BIG", "url": "https://birac.nic.in/webcontent/1665_BIRAC_BIG_Scheme.pdf"},
+        {"funder": "BIRAC BIPP", "url": "https://birac.nic.in/bipp.php"},
+        {"funder": "BIRAC SBIRI", "url": "https://birac.nic.in/sbiri.php"},
+        # DST — hub + key programs
         {"funder": "DST India CFP", "url": "https://dst.gov.in/callforproposals"},
-        # ANRF: online portal with all active calls
+        {"funder": "DST NIDHI", "url": "https://www.dst.gov.in/national-initiative-developing-and-harnessing-innovations-nidhi"},
+        {"funder": "DST SERB SUPRA", "url": "https://www.serb.gov.in/supra.php"},
+        {"funder": "DST Climate Change Programme", "url": "https://dst.gov.in/scientific-programmes/climate-change-programme"},
+        # ANRF — online portal with all active calls
         {"funder": "ANRF India", "url": "https://anrfonline.in/ANRF/HomePage"},
+        {"funder": "ANRF Current CFP", "url": "https://anrfonline.in/ANRF/CurrentCFP"},
+        # Startup India / AIM / MeitY
         {"funder": "Startup India SISFS", "url": "https://www.startupindia.gov.in/content/sih/en/government-schemes.html"},
         {"funder": "AIM ANIC", "url": "https://aim.gov.in/"},
         {"funder": "MeitY Startup Hub", "url": "https://msh.gov.in/"},
         {"funder": "TDB India", "url": "https://www.tdb.gov.in/"},
         {"funder": "NABARD", "url": "https://www.nabard.org/"},
+        # Indian CSR and impact funders
+        {"funder": "CSRBOX India Grants", "url": "https://csrbox.org/India-CSR-Grants_India-grant-funding/"},
+        {"funder": "IndiaGrants", "url": "https://indiagrants.org/"},
+        {"funder": "Social Alpha Grants", "url": "https://www.socialalpha.org/"},
+        {"funder": "Villgro India", "url": "https://villgro.org/"},
+        {"funder": "India Climate Collaborative", "url": "https://indiaclimate.org/"},
+        # International
         {"funder": "Mitigation Action Facility", "url": "https://mitigation-action.org/call-for-projects-2026/"},
         {"funder": "ESA Kick-Start", "url": "https://business.esa.int/funding/open-competitive-calls"},
         {"funder": "NASA ROSES", "url": "https://science.nasa.gov/researchers/solicitations/roses-2025/"},
@@ -525,13 +569,12 @@ DIRECT_SOURCE_URLS: Dict[str, List[Dict[str, str]]] = {
         # Haryana
         {"funder": "Startup Haryana", "url": "https://startupharyana.gov.in/"},
         # Delhi
-        {"funder": "Startup Delhi", "url": "https://delhi.gov.in/page/startup-delhi"},
+        {"funder": "Startup Delhi", "url": "https://dipp.gov.in/start-up-india"},
         # Uttar Pradesh
         {"funder": "Startup UP", "url": "https://invest.up.gov.in/startup/"},
         # Punjab
         {"funder": "Invest Punjab Startup", "url": "https://www.investpunjab.gov.in/"},
-        # Pan-India NABARD / SFAC for agritech specifically
-        {"funder": "SFAC India Agritech", "url": "https://www.sfacindia.com/"},
+        # Pan-India NABARD for agritech specifically
         {"funder": "NABARD Agri Grant", "url": "https://www.nabard.org/content1.aspx?id=591&catid=23&mid=530"},
     ],
 }
@@ -605,16 +648,35 @@ _JUNK_TITLE_PATTERNS = (
     "press release", "news:", "newsletter", "blog post", "annual report",
     "impact report", "conference recap", "webinar", "event recap",
     "linkedin post", "twitter thread",
+    # Listicles / market reports — these mention grants but are not grant pages
+    "top companies", "top startups", "to watch", "best companies",
+    "best startups", "companies to watch", "startups to watch",
+    "investment landscape", "market report", "market overview",
+    "industry report", "state of the market", "market analysis",
+    "state of cdr", "state of carbon", "financing report",
+    "who should apply", "how to apply guide", "grant guide",
+    "investor guide", "landscape report",
 )
 _JUNK_URL_PATTERNS = (
     "/news/", "/blog/", "/press-release/", "/press_release/",
     "/events/", "/media/", "/webinar/", "/articles/",
     "/post/", "/posts/", "/status/",
+    # Research/report pages — usually about grants, not actual grant pages
+    "/report/", "/reports/", "/research/", "/publication/", "/publications/",
+    "/insights/", "/resources/resource/", "/thought-leadership/",
 )
 _GRANT_KEYWORDS = (
     "apply", "application", "grant", "funding", "fund", "award", "prize",
     "call for", "open call", "deadline", "eligib", "proposal", "submit",
     "accelerator", "fellowship", "competition", "rfp", "rfq",
+)
+# At least one of these "action" keywords must appear — articles that merely
+# mention grants rarely use these verbs in an instructional context.
+_GRANT_ACTION_KEYWORDS = (
+    "apply now", "how to apply", "application deadline", "submit your",
+    "applications open", "open for applications", "call for proposals",
+    "eligibility criteria", "who can apply", "submit a proposal",
+    "apply by", "applications close", "deadline to apply",
 )
 
 # Perplexity URL cleaner: strip common trailing punctuation
@@ -633,11 +695,18 @@ _HUB_SUBGRANT_PATTERNS: Dict[str, List[re.Pattern]] = {
     "dst.gov.in": [
         re.compile(r"/callforproposals/[a-z0-9][a-z0-9\-_/]+"),
     ],
-    # ANRF online portal — match any sub-page except the generic entry points.
-    # Previous pattern was too strict (required "call|grant|program|scheme" in path).
-    # ANRF uses paths like /ANRF/CallForProposal, /ANRF/CurrentCFP, /ANRF/ListScheme etc.
+    # ANRF online portal — match program/scheme/call pages, exclude non-grant paths.
+    # ANRF uses paths like /ANRF/CallForProposal, /ANRF/CurrentCFP, /ANRF/ListScheme.
+    # Excluded: AbstractFilePath (file server), index, PDF viewer, login, Women_excellence
+    # (fellowship not relevant), Tetra/Sire (internal codenames with no public content).
     "anrfonline.in": [
-        re.compile(r"/ANRF/(?!HomePage\b)(?!AnrfPDF\b)(?!index\b)[A-Za-z][A-Za-z0-9_\-/]{3,}", re.I),
+        re.compile(
+            r"/ANRF/(?!"
+            r"HomePage\b|AnrfPDF\b|index\b|Abstract|Login|Register|"
+            r"Women_\w+|Tetra\b|Sire\b|Contact\b|About\b|Faq\b|Circulars?\b"
+            r")[A-Za-z][A-Za-z0-9_\-/]{4,}",
+            re.I
+        ),
     ],
     # Startup India individual scheme pages
     "startupindia.gov.in": [
@@ -738,8 +807,21 @@ def _is_quality_grant(raw_title: str, url: str, content: str) -> Optional[str]:
         return f"Likely news/article: '{raw_title[:60]}'"
     if any(p in url_lower for p in _JUNK_URL_PATTERNS):
         return "Non-grant URL pattern"
+    # Listicle pattern: "Top N companies/startups/tools/solutions" → not a grant page
+    if re.search(r"\btop\s+\d+\b", title_lower) and any(
+        w in title_lower for w in ("compan", "startup", "tool", "platform", "solution")
+    ):
+        return f"Listicle (not a grant page): '{raw_title[:60]}'"
     if not any(k in content_lower for k in _GRANT_KEYWORDS):
         return "No grant-related keywords in content"
+    # Must have at least one action-oriented grant keyword — articles that merely
+    # discuss grants typically lack phrases like "apply now", "eligibility criteria" etc.
+    if not any(k in content_lower for k in _GRANT_ACTION_KEYWORDS):
+        # Allow through if title clearly signals it's a grant/program page
+        _TITLE_GRANT_SIGNALS = ("grant", "fund", "award", "prize", "fellowship",
+                                "call for", "open call", "rfp", "accelerator")
+        if not any(k in title_lower for k in _TITLE_GRANT_SIGNALS):
+            return "No action keywords — likely an article about grants, not a grant page"
     return None
 
 
@@ -778,6 +860,41 @@ def _detect_themes(text: str) -> List[str]:
 
 
 # ── HTTP fetch helpers ─────────────────────────────────────────────────────────
+
+# Domains where Jina always returns 402 (Indian govt portals, some protected pages).
+# For these we go straight to plain HTTP — skipping 3×4s retries against Jina.
+_SKIP_JINA_DOMAINS = frozenset({
+    # Indian central government
+    "birac.nic.in", "dst.gov.in", "anrfonline.in", "startupindia.gov.in",
+    "aim.gov.in", "msh.gov.in", "tdb.gov.in", "nabard.org",
+    "sfacindia.com", "dbt.gov.in",
+    # Indian state government startup / science programs
+    "kscst.org.in", "kbits.karnataka.gov.in", "startupkarnataka.gov.in",
+    "kiadb.in", "msins.in", "mced.in", "t-hub.co", "wehub.telangana.gov.in",
+    "tsic.telangana.gov.in", "startuptn.in", "edii.tn.gov.in",
+    "startupmission.kerala.gov.in", "ksidc.org", "icreate.org.in",
+    "gusec.edu.in", "istart.rajasthan.gov.in", "apnrt.in",
+    "apinnovationsociety.com", "mpstartup.in", "startupharyana.gov.in",
+    "invest.up.gov.in", "investpunjab.gov.in",
+})
+
+# Full browser headers for plain-HTTP fallback — Indian government portals often
+# block requests without Accept-Language or with an obviously bot-like User-Agent.
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 # Jina concurrency: keep to 3 with a small delay between requests to stay
 # within the free-tier limit of 10 RPM (6s per request at concurrency 1 is
@@ -823,9 +940,10 @@ async def _fetch_with_jina(url: str, api_key: str = "") -> str:
 
 
 async def _fetch_plain(url: str) -> str:
+    """Plain HTTP GET with full browser headers — required for Indian govt portals."""
     async def _do_fetch() -> str:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; AltCarbonBot/1.0)"})
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+            r = await client.get(url, headers=_BROWSER_HEADERS)
             r.raise_for_status()
             return r.text[:60_000]
 
@@ -833,7 +951,27 @@ async def _fetch_plain(url: str) -> str:
     return result or ""
 
 
+def _should_skip_jina(url: str) -> bool:
+    """Return True for domains that always return 402/403 from Jina — go straight to plain HTTP."""
+    try:
+        domain = urlparse(url).netloc.replace("www.", "").lower()
+        # Exact-domain match
+        if domain in _SKIP_JINA_DOMAINS:
+            return True
+        # All Indian government TLD subdomains (.gov.in and .nic.in)
+        if domain.endswith(".gov.in") or domain.endswith(".nic.in"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def _fetch_content(url: str, jina_key: str = "") -> str:
+    # Skip Jina entirely for domains known to block it — saves 3×4s retry time
+    if _should_skip_jina(url):
+        logger.debug("Skipping Jina for known blocked domain: %s", url[:60])
+        return await _fetch_plain(url)
+
     content = await _fetch_with_jina(url, jina_key)
     if len(content) > 300:
         return content
