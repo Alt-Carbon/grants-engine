@@ -204,6 +204,35 @@ DEFAULT_TAVILY_QUERIES: List[str] = [
     "Mission Innovation challenge climate startup prize 2026",
     "carbon removal prize competition startup applications 2026",
     "climate innovation prize grant challenge application open 2026",
+    # CDR-specific funders from manually curated tracker sheets
+    "Cascade Climate CRN Enhanced Rock Weathering host site EOI 2026",
+    "Carbon to Sea Initiative ocean alkalinity enhancement OAE RFP 2026",
+    "CIEIF Climate Intervention Environmental Impact Fund grant 2026",
+    "ClimeFi Adyen carbon removal RFP dual track 2026",
+    "Milkywire Climate Transformation Fund CDR grant open 2026",
+    # Space & Earth Observation — programs in Excel tracker
+    "ESA InCubed earth observation commercial startup programme open 2026",
+    "CASSINI Challenges EUSPA EU space programme startup application 2026",
+    "ISRO RESPOND earth observation research grant India 2026",
+    "NASA ROSES research opportunities space earth science 2026",
+    # India specific programs found in Excel tracker
+    "IndiaAI Innovation Challenge 2026 MeitY apply",
+    "TDB Technology Development Board India startup grant 2026 apply",
+    "NISE MNRE solar energy innovative projects PMSGY grant 2026",
+    "BIRAC Green Hydrogen Mission startup grant 2026 apply",
+    "DST India France ANR bilateral research grant 2026",
+    "ISRO Venus archival data announcement of opportunity 2026",
+    "NRSC ISRO respond proposal earth observation India 2026",
+    # Global climate finance + food
+    "Global Innovation Lab Climate Finance CPI 2026 call for ideas",
+    "WFP Innovation Accelerator challenge food climate 2026",
+    "ADB Climate Innovation Development Fund CIDF grant 2026",
+    "Greentown Go Make accelerator 2026 RFA Shell Technip application",
+    "LILAS4SOILS Horizon Europe soil carbon MRV farmer open call 2026",
+    "Innovation Fund Denmark agriculture data horizon europe 2026",
+    "Natural Resources Canada NRCan carbon capture FEED grant 2026",
+    "UNDP young climate leaders direct funding Italy 2026",
+    "Mitigation Action Facility call for projects 2026 climate",
 ]
 
 # ── Exa semantic queries ───────────────────────────────────────────────────────
@@ -273,6 +302,30 @@ DEFAULT_EXA_QUERIES: List[str] = [
     "blue carbon ocean climate nature-based solutions grant",
     "climate adaptation resilience developing countries grant fund",
     "carbon markets MRV integrity monitoring startup global grant",
+    # CDR-specific funders from Excel tracker — semantic search for these specific programs
+    "Cascade Climate CRN enhanced rock weathering host site expression of interest",
+    "Carbon to Sea ocean alkalinity enhancement OAE startup research grant",
+    "CIEIF climate intervention environmental impact fund open grant application",
+    "ClimeFi carbon dioxide removal RFP dual-track application 2026",
+    "Milkywire CDR Climate Transformation Fund grant open call",
+    # Space and Earth Observation — Excel tracker entries
+    "ESA InCubed commercial earth observation startup funding programme",
+    "CASSINI Challenges European space programme SME startup application",
+    "ISRO RESPOND sponsored research earth observation grant India startup",
+    "NASA ROSES research grants earth science remote sensing 2025 2026",
+    # India programs from tracker
+    "IndiaAI Innovation Challenge MeitY artificial intelligence climate agriculture",
+    "TDB India startup grant call for proposals 2026 technology development board",
+    "NISE MNRE solar energy innovative projects grant India",
+    "BIRAC Green Hydrogen Mission biotech startup grant India 2026",
+    # Global climate finance
+    "Global Innovation Lab Climate Finance CPI call for ideas private capital",
+    "WFP Innovation Accelerator food system climate challenge grant",
+    "ADB Climate Innovation Development Fund CIDF open call",
+    "Greentown Go Make cleantech accelerator Shell Technip Energies 2026",
+    "LILAS4SOILS soil organic carbon MRV farmer test provider Horizon Europe",
+    "Natural Resources Canada carbon capture storage FEED engineering grant",
+    "UNDP young climate leaders innovative finance direct funding opportunity",
 ]
 
 # ── Perplexity Sonar queries ────────────────────────────────────────────────────
@@ -298,6 +351,13 @@ DEFAULT_PERPLEXITY_QUERIES: List[str] = [
     "Innovate UK Carbon Trust UK climate net zero grant competition open 2026",
     "African Development Bank African Climate Foundation climate grant open 2026",
     "Singapore Temasek climate cleantech startup grant open calls 2026",
+    # New from Excel tracker
+    "What CDR-specific programs are open in 2026? Cascade Climate CRN, Carbon to Sea, CIEIF, ClimeFi, Milkywire CTF",
+    "ESA InCubed CASSINI Challenges space earth observation startup grants open in 2026",
+    "ISRO RESPOND NRSC NASA ROSES earth observation research grant open calls 2026",
+    "IndiaAI Innovation Challenge TDB NISE MNRE BIRAC Green Hydrogen open calls India 2026",
+    "Greentown Go Make WFP Innovation Accelerator ADB CIDF Global Innovation Lab climate grant 2026",
+    "LILAS4SOILS MNRE EU Horizon Europe soil carbon MRV open calls 2026",
 ]
 
 # ── Direct source URLs to crawl ────────────────────────────────────────────────
@@ -383,6 +443,12 @@ DIRECT_SOURCE_URLS: Dict[str, List[Dict[str, str]]] = {
         {"funder": "Third Derivative D3", "url": "https://third-derivative.org/"},
         {"funder": "Builders Initiative", "url": "https://www.buildersinitiative.org/"},
         {"funder": "Trellis Climate", "url": "https://www.trellisclimate.org/"},
+        # CDR-specific funders discovered from manually curated grant sheets
+        {"funder": "Cascade Climate CRN", "url": "https://cascadeclimate.org/blog/crn-eoi"},
+        {"funder": "Carbon to Sea Initiative", "url": "https://www.carbontosea.org/"},
+        {"funder": "CIEIF CDR Fund", "url": "https://cieif.org/"},
+        {"funder": "ClimeFi CDR RFP", "url": "https://climefi.com/blog-posts/climefi-and-adyen-launch-new-dual-track-rfp-for-carbon-removal"},
+        {"funder": "Milkywire Climate Transformation Fund", "url": "https://milkywire.com/"},
     ],
     "Government Programs": [
         {"funder": "EU EIC Accelerator", "url": "https://eic.ec.europa.eu/eic-funding-opportunities_en"},
@@ -577,6 +643,45 @@ DIRECT_SOURCE_URLS: Dict[str, List[Dict[str, str]]] = {
         # Pan-India NABARD for agritech specifically
         {"funder": "NABARD Agri Grant", "url": "https://www.nabard.org/content1.aspx?id=591&catid=23&mid=530"},
     ],
+    "Space & Earth Observation": [
+        # ESA programs — earth observation + InCubed
+        {"funder": "ESA InCubed", "url": "https://incubed.esa.int/welcome-to-the-incubed-programme/"},
+        {"funder": "ESA Kick-Start Activity", "url": "https://business.esa.int/funding/open-competitive-calls"},
+        # CASSINI — EU space programme for startups & SMEs
+        {"funder": "CASSINI Challenges EUSPA", "url": "https://www.euspa.europa.eu/cassinichallenges"},
+        # Indian space programs
+        {"funder": "ISRO RESPOND", "url": "https://www.isro.gov.in/ISRO_HINDI/RESPOND_BASKET_2025.html"},
+        {"funder": "ISRO Venus Archival Data AO", "url": "https://www.isro.gov.in/AO_utilizing_archival_data_Planet_Venus.html"},
+        {"funder": "NRSC ISRO Proposal", "url": "https://www.nrsc.gov.in/nrscnew/Respond_proposal_submission.php"},
+        {"funder": "NASA ROSES", "url": "https://science.nasa.gov/researchers/solicitations/roses-2025/"},
+    ],
+    "Energy & Climate Research": [
+        # MNRE/NISE — solar energy & new renewable
+        {"funder": "MNRE Research Portal", "url": "https://research.mnre.gov.in/"},
+        {"funder": "NISE MNRE PMSGY", "url": "https://www.nise.res.in/"},
+        # TDB — specific 2026 startup call
+        {"funder": "TDB Startup Call 2026", "url": "https://tdb.gov.in/call-proposal-empowering-tech-startups"},
+        # IndiaAI — new MeitY initiative
+        {"funder": "IndiaAI Innovation Challenge", "url": "https://indiaai.gov.in/"},
+        # ADB Climate Innovation Development Fund
+        {"funder": "ADB CIDF", "url": "https://www.adb.org/what-we-do/funds/climate-innovation-development-fund"},
+        # Natural Resources Canada — carbon capture
+        {"funder": "NRCan Carbon Capture FEED", "url": "https://natural-resources.canada.ca/funding-partnerships/energy-innovation-program/carbon-capture-front-end-engineering-design"},
+        # WFP Innovation Accelerator
+        {"funder": "WFP Innovation Accelerator", "url": "https://innovation.wfp.org/wfp-innovation-challenge"},
+        # EU soil / agri programs
+        {"funder": "LILAS4SOILS Open Call", "url": "https://www.lilas4soils.eu/"},
+        # Greentown Go Make accelerator
+        {"funder": "Greentown Go Make", "url": "https://greentownlabs.com/go-make-2026-rfa/"},
+        # Global Innovation Lab for Climate Finance (CPI)
+        {"funder": "Global Innovation Lab for Climate Finance", "url": "https://www.climatepolicyinitiative.org/lab-call-for-ideas/"},
+        # UNDP Youth Climate Leaders
+        {"funder": "UNDP Young Climate Leaders", "url": "https://climatepromise.undp.org/"},
+        # Innovation Fund Denmark agriculture
+        {"funder": "Innovation Fund Denmark AgData", "url": "https://innovationsfonden.dk/en/p/international-collaborations/"},
+        # Mitigation Action Facility (already in Govt Programs, keep here too for visibility)
+        {"funder": "Mitigation Action Facility", "url": "https://mitigation-action.org/call-for-projects-2026/"},
+    ],
 }
 
 ALL_DIRECT_SOURCES: List[Dict[str, str]] = [
@@ -697,13 +802,16 @@ _HUB_SUBGRANT_PATTERNS: Dict[str, List[re.Pattern]] = {
     ],
     # ANRF online portal — match program/scheme/call pages, exclude non-grant paths.
     # ANRF uses paths like /ANRF/CallForProposal, /ANRF/CurrentCFP, /ANRF/ListScheme.
-    # Excluded: AbstractFilePath (file server), index, PDF viewer, login, Women_excellence
-    # (fellowship not relevant), Tetra/Sire (internal codenames with no public content).
+    # Excluded prefixes: resources/ (CSS/JS assets), internal pages, irrelevant fellowships.
+    # NOTE: keep relevant fellowships like ECRG, JC Bose, VAJRA, SRG — they are grant programs.
     "anrfonline.in": [
         re.compile(
             r"/ANRF/(?!"
-            r"HomePage\b|AnrfPDF\b|index\b|Abstract|Login|Register|"
-            r"Women_\w+|Tetra\b|Sire\b|Contact\b|About\b|Faq\b|Circulars?\b"
+            r"resources/|HomePage\b|AnrfPDF\b|index\b|Abstract|Login|Register|"
+            r"Women_\w+|Tetra\b|Sire\b|Contact\b|About\b|Faq\b|Circulars?\b|"
+            r"Covid_19\b|seminar_symposia\b|nationalScienceChair\b|IMPRINT2C\b|"
+            r"maha_Instructions\b|serbPowerInstructions\b|Weaker_section\b|"
+            r"matrics_new\b|PMProfessorship\b"
             r")[A-Za-z][A-Za-z0-9_\-/]{4,}",
             re.I
         ),
@@ -867,7 +975,9 @@ _SKIP_JINA_DOMAINS = frozenset({
     # Indian central government
     "birac.nic.in", "dst.gov.in", "anrfonline.in", "startupindia.gov.in",
     "aim.gov.in", "msh.gov.in", "tdb.gov.in", "nabard.org",
-    "sfacindia.com", "dbt.gov.in",
+    "sfacindia.com", "dbt.gov.in", "isro.gov.in", "nrsc.gov.in",
+    "research.mnre.gov.in", "nise.res.in", "indiaai.gov.in", "aikosh.indiaai.gov.in",
+    "onlinedst.gov.in",
     # Indian state government startup / science programs
     "kscst.org.in", "kbits.karnataka.gov.in", "startupkarnataka.gov.in",
     "kiadb.in", "msins.in", "mced.in", "t-hub.co", "wehub.telangana.gov.in",
