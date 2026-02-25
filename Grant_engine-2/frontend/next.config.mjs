@@ -1,8 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  experimental: {
-    serverComponentsExternalPackages: ["mongodb"],
-  },
+  output: "standalone",
+  serverExternalPackages: ["mongodb"],
 };
 
 export default nextConfig;
