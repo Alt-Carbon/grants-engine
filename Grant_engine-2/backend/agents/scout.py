@@ -80,6 +80,14 @@ DEFAULT_TAVILY_QUERIES: List[str] = [
     "social impact climate startup funding 2026",
     "inclusive climate solutions grant 2026",
     "rural livelihoods climate resilience grant 2026",
+    # India state government grants
+    "Karnataka KSCST KBITS startup grant open call 2026",
+    "Maharashtra MSINS startup innovation grant 2026",
+    "Telangana T-Hub WE Hub grant program 2026",
+    "StartupTN Tamil Nadu climatetech agritech grant 2026",
+    "KSUM Kerala startup mission grant 2026",
+    "iStart Rajasthan Gujarat i-Create grant 2026",
+    "India state government startup grant climatetech agritech 2026",
     # DFIs & Multilateral
     "World Bank IFC grant facility climate startups 2026",
     "ADB AIIB climate finance grant 2026",
@@ -182,22 +190,39 @@ DIRECT_SOURCE_URLS: Dict[str, List[Dict[str, str]]] = {
         {"funder": "DOE ARPA-E", "url": "https://arpa-e.energy.gov/technologies/programs"},
         {"funder": "USAID", "url": "https://www.usaid.gov/work-usaid/find-a-funding-opportunity"},
         {"funder": "UKRI Innovate UK", "url": "https://www.ukri.org/opportunity/"},
-        {"funder": "DST India", "url": "https://dst.gov.in/"},
-        {"funder": "ANRF India", "url": "https://anrf.gov.in/"},
-        {"funder": "BIRAC", "url": "https://birac.nic.in/"},
+        # BIRAC: use the CFP hub listing page (not homepage) so sub-grant expansion picks up all calls
+        {"funder": "BIRAC", "url": "https://birac.nic.in/cfp.php"},
+        # DST: use the dedicated call-for-proposals listing page
+        {"funder": "DST India CFP", "url": "https://dst.gov.in/callforproposals"},
+        # ANRF: online portal with all active calls
+        {"funder": "ANRF India", "url": "https://anrfonline.in/ANRF/HomePage"},
         {"funder": "Startup India SISFS", "url": "https://www.startupindia.gov.in/content/sih/en/government-schemes.html"},
         {"funder": "AIM ANIC", "url": "https://aim.gov.in/"},
         {"funder": "MeitY Startup Hub", "url": "https://msh.gov.in/"},
         {"funder": "TDB India", "url": "https://www.tdb.gov.in/"},
         {"funder": "NABARD", "url": "https://www.nabard.org/"},
+        {"funder": "Mitigation Action Facility", "url": "https://mitigation-action.org/call-for-projects-2026/"},
+        {"funder": "ESA Kick-Start", "url": "https://business.esa.int/funding/open-competitive-calls"},
+        {"funder": "NASA ROSES", "url": "https://science.nasa.gov/researchers/solicitations/roses-2025/"},
     ],
     "Aggregators": [
+        # Hub pages — each is expanded into individual grant URLs via _extract_hub_subgrants()
         {"funder": "Grants.gov", "url": "https://www.grants.gov/search-grants?oppStatuses=forecasted%7Copen"},
         {"funder": "F6S Programs", "url": "https://www.f6s.com/programs"},
         {"funder": "EU Funding Tenders", "url": "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-search"},
         {"funder": "Devex", "url": "https://www.devex.com/funding"},
         {"funder": "CSRBOX", "url": "https://csrbox.org/India-CSR-Grants_India-grant-funding/"},
         {"funder": "IndiaGrants", "url": "https://indiagrants.org/"},
+        # Extra seed sources from the LangSmith scout that produced good results
+        {"funder": "Startup Grants India", "url": "https://www.startupgrantsindia.com/"},
+        {"funder": "And Purpose Grants", "url": "https://andpurpose.world/grants/"},
+        {"funder": "Grant Repository (Notion)", "url": "https://grantrepository.notion.site/Welcome-Founders-270d3c1b4a3680f3ba32f2eb8f09e9c3"},
+        {"funder": "Alan Arguello Accelerators", "url": "https://www.alanarguello.me/blog/accelerators"},
+        {"funder": "FundsForNGOs", "url": "https://www2.fundsforngos.org/category/climate-change/"},
+        {"funder": "Climate Finance Lab", "url": "https://www.climatefinancelab.org/apply"},
+        {"funder": "Wren Climate Collective", "url": "https://www.wren.co/open-grants"},
+        {"funder": "remove.global India", "url": "https://remove.global/india-accelerator"},
+        {"funder": "Milkywire CDR", "url": "https://milkywire.com/"},
     ],
     "Accelerators": [
         {"funder": "Google.org Impact Challenge", "url": "https://impactchallenge.withgoogle.com/"},
@@ -206,6 +231,54 @@ DIRECT_SOURCE_URLS: Dict[str, List[Dict[str, str]]] = {
         {"funder": "Villgro", "url": "https://villgro.org/"},
         {"funder": "India Climate Collaborative", "url": "https://indiaclimate.org/"},
         {"funder": "Uplink UNDP", "url": "https://uplink.undp.org/"},
+        {"funder": "IFC She Wins Climate", "url": "https://www.ifc.org/en/what-we-do/sector-expertise/gender/gender-Inclusive-climate-investment/she-wins-climate"},
+        {"funder": "Global Innovation Fund", "url": "https://www.globalinnovation.fund/apply-for-funding"},
+        {"funder": "Wellcome Climate Impacts", "url": "https://wellcome.org/grant-funding/schemes/climate-impacts-awards"},
+        {"funder": "AI for Climate Bezos", "url": "https://aiforclimateandnature.org/"},
+    ],
+    # Indian state government startup / science / climate programs.
+    # Each state entry is the canonical program page — crawled directly so we
+    # don't miss calls that Tavily or Exa overlook.
+    "India State Programs": [
+        # Karnataka — largest tech + agritech cluster for AltCarbon
+        {"funder": "KSCST Karnataka", "url": "https://kscst.org.in/"},
+        {"funder": "KBITS Karnataka", "url": "https://kbits.karnataka.gov.in/"},
+        {"funder": "Startup Karnataka", "url": "https://startupkarnataka.gov.in/"},
+        {"funder": "KIADB Karnataka Agri", "url": "https://www.kiadb.in/"},
+        # Maharashtra — Mumbai + Pune startup + MSINS grants
+        {"funder": "MSINS Maharashtra", "url": "https://msins.in/"},
+        {"funder": "MCED Maharashtra", "url": "https://mced.in/"},
+        # Telangana — T-Hub + WE Hub programs
+        {"funder": "T-Hub Telangana", "url": "https://t-hub.co/programs"},
+        {"funder": "WE Hub Telangana", "url": "https://wehub.telangana.gov.in/"},
+        {"funder": "TSIC Telangana", "url": "https://tsic.telangana.gov.in/"},
+        # Tamil Nadu
+        {"funder": "StartupTN Tamil Nadu", "url": "https://www.startuptn.in/"},
+        {"funder": "EDII Tamil Nadu", "url": "https://www.edii.tn.gov.in/"},
+        # Kerala — KSUM is very active for climate/agritech
+        {"funder": "KSUM Kerala", "url": "https://startupmission.kerala.gov.in/"},
+        {"funder": "KSIDC Kerala", "url": "https://www.ksidc.org/"},
+        # Gujarat
+        {"funder": "i-Create Gujarat", "url": "https://www.icreate.org.in/"},
+        {"funder": "GUSEC Gujarat", "url": "https://gusec.edu.in/"},
+        # Rajasthan
+        {"funder": "iStart Rajasthan", "url": "https://istart.rajasthan.gov.in/"},
+        # Andhra Pradesh
+        {"funder": "APNRT Andhra Pradesh", "url": "https://www.apnrt.in/"},
+        {"funder": "AP Innovation Society", "url": "https://apinnovationsociety.com/"},
+        # Madhya Pradesh
+        {"funder": "MP Startup Centre", "url": "https://mpstartup.in/"},
+        # Haryana
+        {"funder": "Startup Haryana", "url": "https://startupharyana.gov.in/"},
+        # Delhi
+        {"funder": "Startup Delhi", "url": "https://delhi.gov.in/page/startup-delhi"},
+        # Uttar Pradesh
+        {"funder": "Startup UP", "url": "https://invest.up.gov.in/startup/"},
+        # Punjab
+        {"funder": "Invest Punjab Startup", "url": "https://www.investpunjab.gov.in/"},
+        # Pan-India NABARD / SFAC for agritech specifically
+        {"funder": "SFAC India Agritech", "url": "https://www.sfacindia.com/"},
+        {"funder": "NABARD Agri Grant", "url": "https://www.nabard.org/content1.aspx?id=591&catid=23&mid=530"},
     ],
 }
 
@@ -220,7 +293,6 @@ EXTRACTION_SYSTEM = (
 )
 
 EXTRACTION_PROMPT = """Extract structured grant information from this grant page content.
-Use null for any field not explicitly stated on the page.
 
 Source URL: {url}
 Page Title: {raw_title}
@@ -234,13 +306,34 @@ Return this exact JSON (no other text):
   "sponsor": "<full legal name of the funding organization>",
   "grant_type": "<grant | prize | challenge | accelerator | fellowship | contract | loan | equity | other>",
   "geography": "<eligible countries/regions exactly as stated — e.g. 'India only', 'Global', 'US and EU'>",
-  "amount": "<funding amount exactly as stated — e.g. 'up to $500,000', 'EUR 150,000'>",
-  "max_funding_usd": <integer USD value, your best conversion, or null>,
+  "amount": "<funding amount per applicant exactly as stated — e.g. 'up to $500,000', 'EUR 150,000'; capture what each applicant receives, not total program budget>",
+  "max_funding_usd": <integer USD value per applicant — best conversion; null ONLY if truly no amount mentioned anywhere>,
   "currency": "<3-letter code: USD EUR GBP INR, default USD>",
-  "deadline": "<deadline as stated — e.g. 'March 31, 2026', 'Rolling', or null>",
-  "eligibility": "<who can apply: org type, stage, sector, geography restrictions — max 100 words>",
-  "application_url": "<direct apply URL if different from source URL, else null>"
-}}"""
+  "deadline": "<application deadline EXACTLY as stated — e.g. 'March 31, 2026', 'Rolling', 'Ongoing'; extract ANY close/submission/deadline date visible; null ONLY if absolutely no date found>",
+  "eligibility": "<who can apply: org type (startup/NGO/university), stage (seed/early/growth), sector, geography restrictions including any specific country/region exclusions — max 200 words>",
+  "themes": "<key program focus areas and funding priorities — e.g. 'CDR, MRV, climate tech, India early-stage startups'>",
+  "application_url": "<DIRECT link to the application form or portal — NOT the program overview page; fill only if you see a dedicated apply/submit/portal link; else null>",
+  "source_url": "<the funder's own official grant program page URL; if this content came from a news article or blog mentioning the grant, provide the funder's direct grant page URL if visible in the content; otherwise use {url}>",
+  "past_winners_url": "<URL of a past winners / previous awardees / funded projects / portfolio page if visible in the content — e.g. '/awardees', '/winners', '/portfolio'; null if not found>",
+  "notes": "<2-3 crisp sentences: what this program funds, who it targets, any key requirements or noteworthy conditions>"
+}}
+
+EXTRACTION RULES (follow strictly):
+1. deadline — MANDATORY: extract ANY date that appears as a deadline, close date, or submission window end. Use 'Rolling' only if the grant explicitly says it accepts applications on a rolling or continuous basis. Use null only if no date is mentioned anywhere.
+2. amount — extract the maximum award PER APPLICANT (not total fund size). E.g. if grant says "up to $500K per company", extract "$500K".
+3. application_url — must link directly to an application form, portal, or submit page. Do NOT use the program overview or description page URL. Leave null if no direct apply link is found.
+4. source_url — must be the funder's own official page for this specific grant. If content is from a news/blog/press article about the grant, look in the article for the funder's direct URL and use that instead.
+5. eligibility — always include: eligible org types, geographic restrictions (including explicit exclusions like "US only", "UK registered only"), stage requirements, and sector focus. Write up to 200 words.
+6. sponsor — use the full official organization name (e.g. "Bezos Earth Fund", not "BEF").
+7. Indian currency notation — CRITICAL for Indian grants:
+   "1 lakh" = 100,000  |  "10 lakh" = 1,000,000  |  "1 crore" = 10,000,000
+   Indian comma grouping: "5,00,000" = 500,000 (NOT 5,000 — Indian style groups by 2 after first 3)
+   Examples:
+     "₹50 lakh"     → amount="₹50 lakh",     max_funding_usd=5000000,  currency="INR"
+     "₹2 crore"     → amount="₹2 crore",      max_funding_usd=20000000, currency="INR"
+     "Rs. 30,00,000" → amount="Rs. 30,00,000", max_funding_usd=3000000,  currency="INR"
+     "₹1.5 lakh"   → amount="₹1.5 lakh",    max_funding_usd=150000,   currency="INR"
+   Always set currency="INR" for rupee amounts — do NOT convert to USD in max_funding_usd."""
 
 # ── URL helpers ─────────────────────────────────────────────────────────────────
 _TRACKING_PARAMS = frozenset({
@@ -248,13 +341,21 @@ _TRACKING_PARAMS = frozenset({
     "ref", "source", "fbclid", "gclid", "mc_cid", "mc_eid",
 })
 
+_SOCIAL_MEDIA_DOMAINS = frozenset({
+    "linkedin.com", "twitter.com", "x.com", "facebook.com",
+    "instagram.com", "threads.net", "reddit.com", "t.co",
+    "medium.com", "substack.com",
+})
+
 _JUNK_TITLE_PATTERNS = (
     "press release", "news:", "newsletter", "blog post", "annual report",
     "impact report", "conference recap", "webinar", "event recap",
+    "linkedin post", "twitter thread",
 )
 _JUNK_URL_PATTERNS = (
     "/news/", "/blog/", "/press-release/", "/press_release/",
     "/events/", "/media/", "/webinar/", "/articles/",
+    "/post/", "/posts/", "/status/",
 )
 _GRANT_KEYWORDS = (
     "apply", "application", "grant", "funding", "fund", "award", "prize",
@@ -264,6 +365,72 @@ _GRANT_KEYWORDS = (
 
 # Perplexity URL cleaner: strip common trailing punctuation
 _URL_TRAILING_JUNK = re.compile(r"[.,;:!?\)\]]+$")
+
+# ── Hub page sub-grant expansion ───────────────────────────────────────────────
+# These domains host multiple individual grant calls on a single listing page.
+# After fetching the hub, we extract each sub-grant URL and enrich it separately.
+# This is how the LangSmith scout got 8+ BIRAC entries from a single BIRAC page.
+_HUB_SUBGRANT_PATTERNS: Dict[str, List[re.Pattern]] = {
+    # BIRAC CFP hub: each call is at cfp_view.php?id=NNN
+    "birac.nic.in": [
+        re.compile(r"cfp_view\.php\?id=\d+(?:&[^\s\"'<>]*)?"),
+    ],
+    # DST call-for-proposals listing: /callforproposals/some-title
+    "dst.gov.in": [
+        re.compile(r"/callforproposals/[a-z0-9][a-z0-9\-_/]+"),
+    ],
+    # ANRF online portal — match any sub-page except the generic entry points.
+    # Previous pattern was too strict (required "call|grant|program|scheme" in path).
+    # ANRF uses paths like /ANRF/CallForProposal, /ANRF/CurrentCFP, /ANRF/ListScheme etc.
+    "anrfonline.in": [
+        re.compile(r"/ANRF/(?!HomePage\b)(?!AnrfPDF\b)(?!index\b)[A-Za-z][A-Za-z0-9_\-/]{3,}", re.I),
+    ],
+    # Startup India individual scheme pages
+    "startupindia.gov.in": [
+        re.compile(r"/content/sih/en/[a-z0-9\-_/]+-scheme[a-z0-9\-_.]*\.html"),
+    ],
+}
+
+
+def _extract_hub_subgrants(hub_url: str, content: str) -> List[str]:
+    """Given a hub/aggregator page URL and its fetched content, extract individual
+    grant sub-page URLs. Returns full absolute URLs, deduplicated."""
+    from urllib.parse import urljoin
+    parsed = urlparse(hub_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    domain = parsed.netloc.replace("www.", "")
+
+    sub_urls: List[str] = []
+    for domain_key, patterns in _HUB_SUBGRANT_PATTERNS.items():
+        if domain_key not in domain:
+            continue
+        for pat in patterns:
+            for match in pat.finditer(content):
+                raw = match.group(0)
+                # Build absolute URL
+                if raw.startswith("http"):
+                    full = raw
+                elif raw.startswith("/"):
+                    full = base + raw
+                else:
+                    full = urljoin(hub_url, raw)
+                # Strip trailing junk
+                full = _URL_TRAILING_JUNK.sub("", full)
+                if full != hub_url and len(full) > 20:
+                    sub_urls.append(full)
+        break  # only apply patterns for the first matched domain key
+
+    # Deduplicate preserving order
+    seen: set = set()
+    result = []
+    for u in sub_urls:
+        if u not in seen:
+            seen.add(u)
+            result.append(u)
+
+    if result:
+        logger.info("Hub expansion: %s → %d sub-grant URLs", hub_url[:60], len(result))
+    return result
 
 
 def _url_hash(url: str) -> str:
@@ -306,6 +473,13 @@ def _is_quality_grant(raw_title: str, url: str, content: str) -> Optional[str]:
 
     if len(content_lower) < 200:
         return "Content too short"
+    # Block social media and blog platform URLs — these are mentions, not grant pages
+    try:
+        domain = urlparse(url_lower).netloc.replace("www.", "")
+        if any(s in domain for s in _SOCIAL_MEDIA_DOMAINS):
+            return "Social media/blog URL — not a grant page"
+    except Exception:
+        pass
     if any(p in title_lower for p in _JUNK_TITLE_PATTERNS):
         return f"Likely news/article: '{raw_title[:60]}'"
     if any(p in url_lower for p in _JUNK_URL_PATTERNS):
@@ -724,17 +898,38 @@ class ScoutAgent:
             self._crawl_all_direct_sources(),
         )
 
+        # ── Hub expansion: extract sub-grant URLs from listing pages ─────────
+        # For hub pages (BIRAC CFP, DST CFP, ANRF), each individual call on the
+        # page becomes a separate discovery item — same approach the LangSmith scout
+        # uses to produce 8+ BIRAC entries from a single BIRAC hub page.
+        hub_expansions: List[Dict] = []
+        for item in direct_results:
+            sub_urls = _extract_hub_subgrants(item.get("url", ""), item.get("raw_content", ""))
+            for sub_url in sub_urls:
+                hub_expansions.append({
+                    "title": "",
+                    "url": sub_url,
+                    "url_hash": _url_hash(sub_url),
+                    "raw_content": "",   # will be fetched in enrich step
+                    "source": "hub_expansion",
+                    "funder": item.get("funder", ""),
+                    "relevance_score": 0.85,
+                })
+
+        if hub_expansions:
+            logger.info("Hub expansion: %d additional sub-grant URLs discovered", len(hub_expansions))
+
         # ── In-memory dedup by url_hash ───────────────────────────────────────
         seen_hashes: set = set()
         unique: List[Dict] = []
-        for batch in [*search_results, direct_results]:
+        for batch in [*search_results, direct_results, hub_expansions]:
             for item in batch:
                 h = item["url_hash"]
                 if h not in seen_hashes:
                     seen_hashes.add(h)
                     unique.append(item)
 
-        logger.info("Scout: %d unique URLs after in-memory dedup", len(unique))
+        logger.info("Scout: %d unique URLs after in-memory dedup (incl. hub expansions)", len(unique))
 
         # ── DB dedup (3-layer) ────────────────────────────────────────────────
         col = grants_raw()
@@ -817,6 +1012,13 @@ class ScoutAgent:
                 item["application_url"] = (
                     extracted.get("application_url") or item.get("url", "")
                 )
+                item["source_url"] = (
+                    extracted.get("source_url") or item.get("url", "")
+                )
+                item["notes"] = extracted.get("notes") or ""
+                item["themes_text"] = extracted.get("themes") or ""
+                item["past_winners_url"] = extracted.get("past_winners_url") or None
+                item["last_verified_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 item["processed"] = False
                 item["scraped_at"] = datetime.now(timezone.utc).isoformat()
                 item["_raw_title"] = raw_title  # preserve for quality filter

@@ -77,8 +77,10 @@ def verify_internal(x_internal_secret: Optional[str] = Header(default=None)):
 class TriageResumeRequest(BaseModel):
     thread_id: str
     grant_id: str
-    decision: str   # "pursue" | "watch" | "pass"
+    decision: str                      # "pursue" | "watch" | "pass"
     notes: Optional[str] = None
+    human_override: bool = False       # True when human overrides the AI recommendation
+    override_reason: Optional[str] = None  # Required explanation when human_override=True
 
 
 class SectionReviewRequest(BaseModel):
@@ -233,7 +235,30 @@ async def resume_triage(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
 ):
-    """Human made triage decision. Resume graph from human_triage node."""
+    """Human made triage decision. Resume graph from human_triage node.
+
+    If human_override=True, the override fields are written to grants_scored
+    immediately (before the graph resumes) so the Streamlit UI can display them
+    instantly and the flag survives even if the LangGraph resume fails.
+    """
+    # Durably persist the human override decision to MongoDB (fix #15).
+    if body.human_override:
+        from backend.db.mongo import grants_scored
+        from bson import ObjectId
+        try:
+            await grants_scored().update_one(
+                {"_id": ObjectId(body.grant_id)},
+                {"$set": {
+                    "human_override":  True,
+                    "override_reason": body.override_reason or "",
+                    "override_at":     datetime.now(timezone.utc).isoformat(),
+                }},
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist human_override for grant %s: %s", body.grant_id, exc
+            )
+
     async def _resume():
         graph = get_graph()
         config = {"configurable": {"thread_id": body.thread_id}}
@@ -358,18 +383,46 @@ async def start_draft(
 @app.get("/status/pipeline")
 async def pipeline_status():
     db = get_db()
-    total = await db["grants_scored"].count_documents({})
-    triage = await db["grants_scored"].count_documents({"status": "triage"})
-    pursuing = await db["grants_scored"].count_documents({"status": "pursue"})
-    drafting = await db["grants_pipeline"].count_documents({"status": "drafting"})
-    complete = await db["grants_pipeline"].count_documents({"status": "draft_complete"})
+    total     = await db["grants_scored"].count_documents({})
+    triage    = await db["grants_scored"].count_documents({"status": "triage"})
+    pursuing  = await db["grants_scored"].count_documents({"status": "pursue"})
+    watching  = await db["grants_scored"].count_documents({"status": "watch"})
+    on_hold   = await db["grants_scored"].count_documents({"status": "hold"})
+    # Grants with ≤30 days to deadline that are still actionable (fix #17/#18)
+    deadline_urgent_count = await db["grants_scored"].count_documents(
+        {"deadline_urgent": True, "status": {"$in": ["triage", "pursue", "watch"]}}
+    )
+    drafting  = await db["grants_pipeline"].count_documents({"status": "drafting"})
+    complete  = await db["grants_pipeline"].count_documents({"status": "draft_complete"})
+
+    # Build actionable warnings (fix #18)
+    warnings: list = []
+    if total > 0 and triage == 0:
+        warnings.append(
+            "Triage queue is empty — all scored grants have been reviewed or auto-passed. "
+            "Run a new scout to discover fresh opportunities."
+        )
+    if deadline_urgent_count > 0:
+        warnings.append(
+            f"{deadline_urgent_count} grant(s) with urgent deadlines (≤30 days) "
+            f"in your active queue — review now."
+        )
+    if on_hold > 0:
+        warnings.append(
+            f"{on_hold} grant(s) on HOLD due to unresolved currency — manual review needed."
+        )
+
     return {
-        "total_discovered": total,
-        "in_triage": triage,
-        "pursuing": pursuing,
-        "drafting": drafting,
-        "draft_complete": complete,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "total_discovered":       total,
+        "in_triage":              triage,
+        "pursuing":               pursuing,
+        "watching":               watching,
+        "on_hold":                on_hold,
+        "deadline_urgent_count":  deadline_urgent_count,
+        "drafting":               drafting,
+        "draft_complete":         complete,
+        "warnings":               warnings,
+        "ts":                     datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -424,7 +477,7 @@ async def admin_deduplicate(
 
 _VALID_STATUSES = {
     "triage", "pursue", "pursuing", "watch", "drafting",
-    "draft_complete", "submitted", "won", "passed", "auto_pass", "reported",
+    "draft_complete", "submitted", "won", "passed", "auto_pass", "hold", "reported",
 }
 
 

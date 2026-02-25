@@ -59,53 +59,59 @@ def funder_context_cache():
 
 
 async def ensure_indexes():
-    """Create all MongoDB indexes. Call once at startup."""
+    """Create all MongoDB indexes. Call once at startup. Skips indexes that already exist."""
+    import logging
+    from pymongo.errors import OperationFailure
+    log = logging.getLogger(__name__)
     db = get_db()
 
-    # grants_raw
-    await db["grants_raw"].create_index("url_hash", unique=True)
-    await db["grants_raw"].create_index("scraped_at")
-    await db["grants_raw"].create_index("processed")
-    await db["grants_raw"].create_index("normalized_url_hash", sparse=True)
-    await db["grants_raw"].create_index("content_hash", sparse=True)
-    await db["grants_raw"].create_index("grant_type", sparse=True)
+    async def _idx(col, *args, **kwargs):
+        try:
+            await db[col].create_index(*args, **kwargs)
+        except OperationFailure as e:
+            log.warning("Index already exists (skipping): %s — %s", col, e)
 
-    # grants_scored — url_hash is now the primary dedup key (unique, sparse)
-    await db["grants_scored"].create_index("url_hash", unique=True, sparse=True)
-    await db["grants_scored"].create_index("raw_grant_id", sparse=True)
-    await db["grants_scored"].create_index("status")
-    await db["grants_scored"].create_index([("weighted_total", -1)])
-    await db["grants_scored"].create_index("deadline")
-    await db["grants_scored"].create_index("content_hash", sparse=True)
-    await db["grants_scored"].create_index("grant_type", sparse=True)
-    await db["grants_scored"].create_index([("funder", 1), ("title", 1)], sparse=True)
-    await db["grants_scored"].create_index("scored_at")
+    # grants_raw
+    await _idx("grants_raw", "url_hash", unique=True)
+    await _idx("grants_raw", "scraped_at")
+    await _idx("grants_raw", "processed")
+    await _idx("grants_raw", "normalized_url_hash", sparse=True)
+    await _idx("grants_raw", "content_hash", sparse=True)
+    await _idx("grants_raw", "grant_type", sparse=True)
+
+    # grants_scored
+    await _idx("grants_scored", "url_hash", unique=True, sparse=True)
+    await _idx("grants_scored", "raw_grant_id")
+    await _idx("grants_scored", "status")
+    await _idx("grants_scored", [("weighted_total", -1)])
+    await _idx("grants_scored", "deadline")
+    await _idx("grants_scored", "content_hash", sparse=True)
+    await _idx("grants_scored", "grant_type", sparse=True)
+    await _idx("grants_scored", [("funder", 1), ("title", 1)], sparse=True)
+    await _idx("grants_scored", "scored_at")
 
     # grants_pipeline
-    await db["grants_pipeline"].create_index("grant_id")
-    await db["grants_pipeline"].create_index("thread_id", unique=True)
-    await db["grants_pipeline"].create_index("status")
+    await _idx("grants_pipeline", "grant_id")
+    await _idx("grants_pipeline", "thread_id", unique=True)
+    await _idx("grants_pipeline", "status")
 
     # grant_drafts
-    await db["grant_drafts"].create_index("pipeline_id")
-    await db["grant_drafts"].create_index("grant_id")
-    await db["grant_drafts"].create_index([("pipeline_id", 1), ("version", -1)])
+    await _idx("grant_drafts", "pipeline_id")
+    await _idx("grant_drafts", "grant_id")
+    await _idx("grant_drafts", [("pipeline_id", 1), ("version", -1)])
 
     # knowledge_chunks
-    await db["knowledge_chunks"].create_index("source_id")
-    await db["knowledge_chunks"].create_index("doc_type")
-    await db["knowledge_chunks"].create_index("themes")
-    await db["knowledge_chunks"].create_index("last_synced")
+    await _idx("knowledge_chunks", "source_id")
+    await _idx("knowledge_chunks", "doc_type")
+    await _idx("knowledge_chunks", "themes")
+    await _idx("knowledge_chunks", "last_synced")
 
     # graph_checkpoints / audit_logs / config
-    await db["graph_checkpoints"].create_index([("thread_id", 1), ("checkpoint_id", -1)])
-    await db["audit_logs"].create_index([("created_at", -1)])
-    await db["audit_logs"].create_index("node")
-    await db["agent_config"].create_index("agent", unique=True)
+    await _idx("graph_checkpoints", [("thread_id", 1), ("checkpoint_id", -1)])
+    await _idx("audit_logs", [("created_at", -1)])
+    await _idx("audit_logs", "node")
+    await _idx("agent_config", "agent", unique=True)
 
     # funder context cache (7-day TTL index on cached_at)
-    await db["funder_context_cache"].create_index("funder", unique=True)
-    await db["funder_context_cache"].create_index(
-        "cached_at",
-        expireAfterSeconds=7 * 24 * 3600,  # MongoDB TTL — auto-deletes stale entries
-    )
+    await _idx("funder_context_cache", "funder", unique=True)
+    await _idx("funder_context_cache", "cached_at", expireAfterSeconds=7 * 24 * 3600)
