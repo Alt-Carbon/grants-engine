@@ -26,6 +26,7 @@ const STATUS_TABS = [
   { id: "watch",    label: "Watch" },
   { id: "drafting", label: "Drafting" },
   { id: "complete", label: "Complete" },
+  { id: "passed",   label: "Auto-passed" },
 ] as const;
 
 function ScoreCell({ score }: { score: number }) {
@@ -67,6 +68,7 @@ export function PipelineTable({ initialGrants }: PipelineTableProps) {
     if (statusFilter === "all") return allGrants;
     if (statusFilter === "pursue") return allGrants.filter((g) => g.status === "pursue" || g.status === "pursuing");
     if (statusFilter === "complete") return allGrants.filter((g) => ["draft_complete", "submitted", "won"].includes(g.status));
+    if (statusFilter === "passed") return allGrants.filter((g) => ["passed", "auto_pass", "reported"].includes(g.status));
     return allGrants.filter((g) => g.status === statusFilter);
   }, [allGrants, statusFilter]);
 
@@ -125,6 +127,7 @@ export function PipelineTable({ initialGrants }: PipelineTableProps) {
       const key =
         g.status === "pursuing" ? "pursue"
         : ["draft_complete", "submitted", "won"].includes(g.status) ? "complete"
+        : ["passed", "auto_pass", "reported"].includes(g.status) ? "passed"
         : g.status;
       c[key] = (c[key] ?? 0) + 1;
     }
@@ -280,7 +283,9 @@ export function PipelineTable({ initialGrants }: PipelineTableProps) {
       </div>
 
       <p className="text-xs text-gray-400">
-        {sorted.length} grant{sorted.length !== 1 ? "s" : ""} · click a row to view full details
+        {sorted.length} grant{sorted.length !== 1 ? "s" : ""}
+        {statusFilter !== "all" && ` · ${counts.all ?? 0} total discovered`}
+        {" · "}click a row to view full details
       </p>
 
       <GrantDetailSheet

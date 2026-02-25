@@ -160,11 +160,12 @@ export async function getGrantsActivity(
 
 export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
   const db = await getDb();
+  // Fetch ALL scored grants — table view shows auto-passed too
   const docs = await db
     .collection("grants_scored")
-    .find({ status: { $nin: ["passed", "auto_pass", "reported"] } })
+    .find({})
     .sort({ weighted_total: -1 })
-    .limit(500)
+    .limit(1000)
     .toArray();
 
   const grouped: Record<string, Grant[]> = {
@@ -173,6 +174,7 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
     watch: [],
     drafting: [],
     complete: [],
+    passed: [],
   };
 
   for (const doc of docs) {
@@ -185,6 +187,8 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
     else if (g.status === "drafting") grouped.drafting.push(g);
     else if (g.status === "draft_complete" || g.status === "submitted" || g.status === "won")
       grouped.complete.push(g);
+    else if (g.status === "passed" || g.status === "auto_pass" || g.status === "reported")
+      grouped.passed.push(g);
   }
 
   return grouped;
