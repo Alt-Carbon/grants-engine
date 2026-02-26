@@ -28,9 +28,9 @@ const STATUS_LABELS: Record<string, string> = {
   draft_complete: "Draft Complete",
   submitted:      "Submitted",
   won:            "Won",
-  passed:         "Passed",
-  auto_pass:      "Auto Passed",
-  human_passed:   "Human Passed",
+  passed:         "Rejected",
+  auto_pass:      "Auto Rejected",
+  human_passed:   "Rejected",
   hold:           "Hold",
   reported:       "Reported",
 };
@@ -41,7 +41,7 @@ const MOVE_OPTIONS = [
   { value: "watch",        label: "Watch",        dot: "bg-blue-400" },
   { value: "drafting",     label: "Drafting",     dot: "bg-purple-400" },
   { value: "submitted",    label: "Submitted",    dot: "bg-cyan-400" },
-  { value: "human_passed", label: "Passed",       dot: "bg-gray-400" },
+  { value: "human_passed", label: "Rejected",      dot: "bg-red-400" },
 ];
 
 interface StatusPickerProps {
