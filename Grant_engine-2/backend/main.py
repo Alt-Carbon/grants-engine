@@ -571,7 +571,8 @@ async def admin_deduplicate(
 
 _VALID_STATUSES = {
     "triage", "pursue", "pursuing", "watch", "drafting",
-    "draft_complete", "submitted", "won", "passed", "auto_pass", "hold", "reported",
+    "draft_complete", "submitted", "won", "passed", "auto_pass",
+    "human_passed", "hold", "reported",
 }
 
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { StatusBadge } from "./StatusBadge";
+import { StatusPicker } from "./StatusPicker";
 import { DeadlineChip } from "./DeadlineChip";
 import { GrantDetailSheet } from "./GrantDetailSheet";
 import type { Grant } from "@/lib/queries";
@@ -14,19 +14,25 @@ import {
 
 interface PipelineTableProps {
   initialGrants: Record<string, Grant[]>;
+  defaultFilter?: string;
 }
 
-type SortField = "grant_name" | "weighted_total" | "max_funding_usd" | "days_to_deadline" | "funder";
+type SortField =
+  | "grant_name"
+  | "weighted_total"
+  | "max_funding_usd"
+  | "days_to_deadline"
+  | "funder";
 type SortDir = "asc" | "desc";
 
 const STATUS_TABS = [
-  { id: "all",      label: "All" },
-  { id: "triage",   label: "Triage" },
-  { id: "pursue",   label: "Pursue" },
-  { id: "watch",    label: "Watch" },
+  { id: "all", label: "All" },
+  { id: "shortlisted", label: "Shortlisted" },
+  { id: "pursue", label: "Pursue" },
+  { id: "watch", label: "Watch" },
   { id: "drafting", label: "Drafting" },
-  { id: "complete", label: "Complete" },
-  { id: "passed",   label: "Auto-passed" },
+  { id: "submitted", label: "Submitted" },
+  { id: "passed", label: "Passed" },
 ] as const;
 
 function ScoreCell({ score }: { score: number }) {
@@ -37,42 +43,97 @@ function ScoreCell({ score }: { score: number }) {
       ? "bg-amber-100 text-amber-800"
       : "bg-red-100 text-red-800";
   return (
-    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-bold ${color}`}>
+    <span
+      className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-bold ${color}`}
+    >
       {score.toFixed(1)}
     </span>
   );
 }
 
-function SortIcon({ field, sortField, sortDir }: { field: SortField; sortField: SortField; sortDir: SortDir }) {
-  if (field !== sortField) return <ChevronsUpDown className="h-3.5 w-3.5 text-gray-300" />;
-  return sortDir === "asc"
-    ? <ChevronUp className="h-3.5 w-3.5 text-gray-600" />
-    : <ChevronDown className="h-3.5 w-3.5 text-gray-600" />;
+function SortIcon({
+  field,
+  sortField,
+  sortDir,
+}: {
+  field: SortField;
+  sortField: SortField;
+  sortDir: SortDir;
+}) {
+  if (field !== sortField)
+    return <ChevronsUpDown className="h-3.5 w-3.5 text-gray-300" />;
+  return sortDir === "asc" ? (
+    <ChevronUp className="h-3.5 w-3.5 text-gray-600" />
+  ) : (
+    <ChevronDown className="h-3.5 w-3.5 text-gray-600" />
+  );
 }
 
-export function PipelineTable({ initialGrants }: PipelineTableProps) {
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+export function PipelineTable({
+  initialGrants,
+  defaultFilter = "shortlisted",
+}: PipelineTableProps) {
+  const [statusFilter, setStatusFilter] = useState<string>(defaultFilter);
   const [sortField, setSortField] = useState<SortField>("weighted_total");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null);
 
-  // Flatten all grants from all columns
-  const allGrants = useMemo(() => {
+  // Mutable grant list — flattened from initial prop, updated optimistically
+  const [allGrants, setAllGrants] = useState<Grant[]>(() => {
     const flat: Grant[] = [];
     for (const col of Object.values(initialGrants)) flat.push(...col);
     return flat;
-  }, [initialGrants]);
+  });
 
-  // Status filter
+  async function handleStatusChange(grantId: string, newStatus: string) {
+    // Optimistic: update local state immediately
+    setAllGrants((prev) =>
+      prev.map((g) => (g._id === grantId ? { ...g, status: newStatus } : g))
+    );
+    // Persist to backend
+    try {
+      const res = await fetch("/api/grants/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grant_id: grantId, status: newStatus }),
+      });
+      if (!res.ok) {
+        // Revert on failure
+        setAllGrants((prev) => {
+          const flat: Grant[] = [];
+          for (const col of Object.values(initialGrants)) flat.push(...col);
+          return flat;
+        });
+      }
+    } catch {
+      // Revert on error
+      setAllGrants((prev) => {
+        const flat: Grant[] = [];
+        for (const col of Object.values(initialGrants)) flat.push(...col);
+        return flat;
+      });
+    }
+  }
+
   const filtered = useMemo(() => {
     if (statusFilter === "all") return allGrants;
-    if (statusFilter === "pursue") return allGrants.filter((g) => g.status === "pursue" || g.status === "pursuing");
-    if (statusFilter === "complete") return allGrants.filter((g) => ["draft_complete", "submitted", "won"].includes(g.status));
-    if (statusFilter === "passed") return allGrants.filter((g) => ["passed", "auto_pass", "reported"].includes(g.status));
+    if (statusFilter === "shortlisted")
+      return allGrants.filter((g) => g.status === "triage");
+    if (statusFilter === "pursue")
+      return allGrants.filter(
+        (g) => g.status === "pursue" || g.status === "pursuing"
+      );
+    if (statusFilter === "submitted")
+      return allGrants.filter((g) =>
+        ["draft_complete", "submitted", "won"].includes(g.status)
+      );
+    if (statusFilter === "passed")
+      return allGrants.filter((g) =>
+        ["passed", "auto_pass", "human_passed", "reported"].includes(g.status)
+      );
     return allGrants.filter((g) => g.status === statusFilter);
   }, [allGrants, statusFilter]);
 
-  // Sort
   const sorted = useMemo(() => {
     const copy = [...filtered];
     copy.sort((a, b) => {
@@ -104,9 +165,13 @@ export function PipelineTable({ initialGrants }: PipelineTableProps) {
 
       if (av === undefined || bv === undefined) return 0;
       if (typeof av === "string" && typeof bv === "string") {
-        return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+        return sortDir === "asc"
+          ? av.localeCompare(bv)
+          : bv.localeCompare(av);
       }
-      return sortDir === "asc" ? (av as number) - (bv as number) : (bv as number) - (av as number);
+      return sortDir === "asc"
+        ? (av as number) - (bv as number)
+        : (bv as number) - (av as number);
     });
     return copy;
   }, [filtered, sortField, sortDir]);
@@ -120,15 +185,21 @@ export function PipelineTable({ initialGrants }: PipelineTableProps) {
     }
   }
 
-  // Counts for tabs
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: allGrants.length };
     for (const g of allGrants) {
       const key =
-        g.status === "pursuing" ? "pursue"
-        : ["draft_complete", "submitted", "won"].includes(g.status) ? "complete"
-        : ["passed", "auto_pass", "reported"].includes(g.status) ? "passed"
-        : g.status;
+        g.status === "triage"
+          ? "shortlisted"
+          : g.status === "pursuing"
+          ? "pursue"
+          : ["draft_complete", "submitted", "won"].includes(g.status)
+          ? "submitted"
+          : ["passed", "auto_pass", "human_passed", "reported"].includes(
+              g.status
+            )
+          ? "passed"
+          : g.status;
       c[key] = (c[key] ?? 0) + 1;
     }
     return c;
@@ -191,7 +262,11 @@ export function PipelineTable({ initialGrants }: PipelineTableProps) {
                 <th className="w-6 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-400">
                   #
                 </th>
-                <ThCol field="grant_name" label="Grant" className="min-w-[220px]" />
+                <ThCol
+                  field="grant_name"
+                  label="Grant"
+                  className="min-w-[220px]"
+                />
                 <ThCol field="funder" label="Funder" />
                 <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">
                   Status
@@ -225,15 +300,22 @@ export function PipelineTable({ initialGrants }: PipelineTableProps) {
                           {name}
                         </span>
                         {grant.grant_type && (
-                          <span className="text-xs text-gray-400">{grant.grant_type}</span>
+                          <span className="text-xs text-gray-400">
+                            {grant.grant_type}
+                          </span>
                         )}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-600 max-w-[160px] truncate">
-                      {grant.funder || "—"}
+                      {grant.funder || "\u2014"}
                     </td>
                     <td className="px-4 py-3">
-                      <StatusBadge status={grant.status} />
+                      <StatusPicker
+                        status={grant.status}
+                        grantId={grant._id}
+                        onStatusChange={handleStatusChange}
+                        size="md"
+                      />
                     </td>
                     <td className="px-4 py-3">
                       <ScoreCell score={grant.weighted_total ?? 0} />
@@ -241,7 +323,7 @@ export function PipelineTable({ initialGrants }: PipelineTableProps) {
                     <td className="px-4 py-3 text-xs text-gray-700">
                       {funding
                         ? `$${(funding / 1000).toFixed(0)}K`
-                        : "—"}
+                        : "\u2014"}
                     </td>
                     <td className="px-4 py-3">
                       {grant.deadline_urgent ? (
@@ -254,11 +336,13 @@ export function PipelineTable({ initialGrants }: PipelineTableProps) {
                           {grant.deadline.slice(0, 10)}
                         </span>
                       ) : (
-                        <span className="text-xs text-gray-300">—</span>
+                        <span className="text-xs text-gray-300">
+                          {"\u2014"}
+                        </span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-600">
-                      {grant.geography || "—"}
+                      {grant.geography || "\u2014"}
                     </td>
                     <td className="px-4 py-3">
                       {grant.url && (
@@ -284,8 +368,9 @@ export function PipelineTable({ initialGrants }: PipelineTableProps) {
 
       <p className="text-xs text-gray-400">
         {sorted.length} grant{sorted.length !== 1 ? "s" : ""}
-        {statusFilter !== "all" && ` · ${counts.all ?? 0} total discovered`}
-        {" · "}click a row to view full details
+        {statusFilter !== "all" &&
+          ` \u00b7 ${counts.all ?? 0} total discovered`}
+        {" \u00b7 "}click a row to view full details
       </p>
 
       <GrantDetailSheet

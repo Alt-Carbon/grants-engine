@@ -1,4 +1,8 @@
-import { getDashboardStats, getGrantsActivity, getPipelineGrants } from "@/lib/queries";
+import {
+  getDashboardStats,
+  getGrantsActivity,
+  getPipelineGrants,
+} from "@/lib/queries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WarningsBanner } from "@/components/WarningsBanner";
 import { ActivityChart } from "@/components/ActivityChart";
@@ -22,65 +26,75 @@ export default async function DashboardPage() {
 
   const kpis = [
     {
-      label:   "Total Discovered",
-      value:   stats.total_discovered,
-      icon:    Telescope,
-      color:   "text-blue-600",
+      label: "Total Discovered",
+      value: stats.total_discovered,
+      icon: Telescope,
+      color: "text-blue-600",
       bgColor: "bg-blue-50",
     },
     {
-      label:   "In Triage",
-      value:   stats.in_triage,
-      icon:    ListChecks,
-      color:   "text-amber-600",
+      label: "Shortlisted",
+      value: stats.in_triage,
+      icon: ListChecks,
+      color: "text-amber-600",
       bgColor: "bg-amber-50",
     },
     {
-      label:   "Pursuing",
-      value:   stats.pursuing,
-      icon:    Target,
-      color:   "text-green-600",
+      label: "Pursuing",
+      value: stats.pursuing,
+      icon: Target,
+      color: "text-green-600",
       bgColor: "bg-green-50",
     },
     {
-      label:   "Drafting",
-      value:   stats.drafting,
-      icon:    FileText,
-      color:   "text-purple-600",
+      label: "Drafting",
+      value: stats.drafting,
+      icon: FileText,
+      color: "text-purple-600",
       bgColor: "bg-purple-50",
     },
     {
-      label:   "Urgent Deadlines",
-      value:   stats.deadline_urgent_count,
-      icon:    Clock,
-      color:   "text-red-600",
+      label: "Urgent Deadlines",
+      value: stats.deadline_urgent_count,
+      icon: Clock,
+      color: "text-red-600",
       bgColor: "bg-red-50",
     },
   ];
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex flex-col gap-4 p-4 sm:gap-6 sm:p-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+        <h1 className="text-xl font-bold text-gray-900 sm:text-2xl">
+          Dashboard
+        </h1>
         <p className="mt-1 text-sm text-gray-500">Grant pipeline overview</p>
       </div>
 
       {/* Warnings */}
       <WarningsBanner warnings={stats.warnings} />
 
-      {/* KPI cards */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-5">
+      {/* KPI cards — 2 cols mobile, 3 cols sm, 5 cols xl */}
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-5">
         {kpis.map(({ label, value, icon: Icon, color, bgColor }) => (
           <Card key={label}>
-            <CardContent className="p-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs font-medium text-gray-500">{label}</p>
-                  <p className={`mt-1 text-3xl font-bold ${color}`}>{value}</p>
+            <CardContent className="p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="truncate text-[11px] font-medium text-gray-500 sm:text-xs">
+                    {label}
+                  </p>
+                  <p
+                    className={`mt-1 text-2xl font-bold sm:text-3xl ${color}`}
+                  >
+                    {value}
+                  </p>
                 </div>
-                <div className={`rounded-xl p-2.5 ${bgColor}`}>
-                  <Icon className={`h-5 w-5 ${color}`} />
+                <div
+                  className={`shrink-0 rounded-xl p-2 sm:p-2.5 ${bgColor}`}
+                >
+                  <Icon className={`h-4 w-4 sm:h-5 sm:w-5 ${color}`} />
                 </div>
               </div>
             </CardContent>
@@ -90,40 +104,50 @@ export default async function DashboardPage() {
 
       {/* Activity Chart */}
       <Card>
-        <CardHeader>
-          <CardTitle>Grants Discovered — Last 30 Days</CardTitle>
+        <CardHeader className="px-4 py-3 sm:px-6 sm:py-4">
+          <CardTitle className="text-sm sm:text-base">
+            Grants Discovered &mdash; Last 30 Days
+          </CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-2 pb-4 sm:px-6">
           <ActivityChart data={activity} />
         </CardContent>
       </Card>
 
-      {/* Extra stats row */}
-      <div className="grid grid-cols-3 gap-4">
+      {/* Extra stats row — stack on mobile, 3 cols on sm+ */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
         <Card>
-          <CardContent className="p-5">
+          <CardContent className="p-4 sm:p-5">
             <p className="text-xs font-medium text-gray-500">Watching</p>
-            <p className="mt-1 text-2xl font-bold text-blue-700">{stats.watching}</p>
+            <p className="mt-1 text-2xl font-bold text-blue-700">
+              {stats.watching}
+            </p>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-5">
+          <CardContent className="p-4 sm:p-5">
             <p className="text-xs font-medium text-gray-500">On Hold</p>
-            <p className="mt-1 text-2xl font-bold text-orange-600">{stats.on_hold}</p>
+            <p className="mt-1 text-2xl font-bold text-orange-600">
+              {stats.on_hold}
+            </p>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-5">
-            <p className="text-xs font-medium text-gray-500">Draft Complete</p>
-            <p className="mt-1 text-2xl font-bold text-indigo-600">{stats.draft_complete}</p>
+          <CardContent className="p-4 sm:p-5">
+            <p className="text-xs font-medium text-gray-500">Submitted</p>
+            <p className="mt-1 text-2xl font-bold text-cyan-600">
+              {stats.draft_complete}
+            </p>
           </CardContent>
         </Card>
       </div>
 
       {/* All discovered grants */}
       <div>
-        <h2 className="mb-3 text-lg font-semibold text-gray-900">All Discovered Grants</h2>
-        <PipelineTable initialGrants={grants} />
+        <h2 className="mb-3 text-base font-semibold text-gray-900 sm:text-lg">
+          All Discovered Grants
+        </h2>
+        <PipelineTable initialGrants={grants} defaultFilter="all" />
       </div>
     </div>
   );

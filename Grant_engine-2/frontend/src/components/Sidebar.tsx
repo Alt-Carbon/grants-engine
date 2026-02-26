@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
 import {
   BarChart3,
   Kanban,
@@ -10,38 +11,54 @@ import {
   Settings,
   Database,
   Leaf,
+  Menu,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AgentControls } from "./AgentControls";
 
 const NAV = [
-  { href: "/dashboard", label: "Dashboard",  icon: BarChart3  },
-  { href: "/pipeline",  label: "Pipeline",   icon: Kanban     },
-  { href: "/triage",    label: "Triage",     icon: ListChecks },
-  { href: "/drafter",   label: "Drafter",    icon: FileText   },
-  { href: "/config",    label: "Config",     icon: Settings   },
-  { href: "/knowledge", label: "Knowledge",  icon: Database   },
+  { href: "/dashboard", label: "Dashboard", icon: BarChart3 },
+  { href: "/pipeline", label: "Pipeline", icon: Kanban },
+  { href: "/triage", label: "Shortlisted", icon: ListChecks },
+  { href: "/drafter", label: "Drafter", icon: FileText },
+  { href: "/config", label: "Config", icon: Settings },
+  { href: "/knowledge", label: "Knowledge", icon: Database },
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
+  const [mobileOpen, setMobileOpen] = useState(false);
 
-  return (
-    <aside className="flex h-screen w-56 shrink-0 flex-col border-r border-gray-800 bg-gray-900">
+  const navContent = (
+    <>
       {/* Logo */}
-      <div className="flex h-14 items-center gap-2 border-b border-gray-800 px-4">
-        <Leaf className="h-5 w-5 text-green-400" />
-        <span className="text-sm font-semibold text-white">AltCarbon Grants</span>
+      <div className="flex h-14 items-center justify-between border-b border-gray-800 px-4">
+        <div className="flex items-center gap-2">
+          <Leaf className="h-5 w-5 text-green-400" />
+          <span className="text-sm font-semibold text-white">
+            AltCarbon Grants
+          </span>
+        </div>
+        {/* Close button — mobile only */}
+        <button
+          onClick={() => setMobileOpen(false)}
+          className="rounded p-1 text-gray-400 hover:text-white lg:hidden"
+        >
+          <X className="h-5 w-5" />
+        </button>
       </div>
 
       {/* Nav */}
       <nav className="flex flex-1 flex-col gap-1 p-3">
         {NAV.map(({ href, label, icon: Icon }) => {
-          const active = pathname === href || pathname.startsWith(href + "/");
+          const active =
+            pathname === href || pathname.startsWith(href + "/");
           return (
             <Link
               key={href}
               href={href}
+              onClick={() => setMobileOpen(false)}
               className={cn(
                 "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                 active
@@ -63,8 +80,39 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="border-t border-gray-800 px-4 py-3">
-        <p className="text-xs text-gray-600">Internal tool · v0.1</p>
+        <p className="text-xs text-gray-600">Internal tool &middot; v0.1</p>
       </div>
-    </aside>
+    </>
+  );
+
+  return (
+    <>
+      {/* Mobile hamburger — visible below lg */}
+      <button
+        onClick={() => setMobileOpen(true)}
+        className="fixed left-3 top-3 z-40 rounded-lg bg-gray-900 p-2 text-white shadow-lg lg:hidden"
+        aria-label="Open menu"
+      >
+        <Menu className="h-5 w-5" />
+      </button>
+
+      {/* Mobile overlay */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/40 lg:hidden"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+
+      {/* Sidebar — always visible on lg+, slide-over on mobile */}
+      <aside
+        className={cn(
+          "fixed inset-y-0 left-0 z-50 flex w-56 flex-col border-r border-gray-800 bg-gray-900 transition-transform duration-200 lg:static lg:translate-x-0",
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        )}
+      >
+        {navContent}
+      </aside>
+    </>
   );
 }
