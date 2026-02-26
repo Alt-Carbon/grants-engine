@@ -7,13 +7,17 @@ export const metadata: Metadata = {
   description: "Internal grant pipeline management",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html lang="en">
       <body>
         <div className="flex h-screen overflow-hidden">
           <Sidebar />
-          <main className="flex flex-1 flex-col overflow-y-auto">
+          <main className="flex flex-1 flex-col overflow-y-auto pt-14 lg:pt-0">
             {children}
           </main>
         </div>

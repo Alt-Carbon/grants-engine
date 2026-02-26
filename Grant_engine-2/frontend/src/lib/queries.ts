@@ -108,7 +108,7 @@ export async function getDashboardStats() {
   const warnings: string[] = [];
   if (total > 0 && triage === 0) {
     warnings.push(
-      "Triage queue is empty — run a new scout to discover fresh opportunities."
+      "Shortlist is empty — run a new scout to discover fresh opportunities."
     );
   }
   if (urgentCount > 0) {
@@ -169,11 +169,11 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
     .toArray();
 
   const grouped: Record<string, Grant[]> = {
-    triage: [],
+    shortlisted: [],
     pursue: [],
     watch: [],
     drafting: [],
-    complete: [],
+    submitted: [],
     passed: [],
   };
 
@@ -181,13 +181,13 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
     const g = serializeId(doc as Record<string, unknown>) as unknown as Grant;
     if (!g.grant_name && g.title) g.grant_name = g.title;
 
-    if (g.status === "triage") grouped.triage.push(g);
+    if (g.status === "triage") grouped.shortlisted.push(g);
     else if (g.status === "pursue" || g.status === "pursuing") grouped.pursue.push(g);
     else if (g.status === "watch") grouped.watch.push(g);
     else if (g.status === "drafting") grouped.drafting.push(g);
     else if (g.status === "draft_complete" || g.status === "submitted" || g.status === "won")
-      grouped.complete.push(g);
-    else if (g.status === "passed" || g.status === "auto_pass" || g.status === "reported")
+      grouped.submitted.push(g);
+    else if (g.status === "passed" || g.status === "auto_pass" || g.status === "human_passed" || g.status === "reported")
       grouped.passed.push(g);
   }
 

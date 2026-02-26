@@ -67,7 +67,7 @@ export function TriageQueue({ grants: initialGrants }: TriageQueueProps) {
   if (pending.length === 0) {
     return (
       <div className="rounded-xl border border-gray-200 bg-white py-16 text-center text-gray-400">
-        <p className="font-medium">All grants reviewed!</p>
+        <p className="font-medium">All shortlisted grants reviewed!</p>
         <p className="mt-1 text-sm">Check the Pipeline to see their status</p>
       </div>
     );
