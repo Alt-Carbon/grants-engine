@@ -48,11 +48,11 @@ const COLUMNS = [
     countCls: "bg-cyan-100 text-cyan-800",
   },
   {
-    id: "passed",
-    label: "Passed",
+    id: "rejected",
+    label: "Rejected",
     targetStatus: "human_passed",
-    headerCls: "border-gray-300 bg-gray-50",
-    countCls: "bg-gray-100 text-gray-600",
+    headerCls: "border-red-300 bg-red-50",
+    countCls: "bg-red-100 text-red-600",
   },
 ] as const;
 
@@ -70,7 +70,7 @@ function statusToColumn(status: string): ColumnId {
     status === "won"
   )
     return "submitted";
-  return "passed";
+  return "rejected";
 }
 
 interface PipelineBoardProps {

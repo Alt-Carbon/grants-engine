@@ -174,7 +174,7 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
     watch: [],
     drafting: [],
     submitted: [],
-    passed: [],
+    rejected: [],
   };
 
   for (const doc of docs) {
@@ -188,7 +188,7 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
     else if (g.status === "draft_complete" || g.status === "submitted" || g.status === "won")
       grouped.submitted.push(g);
     else if (g.status === "passed" || g.status === "auto_pass" || g.status === "human_passed" || g.status === "reported")
-      grouped.passed.push(g);
+      grouped.rejected.push(g);
   }
 
   return grouped;

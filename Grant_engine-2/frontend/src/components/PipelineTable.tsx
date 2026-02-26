@@ -32,7 +32,7 @@ const STATUS_TABS = [
   { id: "watch", label: "Watch" },
   { id: "drafting", label: "Drafting" },
   { id: "submitted", label: "Submitted" },
-  { id: "passed", label: "Passed" },
+  { id: "rejected", label: "Rejected" },
 ] as const;
 
 function ScoreCell({ score }: { score: number }) {
@@ -127,7 +127,7 @@ export function PipelineTable({
       return allGrants.filter((g) =>
         ["draft_complete", "submitted", "won"].includes(g.status)
       );
-    if (statusFilter === "passed")
+    if (statusFilter === "rejected")
       return allGrants.filter((g) =>
         ["passed", "auto_pass", "human_passed", "reported"].includes(g.status)
       );
@@ -198,7 +198,7 @@ export function PipelineTable({
           : ["passed", "auto_pass", "human_passed", "reported"].includes(
               g.status
             )
-          ? "passed"
+          ? "rejected"
           : g.status;
       c[key] = (c[key] ?? 0) + 1;
     }
