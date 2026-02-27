@@ -78,7 +78,7 @@ The engine continuously discovers grant opportunities from 100+ sources, scores 
 ## Project Structure
 
 ```
-Grant_engine-2/
+grants-engine/                  # repo root
 ├── backend/                    # FastAPI backend + all agents
 │   ├── agents/
 │   │   ├── scout.py            # Discovery: Tavily + Exa + Perplexity + direct crawl
@@ -128,10 +128,10 @@ Grant_engine-2/
 │   │   └── theme.css           # CSS variables for theming
 │   └── requirements.txt
 │
-├── run_scraper.py              # Standalone scraper (no FastAPI needed)
-├── start.sh                    # Startup script for Railway
+├── .streamlit/                 # Streamlit config
 ├── .env.example                # All required environment variables
-└── vercel.json                 # Vercel config (UI deployment)
+├── .gitignore
+└── README.md
 ```
 
 ---
@@ -180,7 +180,7 @@ The Analyst agent scores each grant across 6 dimensions using Claude Sonnet:
 
 ```bash
 git clone https://github.com/Alt-Carbon/grants-engine.git
-cd grants-engine/Grant_engine-2
+cd grants-engine
 
 # Backend
 pip install -r backend/requirements.txt
@@ -234,28 +234,14 @@ In your Atlas cluster, create a Vector Search index on `knowledge_chunks`:
 }
 ```
 
-### 4. Run the standalone scraper (quickest start)
-
-```bash
-python3 run_scraper.py
-# Runs Tavily + Exa discovery → Claude scoring → saves to MongoDB + Excel
-# No FastAPI or LangGraph required
-```
-
-Options:
-```bash
-python3 run_scraper.py --queries 20    # limit number of search queries
-python3 run_scraper.py --no-db         # dry run, don't save to MongoDB
-```
-
-### 5. Run the full backend
+### 4. Run the backend
 
 ```bash
 cd backend
 uvicorn main:app --reload --port 8000
 ```
 
-### 6. Run the Streamlit UI
+### 5. Run the Streamlit UI
 
 ```bash
 streamlit run app/main.py
@@ -317,7 +303,7 @@ The `backend/railway.toml` and `backend/Procfile` handle the Railway deployment 
 
 **Streamlit Cloud:**
 1. Connect your GitHub repo
-2. Set main file: `Grant_engine-2/app/main.py`
+2. Set main file: `app/main.py`
 3. Add all env vars in the Streamlit Cloud secrets manager
 
 **Vercel:**

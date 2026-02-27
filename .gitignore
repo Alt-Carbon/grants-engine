@@ -1,27 +1,54 @@
-# Only track Grant_engine-2 — ignore all sibling projects
-/*
-!/Grant_engine-2/
-!.gitignore
+# ── Sibling workspace projects (not part of grants-engine) ───
+alert engine/
+Alt curioso/
+alt-website/
+altcarbon-intelligence/
+alter-magazine-testing-workflow/
+cdr-news-alert/
+Conference scout/
+DRP flipbook/
+Grant_engine-2/
+grants-engine/
+Marketplace -companies/
+ship-faster/
+Testing/
+Testing agent for alt carbon/
+transcriber/
+wisper/
 
-# Inside Grant_engine-2 — Python
-Grant_engine-2/**/__pycache__/
-Grant_engine-2/**/*.py[cod]
-Grant_engine-2/**/*.pyo
-Grant_engine-2/.venv/
-Grant_engine-2/venv/
-Grant_engine-2/.env
+# Workspace noise
+.codex/
+.pnpm-store/
 
-# Secrets / local config
-*.env
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# ── Node / Next.js ──────────────────────────────────────────
+node_modules/
+.next/
+out/
+.pnp
+.pnp.js
+
+# ── Secrets / local config ──────────────────────────────────
+.env
 .env.*
 !.env.example
 
-# Generated outputs
-Grant_engine-2/*.xlsx
-Grant_engine-2/*.csv
+# ── Generated outputs ───────────────────────────────────────
+*.xlsx
+*.csv
+output/
+draft/
 
-# OS / editor
+# ── OS / editor ─────────────────────────────────────────────
 .DS_Store
 .idea/
 .vscode/
 *.swp
+*.pem
+npm-debug.log*
