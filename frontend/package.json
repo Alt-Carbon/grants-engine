@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@hello-pangea/dnd": "^16.6.0",
+    "@tailwindcss/typography": "^0.5.19",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.447.0",
@@ -17,6 +18,7 @@
     "next": "^16.1.6",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
     "recharts": "^2.12.7",
     "tailwind-merge": "^2.5.4"
   },
