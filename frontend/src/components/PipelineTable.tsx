@@ -4,6 +4,7 @@ import { useState, useMemo } from "react";
 import { StatusPicker } from "./StatusPicker";
 import { DeadlineChip } from "./DeadlineChip";
 import { GrantDetailSheet } from "./GrantDetailSheet";
+import { getPriority, getThemeLabel } from "@/lib/utils";
 import type { Grant } from "@/lib/queries";
 import {
   ChevronUp,
@@ -272,6 +273,12 @@ export function PipelineTable({
                   Status
                 </th>
                 <ThCol field="weighted_total" label="Score" />
+                <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">
+                  Priority
+                </th>
+                <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">
+                  Themes
+                </th>
                 <ThCol field="max_funding_usd" label="Funding" />
                 <ThCol field="days_to_deadline" label="Deadline" />
                 <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">
@@ -319,6 +326,32 @@ export function PipelineTable({
                     </td>
                     <td className="px-4 py-3">
                       <ScoreCell score={grant.weighted_total ?? 0} />
+                    </td>
+                    <td className="px-4 py-3">
+                      {(() => {
+                        const p = getPriority(grant.weighted_total ?? 0);
+                        return (
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${p.className}`}>
+                            {p.label}
+                          </span>
+                        );
+                      })()}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-1">
+                        {grant.themes_detected?.map((t) => {
+                          const theme = getThemeLabel(t);
+                          return (
+                            <span
+                              key={t}
+                              className="rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+                              style={{ backgroundColor: theme.bg, color: theme.color }}
+                            >
+                              {theme.label}
+                            </span>
+                          );
+                        }) ?? <span className="text-xs text-gray-300">{"\u2014"}</span>}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-700">
                       {funding

@@ -934,36 +934,54 @@ def _is_quality_grant(raw_title: str, url: str, content: str) -> Optional[str]:
 
 
 def _detect_themes(text: str) -> List[str]:
+    """Classify grant into AltCarbon's 6 themes based on keyword density.
+
+    A theme requires at least `min_hits` distinct keyword matches to qualify,
+    preventing false positives from stray mentions (e.g. a climate grant that
+    says "rural community" once should NOT be tagged Social Impact).
+    """
     t = text.lower()
     themes = []
-    if any(k in t for k in [
-        "climate", "carbon", "net zero", "decarboni", "emission", "cdr", "mrv",
-        "cleantech", "clean energy", "renewable", "solar", "wind", "green hydrogen",
-        "nature based", "biodiversity", "ocean", "methane", "ghg", "greenhouse",
-        "biochar", "enhanced weathering", "direct air capture", "dac", "blue carbon",
-    ]):
-        themes.append("climatetech")
-    if any(k in t for k in [
-        "agri", "soil", "farm", "crop", "food", "land use", "regenerative",
-        "precision agriculture", "agroforestry", "livestock", "fisheries",
-    ]):
-        themes.append("agritech")
-    if any(k in t for k in [
-        "artificial intelligence", "machine learning", "ai for", "deep learning",
-        "nlp", "computer vision", "neural network", "data science", "predictive model",
-    ]):
-        themes.append("ai_for_sciences")
-    if any(k in t for k in [
-        "earth science", "remote sensing", "satellite", "geology", "geospatial",
-        "subsurface", "lidar", "mapping", "geophysics", "hydrogeology",
-    ]):
-        themes.append("applied_earth_sciences")
-    if any(k in t for k in [
-        "social impact", "community", "rural", "livelihood", "inclusive",
-        "women", "gender", "equity", "vulnerable", "marginalized", "poverty",
-    ]):
-        themes.append("social_impact")
-    # Note: NO default fallback — empty list is valid and used by hard rules
+
+    # (keywords, theme_key, min_hits) — higher min_hits for themes with generic keywords
+    THEME_RULES = [
+        ([
+            "climate", "carbon", "net zero", "decarboni", "emission", "cdr", "mrv",
+            "cleantech", "clean energy", "renewable", "solar", "wind", "green hydrogen",
+            "nature based", "biodiversity", "ocean", "methane", "ghg", "greenhouse",
+            "biochar", "enhanced weathering", "direct air capture", "dac", "blue carbon",
+        ], "climatetech", 1),
+        ([
+            "agri", "soil carbon", "farming", "crop", "food security", "land use",
+            "precision agriculture", "agroforestry", "livestock", "fisheries",
+            "regenerative agriculture", "soil health",
+        ], "agritech", 2),
+        ([
+            "artificial intelligence", "machine learning", "ai for", "deep learning",
+            "nlp", "computer vision", "neural network", "data science", "predictive model",
+        ], "ai_for_sciences", 1),
+        ([
+            "earth science", "remote sensing", "satellite", "geology", "geospatial",
+            "subsurface", "lidar", "mapping", "geophysics", "hydrogeology",
+        ], "applied_earth_sciences", 1),
+        ([
+            "social impact", "livelihood", "marginalized", "poverty alleviation",
+            "gender equity", "vulnerable communities", "inclusive development",
+            "community resilience", "rural development",
+        ], "social_impact", 2),
+        ([
+            "deep tech", "deeptech", "frontier tech", "breakthrough", "advanced materials",
+            "quantum", "biotech", "synthetic biology", "nanotechnology", "robotics",
+            "novel hardware", "photonics", "semiconduct", "fusion", "space tech",
+            "advanced manufacturing", "lab-grown", "gene editing", "crispr",
+        ], "deeptech", 1),
+    ]
+
+    for keywords, theme_key, min_hits in THEME_RULES:
+        hits = sum(1 for k in keywords if k in t)
+        if hits >= min_hits:
+            themes.append(theme_key)
+
     return themes
 
 

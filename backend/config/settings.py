@@ -57,6 +57,7 @@ class Settings(BaseSettings):
         "ai_for_sciences",
         "applied_earth_sciences",
         "social_impact",
+        "deeptech",
     ]
 
 

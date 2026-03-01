@@ -226,12 +226,13 @@ If NO past winner data is visible in the content return:
   "altcarbon_fit_verdict": "unknown", "strategic_note": null}}"""
 
 
-SCORING_PROMPT = """AltCarbon's five focus themes:
+SCORING_PROMPT = """AltCarbon's six focus themes:
 1. Climatetech — carbon removal, MRV, net-zero technology
 2. Agritech — soil carbon, precision agriculture, farmer tech
 3. AI for Sciences — AI applied to environmental and scientific problems
 4. Applied Earth Sciences — remote sensing, satellite, geospatial
 5. Social Impact — inclusive climate solutions, rural communities
+6. Deep Tech — frontier science & engineering breakthroughs (advanced materials, biotech, quantum, nanotechnology, robotics)
 
 Evaluate this grant for AltCarbon:
 
@@ -253,7 +254,7 @@ Funder research context:
 {funder_context}
 
 Score each dimension 1–10:
-1. theme_alignment: How closely does this grant's purpose match AltCarbon's 5 themes?
+1. theme_alignment: How closely does this grant's purpose match AltCarbon's 6 themes?
 2. eligibility_confidence: How confident are you AltCarbon meets the requirements? (startup stage, sector, org type)
 3. funding_amount: Based on grant size (max_funding_usd={max_funding_usd}). >$500k=10, >$100k=8, >$50k=6, >$10k=4, <$10k=2
 4. deadline_urgency: Lead time available. >3 months=10, 1–3 months=7, <1 month=3, rolling/unknown=6
@@ -274,7 +275,7 @@ Return this exact JSON (no other text):
   "evidence_gaps": ["<requirement AltCarbon may not meet>", ...],
   "red_flags": ["<serious disqualifying concern>"],
   "reasoning": "<2-3 sentences explaining the overall score and key trade-offs — be specific about which eligibility or scope issues matter most>",
-  "rationale": "<SPECIFIC 2-3 sentences: name the grant and funder, state exactly which AltCarbon theme (CDR/MRV/agritech/AI for sciences/earth sciences/social impact) aligns with the funder's stated priorities, and what competitive edge AltCarbon has (India base, startup stage, specific technology). Be actionable and crisp — e.g. 'The Bezos CDR Fund directly funds companies building carbon removal measurement — AltCarbon's MRV platform addresses the core verification gap this program targets. India-headquartered with global pilots gives geographic diversity few CDR applicants offer.'>"
+  "rationale": "<SPECIFIC 2-3 sentences: name the grant and funder, state exactly which AltCarbon theme (CDR/MRV/agritech/AI for sciences/earth sciences/social impact/deep tech) aligns with the funder's stated priorities, and what competitive edge AltCarbon has (India base, startup stage, specific technology). Be actionable and crisp — e.g. 'The Bezos CDR Fund directly funds companies building carbon removal measurement — AltCarbon's MRV platform addresses the core verification gap this program targets. India-headquartered with global pilots gives geographic diversity few CDR applicants offer.'>"
 }}"""
 
 
