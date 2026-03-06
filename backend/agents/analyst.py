@@ -50,7 +50,7 @@ import httpx
 from backend.db.mongo import grants_raw, grants_scored, agent_config, audit_logs
 from backend.graph.state import GrantState
 from backend.utils.llm import chat, SONNET, HAIKU
-from backend.utils.parsing import parse_json_safe, retry_async
+from backend.utils.parsing import parse_json_safe, retry_async, api_health, CreditExhaustedError
 
 logger = logging.getLogger(__name__)
 
@@ -82,12 +82,17 @@ DEEP_ANALYSIS_SYSTEM = (
 DEEP_ANALYSIS_PROMPT = """Read the following grant opportunity THOROUGHLY and produce a comprehensive
 research brief for AltCarbon's grants team.
 
-AltCarbon profile:
-- India-based climate technology startup (for-profit, DPIIT-registered)
-- Products: MRV platform for carbon removal, soil carbon monitoring, agritech tools
-- Stage: early-growth, active pilots in Karnataka and Maharashtra
-- Team: ~15 people, engineers + scientists
-- Can provide: prototypes, pilot data, technical reports, audited financials
+AltCarbon profile (default — use when no internal knowledge provided):
+- India-based for-profit climate + data science company (DPIIT-registered startup)
+- HQ: IISc Campus, Bengaluru; Operations: Darjeeling & Eastern India
+- Core tech: Enhanced Rock Weathering (ERW) on 60,000+ acres, Biochar production, MRV platform (FELUDA), D-CAL laboratory
+- Team: ~50 people (engineers + scientists + field ops), 8,000+ farmers in network
+- Revenue from: Google/Frontier, Stripe, Shopify, UBS, Mitsubishi, BCG, Mitsui O.S.K. Lines
+- Verification: Isometric-verified carbon credits
+- Can provide: pilot data, lab results, audited financials, credit issuance records, company registration
+- Cannot provide: US/EU entity registration, nonprofit/501(c)(3) status
+
+{company_context_section}
 
 Grant details:
   Title:           {title}
@@ -162,11 +167,21 @@ Return this exact JSON structure (fill null where information is not found in th
   "application_tips": [
     "<specific, actionable tip for writing the application — e.g. 'Lead with the soil carbon MRV data from the Karnataka pilot — the evaluation criterion on measurable impact is worth 30%'>"
   ],
+  "opportunity_summary": "<4-sentence summary: (1) what this grant funds and its total budget, (2) what a successful applicant receives (money + non-monetary: mentorship, networking, visibility, lab access, etc.), (3) who the ideal applicant is, (4) why AltCarbon should care about this specific opportunity>",
+  "application_process_detailed": "<step-by-step process in detail: (1) how to apply — online portal URL, email address, or postal submission, (2) required documents at each stage (LOI, concept note, full proposal, budget template, pitch deck, letters of support), (3) stages (e.g. LOI → shortlist → full proposal → interview → award), (4) review timeline — when to expect decisions, (5) any pre-registration, account creation, or partnership requirements before applying>",
   "contact": {{
     "name": "<program manager or contact person name if stated, else null>",
     "email": "<contact email if stated, else null>",
+    "emails_all": ["<ALL email addresses found in the content — program team, general inquiries, technical support, regional contacts>"],
     "phone": "<contact phone if stated, else null>",
     "office": "<office or department name if stated, else null>"
+  }},
+  "resources": {{
+    "brochure_urls": ["<URLs of any downloadable brochures, PDFs, guidelines, program guides, FAQs, or information packs found in the content>"],
+    "info_session_urls": ["<URLs of webinars, info sessions, Q&A sessions, or orientation events related to this grant>"],
+    "template_urls": ["<URLs of any application templates, budget templates, or sample proposals>"],
+    "faq_url": "<URL of FAQ page if found, else null>",
+    "guidelines_url": "<URL of detailed program guidelines or RFP document if found, else null>"
   }},
   "similar_grants": [
     "<name of similar programs or previous rounds mentioned in the content that AltCarbon should also track>"
@@ -190,9 +205,9 @@ Content:
 {content}
 
 AltCarbon profile (for similarity scoring):
-- India-based climate tech startup (for-profit, DPIIT-registered)
-- Products: MRV platform for carbon removal, soil carbon monitoring, agritech tools
-- Stage: early-growth, pilots in Karnataka and Maharashtra
+- India-based for-profit climate + data science company (DPIIT-registered)
+- Core tech: ERW on 60,000+ acres, Biochar, MRV platform (FELUDA), D-CAL lab
+- Stage: early-growth with revenue; 50 people, 8,000+ farmers, Isometric-verified
 
 Extract ALL past winner/awardee entries you can find. For each winner assess how similar
 they are to AltCarbon — look for: climate/agritech/AI theme, startup type, Indian origin,
@@ -226,16 +241,29 @@ If NO past winner data is visible in the content return:
   "altcarbon_fit_verdict": "unknown", "strategic_note": null}}"""
 
 
-SCORING_PROMPT = """AltCarbon's six focus themes:
-1. Climatetech — carbon removal, MRV, net-zero technology
-2. Agritech — soil carbon, precision agriculture, farmer tech
+SCORING_PROMPT = """You are scoring a grant opportunity for AltCarbon. Use the profile below to judge fit.
+
+=== ALTCARBON PROFILE ===
+- India-based for-profit climate + data science company (DPIIT-registered startup)
+- HQ: IISc Campus, Bengaluru; Operations: Darjeeling & Eastern India
+- Core tech: Enhanced Rock Weathering (ERW) on 60,000+ acres, Biochar production, MRV platform (FELUDA), D-CAL laboratory
+- Team: ~50 people (engineers + scientists + field ops), 8,000+ farmers in network
+- Revenue from: Google/Frontier, Stripe, Shopify, UBS, Mitsubishi, BCG, Mitsui O.S.K. Lines
+- Verification: Isometric-verified carbon credits
+- Can provide: pilot data, lab results, audited financials, credit issuance records, company registration
+- Cannot provide: US/EU entity registration, nonprofit/501(c)(3) status, charitable registration
+
+Six focus themes:
+1. Climatetech — carbon removal (ERW, biochar), MRV, net-zero technology
+2. Agritech — soil carbon, precision agriculture, farmer technology, crop yield improvement
 3. AI for Sciences — AI applied to environmental and scientific problems
-4. Applied Earth Sciences — remote sensing, satellite, geospatial
-5. Social Impact — inclusive climate solutions, rural communities
-6. Deep Tech — frontier science & engineering breakthroughs (advanced materials, biotech, quantum, nanotechnology, robotics)
+4. Applied Earth Sciences — remote sensing, satellite, geospatial, geology
+5. Social Impact — inclusive climate solutions, rural communities, farmer livelihoods
+6. Deep Tech — frontier science & engineering (advanced materials, biotech, quantum, nanotechnology, robotics)
 
-Evaluate this grant for AltCarbon:
+{company_context_section}
 
+=== GRANT TO EVALUATE ===
 Title: {title}
 Funder: {funder}
 Source URL: {source_url}
@@ -253,13 +281,49 @@ Content snippet:
 Funder research context:
 {funder_context}
 
-Score each dimension 1–10:
-1. theme_alignment: How closely does this grant's purpose match AltCarbon's 6 themes?
-2. eligibility_confidence: How confident are you AltCarbon meets the requirements? (startup stage, sector, org type)
-3. funding_amount: Based on grant size (max_funding_usd={max_funding_usd}). >$500k=10, >$100k=8, >$50k=6, >$10k=4, <$10k=2
-4. deadline_urgency: Lead time available. >3 months=10, 1–3 months=7, <1 month=3, rolling/unknown=6
-5. geography_fit: India or global eligible? Explicitly India=10, Global open=8, Unclear=5, Excludes India=0
-6. competition_level: Estimated applicant pool. Very selective/niche=10, broad open call=5, highly competitive=3
+=== SCORING RUBRIC (score each dimension 1–10) ===
+
+1. theme_alignment:
+   9-10 = Directly funds CDR, ERW, biochar, MRV, soil carbon monitoring, or carbon credit verification
+   7-8  = Funds broader climate tech, agritech, AI for earth sciences, or deep tech that AltCarbon works in
+   5-6  = Adjacent sector (clean energy, water, biodiversity) with partial overlap to AltCarbon's work
+   3-4  = Tangential (general sustainability, ESG, green finance) — AltCarbon could stretch to fit
+   1-2  = Unrelated sector (fintech, pharma, arts, pure digital, social media, edtech)
+
+2. eligibility_confidence:
+   9-10 = AltCarbon explicitly qualifies: for-profit, DPIIT-registered, India-based, climate/agritech startup accepted
+   7-8  = Likely eligible: open to startups or companies, no org-type exclusion, India or global eligible
+   5-6  = Uncertain: eligibility criteria unclear, or requires verification (e.g. "SME" may or may not include Indian startups)
+   3-4  = Likely ineligible: requires nonprofit status, academic affiliation, specific country registration, or government entity
+   1-2  = Clearly ineligible: US/EU-only entities, 501(c)(3) required, individual researchers only
+
+3. funding_amount (max_funding_usd={max_funding_usd}):
+   9-10 = >$500K per applicant
+   7-8  = $100K–$500K
+   5-6  = $25K–$100K
+   3-4  = $10K–$25K
+   1-2  = <$10K or amount unknown
+
+4. deadline_urgency:
+   9-10 = >3 months lead time remaining
+   7-8  = Rolling/continuous acceptance (always open)
+   5-6  = 1–3 months remaining, or deadline unknown
+   3-4  = <1 month remaining — rushed application
+   1-2  = <2 weeks or likely already closed
+
+5. geography_fit:
+   9-10 = Explicitly targets India, South Asia, or developing countries
+   7-8  = Global/international — open to all countries including India
+   5-6  = Unclear geography, or targets a region that may include India (Asia-Pacific, BRICS, G20)
+   3-4  = Targets a specific non-India region but does not explicitly exclude India
+   1-2  = Explicitly excludes India (US-only, EU-only, specific country registration required)
+
+6. competition_level:
+   9-10 = Highly niche/selective (<50 expected applicants) — e.g. CDR-specific, ERW-specific, India climate only
+   7-8  = Moderately selective (<200 expected applicants) — sector-specific or regional
+   5-6  = Broad but themed (~200-1000 applicants) — e.g. "climate innovation" open call
+   3-4  = Very broad (1000-5000 applicants) — e.g. general startup competitions, large accelerators
+   1-2  = Mass open call (5000+ applicants) — e.g. global prizes, mega-competitions
 
 Return this exact JSON (no other text):
 {{
@@ -558,6 +622,8 @@ _GEO_ELIGIBLE_TERMS: List[re.Pattern] = [
         r"\bindia\b", r"\bindian\b", r"\bsouth\s*asia\b",
         r"\bdeveloping\s*countr", r"\bemerging\s*market",
         r"\basia\b", r"\basia.?pacific\b", r"\bapac\b",
+        r"\bsaarc\b", r"\bbrics\b", r"\bg20\b",
+        r"\blmic\b", r"\bglobal\s*south\b", r"\bindo.?pacific\b",
     ]
 ]
 
@@ -578,6 +644,9 @@ _ORG_EXCLUDE_PATTERNS: List[re.Pattern] = [
         r"\b501\(c\)\(3\)\s*(only|exclusive|organizations?\s*only)\b",
         r"\bregistered\s*charities\s*(only|exclusive)\b",
         r"\bgovernment\s*(agencies|entities)\s*only\b",
+        r"\bcivil\s*society\s*organizations?\s*only\b",
+        r"\bcommunity.?based\s*organizations?\s*only\b",
+        r"\bpublic\s*sector\s*(only|exclusive)\b",
     ]
 ]
 
@@ -713,7 +782,12 @@ def _validate_funder_context(funder: str, context: str) -> str:
     )
 
 
-async def _get_funder_context(funder: str, perplexity_key: str) -> str:
+async def _get_funder_context(
+    funder: str,
+    perplexity_key: str = "",
+    gateway_api_key: str = "",
+    gateway_url: str = "https://ai-gateway.vercel.sh/v1",
+) -> str:
     """Fetch Perplexity funder intelligence. Results cached in MongoDB for 3 days."""
     if not funder or funder.lower() in ("unknown", ""):
         return "No funder research available."
@@ -733,8 +807,13 @@ async def _get_funder_context(funder: str, perplexity_key: str) -> str:
     except Exception:
         pass
 
-    # Fetch from Perplexity
-    context = await _perplexity_funder_research(funder, perplexity_key)
+    # Fetch from Perplexity (gateway preferred, direct fallback)
+    context = await _perplexity_funder_research(
+        funder,
+        api_key=perplexity_key,
+        gateway_api_key=gateway_api_key,
+        gateway_url=gateway_url,
+    )
 
     # Cache the raw context (validation prefix is applied at return time, not stored)
     try:
@@ -753,22 +832,50 @@ async def _get_funder_context(funder: str, perplexity_key: str) -> str:
     return _validate_funder_context(funder, context)
 
 
-async def _perplexity_funder_research(funder: str, api_key: str) -> str:
-    if not api_key:
+async def _perplexity_funder_research(
+    funder: str,
+    api_key: str = "",
+    gateway_api_key: str = "",
+    gateway_url: str = "https://ai-gateway.vercel.sh/v1",
+) -> str:
+    """Funder research via Perplexity Sonar. Prefers AI Gateway, falls back to direct."""
+    if not api_key and not gateway_api_key:
         return "No funder research available (no API key)."
+    if api_health.is_exhausted("perplexity"):
+        logger.debug("Skipping Perplexity funder research (exhausted) for %s", funder)
+        return f"Funder research unavailable for {funder} (API quota exhausted)."
 
+    user_msg = (
+        f"What are {funder}'s current funding priorities, typical grant sizes, "
+        f"and recent awards? What org types and sectors do they fund? "
+        f"Is India or global applicants typically eligible? 120 words max."
+    )
+
+    # Prefer AI Gateway (routes Perplexity via OpenAI-compat API)
+    if gateway_api_key:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=gateway_api_key, base_url=gateway_url)
+
+        async def _do_gw() -> str:
+            response = await client.chat.completions.create(
+                model="perplexity/sonar",
+                max_tokens=512,
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            return response.choices[0].message.content or ""
+
+        try:
+            result = await retry_async(_do_gw, retries=3, base_delay=2.0, label=f"perplexity-funder-gw:{funder}", service="perplexity")
+        except CreditExhaustedError:
+            return f"Funder research unavailable for {funder} (API quota exhausted)."
+        if result:
+            api_health.record_success("perplexity")
+        return result or f"Funder research unavailable for {funder}."
+
+    # Fallback: direct Perplexity API
     payload = {
         "model": "sonar",
-        "messages": [
-            {
-                "role": "user",
-                "content": (
-                    f"What are {funder}'s current funding priorities, typical grant sizes, "
-                    f"and recent awards? What org types and sectors do they fund? "
-                    f"Is India or global applicants typically eligible? 120 words max."
-                ),
-            }
-        ],
+        "messages": [{"role": "user", "content": user_msg}],
         "search_recency_filter": "year",
     }
 
@@ -785,7 +892,12 @@ async def _perplexity_funder_research(funder: str, api_key: str) -> str:
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
 
-    result = await retry_async(_do, retries=3, base_delay=2.0, label=f"perplexity-funder:{funder}")
+    try:
+        result = await retry_async(_do, retries=3, base_delay=2.0, label=f"perplexity-funder:{funder}", service="perplexity")
+    except CreditExhaustedError:
+        return f"Funder research unavailable for {funder} (API quota exhausted)."
+    if result:
+        api_health.record_success("perplexity")
     return result or f"Funder research unavailable for {funder}."
 
 
@@ -899,7 +1011,21 @@ async def _scrape_past_winners(grant: Dict) -> Dict:
 
 # ── Deep research (second LLM pass — pursue/watch grants only) ────────────────
 
-async def _deep_research_grant(grant: Dict, funder_context: str) -> Dict:
+def _company_context_section(company_context: str) -> str:
+    """Build the company context section for prompts. Empty if no context."""
+    if not (company_context or "").strip():
+        return ""
+    return (
+        "AltCarbon internal knowledge (from Notion/Drive — use for eligibility and strategic angle):\n"
+        f"{company_context.strip()[:4000]}\n\n"
+    )
+
+
+async def _deep_research_grant(
+    grant: Dict,
+    funder_context: str,
+    company_context: str = "",
+) -> Dict:
     """Run a thorough second-pass analysis on a grant that passed scoring.
 
     Uses up to 10,000 chars of full content (vs 6,000 for scoring) and asks
@@ -907,9 +1033,23 @@ async def _deep_research_grant(grant: Dict, funder_context: str) -> Dict:
     requirements, eligibility checklist, evaluation criteria, application
     sections, key dates, funding terms, red flags, and strategic tips.
 
+    Results are cached in MongoDB (deep_research_cache, 7-day TTL) keyed by url_hash.
     Returns a dict stored in grants_scored.deep_analysis.
     Failures return a minimal error dict — never raises.
     """
+    # ── Check cache first ────────────────────────────────────────────────────
+    url_hash = grant.get("url_hash", "")
+    if url_hash:
+        try:
+            from backend.db.mongo import get_db
+            cache_col = get_db()["deep_research_cache"]
+            cached = await cache_col.find_one({"url_hash": url_hash})
+            if cached and cached.get("result"):
+                logger.debug("Deep research cache hit: %s", grant.get("url", "")[:60])
+                return cached["result"]
+        except Exception:
+            pass
+
     # Use as much content as available for deeper analysis
     full_content = (grant.get("raw_content") or "")[:10_000]
     themes_str = ", ".join(grant.get("themes_detected") or [])
@@ -928,6 +1068,7 @@ async def _deep_research_grant(grant: Dict, funder_context: str) -> Dict:
         notes=grant.get("notes") or "None",
         content=full_content,
         funder_context=funder_context,
+        company_context_section=_company_context_section(company_context),
     )
 
     try:
@@ -946,6 +1087,22 @@ async def _deep_research_grant(grant: Dict, funder_context: str) -> Dict:
                 grant.get("url", "")[:60],
                 len((winners_data or {}).get("winners", [])),
             )
+            # Cache the result (7-day TTL via MongoDB index)
+            if url_hash:
+                try:
+                    from backend.db.mongo import get_db
+                    cache_col = get_db()["deep_research_cache"]
+                    await cache_col.update_one(
+                        {"url_hash": url_hash},
+                        {"$set": {
+                            "url_hash": url_hash,
+                            "result": result,
+                            "cached_at": datetime.now(tz=timezone.utc),
+                        }},
+                        upsert=True,
+                    )
+                except Exception:
+                    pass
             return result
 
         logger.warning("Deep research returned unexpected structure for %s", grant.get("url"))
@@ -955,6 +1112,130 @@ async def _deep_research_grant(grant: Dict, funder_context: str) -> Dict:
     return {"error": "Deep research unavailable", "url": grant.get("url", "")}
 
 
+# ── Mandatory field checks for shortlisted grants ─────────────────────────────
+
+_VAGUE_DEADLINES = frozenset({
+    "", "not specified", "not mentioned", "n/a", "none", "tbd", "tba",
+    "to be announced", "unknown",
+})
+
+
+def _has_concrete_deadline(grant: Dict, deep: Dict) -> bool:
+    """Return True if the grant has a usable application deadline."""
+    # Check grant-level deadline
+    dl = (grant.get("deadline") or "").strip().lower()
+    if dl and dl not in _VAGUE_DEADLINES:
+        return True
+    # Check deep analysis key_dates
+    kd = (deep or {}).get("key_dates") or {}
+    for field in ("application_deadline", "loi_deadline"):
+        val = (kd.get(field) or "").strip().lower()
+        if val and val not in _VAGUE_DEADLINES and val != "null":
+            return True
+    return False
+
+
+def _has_concrete_funding(grant: Dict, deep: Dict) -> bool:
+    """Return True if the grant has a usable funding amount / ticket size."""
+    # Check max_funding_usd (numeric)
+    mf = grant.get("max_funding_usd") or grant.get("max_funding")
+    if mf and float(mf) > 0:
+        return True
+    # Check textual amount field
+    amt = (grant.get("amount") or "").strip().lower()
+    if amt and amt not in ("", "not specified", "not mentioned", "n/a", "none",
+                           "unknown", "tbd", "varies", "variable"):
+        return True
+    # Check deep analysis funding_terms (disbursement implies known amount)
+    ft = (deep or {}).get("funding_terms") or {}
+    if ft.get("disbursement_schedule") and ft["disbursement_schedule"] != "null":
+        return True
+    return False
+
+
+async def _extract_missing_mandatory(
+    grant: Dict, has_deadline: bool, has_funding: bool
+) -> Optional[Dict]:
+    """Focused LLM extraction for missing deadline / funding from raw content.
+
+    Returns a patch dict with any found values, or None if nothing recovered.
+    """
+    content = (grant.get("raw_content") or "")[:8000]
+    if not content:
+        return None
+
+    fields_needed = []
+    if not has_deadline:
+        fields_needed.append(
+            '"deadline": "<exact application deadline date — e.g. \'April 30, 2026\', \'Rolling\'; null if truly not found>"'
+        )
+    if not has_funding:
+        fields_needed.append(
+            '"amount": "<funding amount per applicant — e.g. \'up to $500,000\', \'₹50 lakh\'; null if not found>"'
+        )
+        fields_needed.append(
+            '"max_funding_usd": <integer USD equivalent per applicant; null if not found>'
+        )
+        fields_needed.append(
+            '"currency": "<3-letter code: USD EUR GBP INR; null if not found>"'
+        )
+
+    prompt = (
+        "You are a grant data extraction specialist. "
+        "Search the following grant page content CAREFULLY for the specific fields below. "
+        "Look for any dates labelled as deadline, closing date, last date, due date, submission date. "
+        "Look for any amounts labelled as grant size, award, funding, ticket size, financial support. "
+        "Return ONLY valid JSON — no prose.\n\n"
+        f"Grant: {grant.get('grant_name') or grant.get('title', '')}\n"
+        f"URL: {grant.get('url', '')}\n\n"
+        f"Content:\n{content}\n\n"
+        "Return this JSON (null for fields you cannot find):\n"
+        "{{\n  " + ",\n  ".join(fields_needed) + "\n}}"
+    )
+
+    try:
+        raw = await chat(prompt, model=HAIKU, max_tokens=512)
+        result = parse_json_safe(raw)
+        if not result:
+            return None
+
+        patch: Dict = {}
+        if not has_deadline and result.get("deadline"):
+            dl = str(result["deadline"]).strip().lower()
+            if dl not in _VAGUE_DEADLINES and dl != "null":
+                patch["deadline"] = result["deadline"]
+                logger.info(
+                    "Recovered deadline '%s' for %s",
+                    result["deadline"], grant.get("url", "")[:60],
+                )
+
+        if not has_funding:
+            if result.get("max_funding_usd") and float(result["max_funding_usd"]) > 0:
+                patch["max_funding_usd"] = int(result["max_funding_usd"])
+                patch["max_funding"] = patch["max_funding_usd"]
+                if result.get("amount"):
+                    patch["amount"] = result["amount"]
+                if result.get("currency"):
+                    patch["currency"] = result["currency"]
+                logger.info(
+                    "Recovered funding $%s for %s",
+                    patch["max_funding_usd"], grant.get("url", "")[:60],
+                )
+            elif result.get("amount"):
+                amt = str(result["amount"]).strip().lower()
+                if amt not in ("", "null", "not specified", "none", "unknown"):
+                    patch["amount"] = result["amount"]
+                    logger.info(
+                        "Recovered amount '%s' for %s",
+                        result["amount"], grant.get("url", "")[:60],
+                    )
+
+        return patch if patch else None
+    except Exception as e:
+        logger.debug("Mandatory field extraction failed for %s: %s", grant.get("url", "")[:60], e)
+        return None
+
+
 # ── Core scoring ───────────────────────────────────────────────────────────────
 
 async def _score_grant(
@@ -962,6 +1243,7 @@ async def _score_grant(
     funder_context: str,
     weights: Dict[str, float],
     min_funding: int,
+    company_context: str = "",
 ) -> Dict:
     """Score a single grant. Returns the full scored document ready for MongoDB."""
 
@@ -1047,6 +1329,7 @@ async def _score_grant(
         content=content_snippet,
         funder_context=funder_context,
         max_funding_usd=_funding_for_prompt,
+        company_context_section=_company_context_section(company_context),
     )
 
     scoring = None
@@ -1076,9 +1359,9 @@ async def _score_grant(
 
     scoring_error = scoring is None
     if scoring_error:
-        logger.error("All scoring attempts failed for %s — using defaults", grant.get("url"))
+        logger.error("All scoring attempts failed for %s — using defaults (3s)", grant.get("url"))
         scoring = {
-            "scores": {k: 5 for k in weights},
+            "scores": {k: 3 for k in weights},
             "evidence_found": [],
             "evidence_gaps": ["Automated scoring failed — manual review required"],
             "reasoning": "Scoring failed after 3 attempts. Manual review needed.",
@@ -1090,6 +1373,16 @@ async def _score_grant(
     # Clamp scores to 1–10 range (guard against model returning out-of-range values)
     scores = {k: max(1, min(10, int(scores.get(k, 5)))) for k in weights}
     weighted_total = sum(scores[dim] * weight for dim, weight in weights.items())
+
+    # Red flag penalty: each red flag reduces weighted_total by 0.5, max penalty 2.0
+    red_flags = scoring.get("red_flags") or []
+    if red_flags and not scoring_error:
+        penalty = min(len(red_flags) * 0.5, 2.0)
+        weighted_total = max(0.0, weighted_total - penalty)
+        logger.debug(
+            "Red flag penalty: -%0.1f (%d flags) for %s → %.2f",
+            penalty, len(red_flags), grant.get("url", "")[:60], weighted_total,
+        )
 
     # Threshold-based action (model's suggestion is not used — thresholds are authoritative)
     from backend.config.settings import get_settings
@@ -1109,7 +1402,56 @@ async def _score_grant(
             "Running deep research for %s grant: %s",
             action, (grant.get("grant_name") or grant.get("title", ""))[:60],
         )
-        deep_analysis = await _deep_research_grant(grant, funder_context)
+        deep_analysis = await _deep_research_grant(
+            grant, funder_context, company_context=company_context
+        )
+
+    # ── Mandatory fields gate for shortlisted grants ──────────────────────
+    # Pursue/watch grants MUST have a concrete deadline and funding amount.
+    # If missing after deep research, attempt a focused extraction from content.
+    # If still missing, demote to hold for manual review.
+    if action in ("pursue", "watch") and not scoring_error:
+        has_deadline = _has_concrete_deadline(grant, deep_analysis)
+        has_funding = _has_concrete_funding(grant, deep_analysis)
+
+        if not has_deadline or not has_funding:
+            # Focused extraction attempt from raw content
+            patch = await _extract_missing_mandatory(grant, has_deadline, has_funding)
+            if patch:
+                grant.update(patch)
+                has_deadline = has_deadline or bool(patch.get("deadline"))
+                has_funding = has_funding or bool(patch.get("max_funding_usd"))
+
+        missing = []
+        if not has_deadline:
+            missing.append("application deadline")
+        if not has_funding:
+            missing.append("funding amount / ticket size")
+
+        if missing:
+            logger.info(
+                "Demoting %s → hold (missing %s): %s",
+                action, " & ".join(missing),
+                (grant.get("grant_name") or grant.get("title", ""))[:60],
+            )
+            action = "hold"
+            hold_reason = f"Missing mandatory fields: {', '.join(missing)}"
+            evidence_gaps = list(scoring.get("evidence_gaps", []))
+            evidence_gaps.append(hold_reason)
+            return _build_scored_doc(
+                grant=grant,
+                scores=scores,
+                weighted_total=round(weighted_total, 2),
+                action=action,
+                rationale=scoring.get("rationale", ""),
+                reasoning=hold_reason,
+                evidence_found=scoring.get("evidence_found", []),
+                evidence_gaps=evidence_gaps,
+                red_flags=scoring.get("red_flags", []),
+                funder_context=funder_context,
+                scoring_error=scoring_error,
+                deep_analysis=deep_analysis,
+            )
 
     return _build_scored_doc(
         grant=grant,
@@ -1185,6 +1527,19 @@ def _build_scored_doc(
         "themes_detected": grant.get("themes_detected", []),
         "themes_text":     grant.get("themes_text", ""),
         "notes":             grant.get("notes", ""),
+        # ── Opportunity details (deep analysis overrides scout extraction) ────
+        "about_opportunity": (
+            (deep_analysis or {}).get("opportunity_summary")
+            or grant.get("about_opportunity", "")
+        ),
+        "eligibility_details": grant.get("eligibility_details", ""),
+        "application_process": (
+            (deep_analysis or {}).get("application_process_detailed")
+            or grant.get("application_process", "")
+        ),
+        # ── Contact & resources (extracted from deep analysis) ────────────────
+        "contact_info":    (deep_analysis or {}).get("contact") or {},
+        "resources":       (deep_analysis or {}).get("resources") or {},
         "last_verified_date": grant.get("last_verified_date", ""),
         "past_winners_url":  grant.get("past_winners_url"),    # hint for analyst scraper
         # ── Scoring ───────────────────────────────────────────────────────────
@@ -1222,10 +1577,14 @@ class AnalystAgent:
     def __init__(
         self,
         perplexity_api_key: str = "",
+        gateway_api_key: str = "",
+        gateway_url: str = "https://ai-gateway.vercel.sh/v1",
         weights: Optional[Dict[str, float]] = None,
         min_funding: int = 3_000,
     ):
         self.perplexity_key = perplexity_api_key
+        self.gateway_key = gateway_api_key
+        self.gateway_url = gateway_url
         self.weights = weights or DEFAULT_WEIGHTS
         self.min_funding = min_funding
 
@@ -1234,6 +1593,36 @@ class AnalystAgent:
             logger.info("Analyst: no grants to score")
             return []
 
+        import traceback as _tb
+
+        _run_start = datetime.now(timezone.utc)
+
+        try:
+            return await self._run_inner(raw_grants)
+        except Exception as exc:
+            elapsed = (datetime.now(timezone.utc) - _run_start).total_seconds()
+            try:
+                from backend.integrations.notion_sync import log_error, log_agent_run
+                await log_error(
+                    agent="analyst",
+                    error=exc,
+                    tb=_tb.format_exc(),
+                    severity="Critical",
+                )
+                await log_agent_run(
+                    agent="analyst",
+                    status="Failed",
+                    trigger="Pipeline",
+                    started_at=_run_start,
+                    duration_seconds=elapsed,
+                    errors=1,
+                    summary=f"Analyst failed on {len(raw_grants)} grants: {str(exc)[:200]}",
+                )
+            except Exception:
+                logger.debug("Notion error sync skipped (analyst failure)", exc_info=True)
+            raise
+
+    async def _run_inner(self, raw_grants: List[Dict]) -> List[Dict]:
         logger.info("Analyst: received %d grants to process", len(raw_grants))
 
         # ── Skip already-scored grants (idempotency) ─────────────────────────
@@ -1296,13 +1685,39 @@ class AnalystAgent:
             len(passing_grants), unknown_currency_count, len(auto_pass_grants),
         )
 
+        # ── Company knowledge (Notion/Drive) for Analyst prompts ───────────────
+        company_context = ""
+        try:
+            from backend.agents.company_brain import CompanyBrainAgent
+            from backend.config.settings import get_settings
+            s = get_settings()
+            if s.openai_api_key:
+                agent = CompanyBrainAgent(openai_api_key=s.openai_api_key)
+                company_context = await agent.get_company_overview(max_chars=4000)
+                if company_context:
+                    logger.info("Analyst: loaded %d chars of company knowledge", len(company_context))
+        except Exception as e:
+            logger.debug("Company knowledge load skipped: %s", e)
+
+        # Fallback: always ensure we have the static Notion-sourced profile
+        if not company_context:
+            from backend.agents.company_brain import _load_static_profile
+            company_context = _load_static_profile()[:4000]
+            if company_context:
+                logger.info("Analyst: using static AltCarbon profile (%d chars)", len(company_context))
+
         # ── Perplexity funder enrichment (only for passing grants) ────────────
         unique_funders = list({g.get("funder", "") for g in passing_grants})
         funder_sem = asyncio.Semaphore(3)
 
         async def enrich_funder(funder: str) -> tuple:
             async with funder_sem:
-                ctx = await _get_funder_context(funder, self.perplexity_key)
+                ctx = await _get_funder_context(
+                    funder,
+                    perplexity_key=self.perplexity_key,
+                    gateway_api_key=self.gateway_key,
+                    gateway_url=self.gateway_url,
+                )
                 return funder, ctx
 
         funder_contexts: Dict[str, str] = {}
@@ -1317,7 +1732,10 @@ class AnalystAgent:
             async with score_sem:
                 funder = grant.get("funder", "")
                 ctx = funder_contexts.get(funder, "No funder research available.")
-                return await _score_grant(grant, ctx, self.weights, self.min_funding)
+                return await _score_grant(
+                    grant, ctx, self.weights, self.min_funding,
+                    company_context=company_context,
+                )
 
         async def score_auto_pass(grant: Dict) -> Dict:
             """Build auto_pass scored doc without calling the LLM."""
@@ -1357,16 +1775,27 @@ class AnalystAgent:
                     upsert=True,
                 )
                 saved_count += 1
+
+                # Sync to Notion Mission Control
+                try:
+                    from backend.integrations.notion_sync import sync_scored_grant
+                    await sync_scored_grant(s)
+                except Exception:
+                    logger.debug("Notion sync skipped for grant %s", s.get("url"), exc_info=True)
+
             except Exception as e:
                 logger.warning("Failed to upsert scored grant %s: %s", s.get("url"), e)
 
-        # Mark raw grants as processed
-        from bson import ObjectId
-        for g in to_score:
-            if g.get("_id"):
+        # Mark raw grants as processed (both scored AND skipped-as-already-scored)
+        all_to_mark = list(to_score) + list(raw_grants)
+        seen_ids = set()
+        for g in all_to_mark:
+            gid = g.get("_id")
+            if gid and gid not in seen_ids:
+                seen_ids.add(gid)
                 try:
                     await raw_col.update_one(
-                        {"_id": g["_id"]},
+                        {"_id": gid},
                         {"$set": {"processed": True}},
                     )
                 except Exception:
@@ -1400,6 +1829,23 @@ class AnalystAgent:
             "created_at": datetime.now(tz=timezone.utc).isoformat(),
         })
 
+        # ── Notion Mission Control sync ──────────────────────────────────
+        try:
+            from backend.integrations.notion_sync import log_agent_run
+            await log_agent_run(
+                agent="analyst",
+                status="Completed",
+                trigger="Pipeline",
+                started_at=datetime.now(timezone.utc),
+                grants_scored=len(ranked),
+                errors=0,
+                summary=f"Scored {len(ranked)} grants: {pursue_count} pursue, "
+                        f"{watch_count} watch, {pass_count} auto_pass, {hold_count} hold. "
+                        f"Top score: {top_score:.2f}. {skipped} skipped (already scored).",
+            )
+        except Exception:
+            logger.debug("Notion sync skipped (analyst run)", exc_info=True)
+
         return ranked
 
 
@@ -1414,6 +1860,8 @@ async def analyst_node(state: GrantState) -> Dict:
 
     agent = AnalystAgent(
         perplexity_api_key=s.perplexity_api_key,
+        gateway_api_key=s.ai_gateway_api_key,
+        gateway_url=s.ai_gateway_url,
         weights=weights,
         min_funding=min_funding,
     )

@@ -13,6 +13,8 @@ import {
   Leaf,
   Menu,
   X,
+  Activity,
+  ScrollText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AgentControls } from "./AgentControls";
@@ -22,6 +24,8 @@ const NAV = [
   { href: "/pipeline", label: "Pipeline", icon: Kanban },
   { href: "/triage", label: "Shortlisted", icon: ListChecks },
   { href: "/drafter", label: "Drafter", icon: FileText },
+  { href: "/monitoring", label: "Mission Control", icon: Activity },
+  { href: "/audit", label: "Audit Log", icon: ScrollText },
   { href: "/config", label: "Config", icon: Settings },
   { href: "/knowledge", label: "Knowledge", icon: Database },
 ];

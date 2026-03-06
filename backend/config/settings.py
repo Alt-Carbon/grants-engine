@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # Knowledge sources
     notion_token: str = ""
+    notion_knowledge_base_page_id: str = ""  # Optional: scope sync to this page + descendants
     google_client_id: str = ""
     google_client_secret: str = ""
     google_refresh_token: str = ""

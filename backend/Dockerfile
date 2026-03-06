@@ -2,6 +2,16 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Install Node.js (for Notion MCP server)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Pre-install the Notion MCP server globally so npx doesn't download each time
+RUN npm install -g @notionhq/notion-mcp-server
+
 # Build context is the project root so backend.* imports resolve correctly
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt

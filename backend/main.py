@@ -5,6 +5,7 @@ Endpoints:
   POST /cron/knowledge-sync     ← Vercel cron daily
   POST /run/scout               ← Streamlit manual trigger
   POST /run/knowledge-sync      ← Streamlit manual trigger
+  POST /run/sync-profile        ← Re-sync AltCarbon profile from Notion
   POST /resume/triage           ← Streamlit triage decision
   POST /resume/section-review   ← Streamlit section approve/revise
   POST /resume/start-draft      ← Streamlit start draft for a grant
@@ -14,6 +15,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -34,6 +36,89 @@ from backend.jobs.scout_job import run_scout_pipeline
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# ── Theme-specific sub-agent prompts ──────────────────────────────────────────
+
+THEME_AGENTS = {
+    "climatetech": {
+        "name": "ClimaTech Drafter",
+        "temperature": 0.4,
+        "tone": "Authoritative and evidence-driven. Convey scientific credibility with measured confidence.",
+        "voice": "Technical expert who translates complex climate science into compelling funder narratives. Precise but accessible.",
+        "expertise": """DOMAIN EXPERTISE — Climate Technology:
+- You are an expert in carbon dioxide removal (CDR), MRV frameworks, and net-zero pathways
+- Use precise climate terminology: additionality, permanence, leakage, baseline scenarios, tCO2e
+- Reference relevant frameworks: Paris Agreement, SBTi, IPCC AR6, Verra/Gold Standard methodologies
+- Emphasize measurable climate impact with quantified emissions reductions
+- Speak to funder priorities: scalability, co-benefits, technology readiness levels (TRL)
+- Address carbon accounting rigor and third-party verification""",
+    },
+    "agritech": {
+        "name": "AgriTech Drafter",
+        "temperature": 0.4,
+        "tone": "Grounded and practical. Balance scientific rigor with on-the-ground agricultural realities.",
+        "voice": "Field-aware scientist who speaks both lab and farm. Emphasize real-world outcomes for farming communities.",
+        "expertise": """DOMAIN EXPERTISE — Agricultural Technology:
+- You are an expert in soil carbon sequestration, regenerative agriculture, and precision farming
+- Use agriscience terminology: soil organic carbon (SOC), no-till, cover cropping, biochar amendment, MRV for soil
+- Reference relevant standards: FAO guidelines, 4 per 1000 initiative, VERRA VM0042
+- Emphasize food security co-benefits, farmer livelihood improvements, and scalability
+- Address measurement challenges: permanence of soil carbon, sampling protocols, remote sensing validation
+- Speak to smallholder adoption barriers and technology transfer""",
+    },
+    "ai_for_sciences": {
+        "name": "AI for Sciences Drafter",
+        "temperature": 0.3,
+        "tone": "Methodical and precise. Demonstrate computational sophistication without jargon overload.",
+        "voice": "Applied ML researcher bridging algorithms and real-world environmental impact. Data-first storytelling.",
+        "expertise": """DOMAIN EXPERTISE — AI for Scientific Applications:
+- You are an expert in applying ML/AI to environmental monitoring, earth observation, and scientific discovery
+- Use ML terminology precisely: model architectures, training data pipelines, validation metrics, inference at scale
+- Reference relevant benchmarks and datasets where applicable
+- Emphasize novel methodological contributions and reproducibility
+- Address responsible AI: bias mitigation, interpretability, open-source commitments
+- Speak to computational requirements, scalability, and real-world deployment pathways""",
+    },
+    "applied_earth_sciences": {
+        "name": "Earth Sciences Drafter",
+        "temperature": 0.3,
+        "tone": "Rigorous and data-centric. Let geospatial evidence and measurement precision speak for themselves.",
+        "voice": "Geoscientist who connects remote sensing data to actionable environmental insights. Systematic and thorough.",
+        "expertise": """DOMAIN EXPERTISE — Applied Earth Sciences:
+- You are an expert in remote sensing, geospatial analysis, and subsurface characterization
+- Use geoscience terminology: spectral bands, spatial/temporal resolution, ground truth validation, geological formations
+- Reference relevant platforms and tools: Sentinel, Landsat, SAR, LiDAR, GIS frameworks
+- Emphasize data quality, calibration procedures, and uncertainty quantification
+- Address scalability from pilot sites to regional/national coverage
+- Speak to integration with existing monitoring infrastructure and government systems""",
+    },
+    "social_impact": {
+        "name": "Social Impact Drafter",
+        "temperature": 0.5,
+        "tone": "Empathetic and compelling. Centre human stories within rigorous impact frameworks.",
+        "voice": "Development practitioner who amplifies community voices. Warm but structured, balancing narrative with metrics.",
+        "expertise": """DOMAIN EXPERTISE — Social Impact & Inclusive Climate Action:
+- You are an expert in community-centered climate adaptation, gender equity, and inclusive development
+- Use development terminology: theory of change, participatory methods, intersectionality, just transition
+- Reference relevant frameworks: SDGs, UNFCCC Local Communities platform, gender-responsive climate action
+- Emphasize community ownership, local capacity building, and sustainability beyond project timelines
+- Address safeguards: FPIC, do-no-harm principles, grievance mechanisms
+- Speak to monitoring & evaluation with both quantitative and qualitative indicators""",
+    },
+    "deeptech": {
+        "name": "Deep Tech Drafter",
+        "temperature": 0.3,
+        "tone": "Bold and technically assured. Convey frontier innovation with commercial viability.",
+        "voice": "Deep tech strategist who bridges breakthrough science and market readiness. Confident, precise, IP-aware.",
+        "expertise": """DOMAIN EXPERTISE — Deep Technology & Frontier Science:
+- You are an expert in frontier technology commercialization, advanced materials, and breakthrough engineering
+- Use precise technical terminology specific to the technology domain (biotech, quantum, nanotech, etc.)
+- Reference technology readiness levels (TRL), IP strategy, and path from lab to market
+- Emphasize scientific novelty, defensible IP, and differentiation from existing approaches
+- Address scale-up challenges, manufacturing readiness, and regulatory pathways
+- Speak to team credentials, facilities access, and strategic partnerships""",
+    },
+}
+
 # ── Scout job state (in-process flag) ─────────────────────────────────────────
 _scout_running: bool = False
 _scout_started_at: Optional[str] = None
@@ -49,7 +134,26 @@ async def lifespan(app: FastAPI):
         logger.info("AltCarbon Grants Intelligence backend started")
     except Exception as exc:
         logger.error("Startup DB init failed (non-fatal — check MONGODB_URI): %s", exc)
+
+    # Start Notion MCP connection (non-fatal)
+    try:
+        from backend.integrations.notion_mcp import notion_mcp
+        connected = await notion_mcp.connect()
+        if connected:
+            logger.info("Notion MCP server connected at startup")
+        else:
+            logger.warning("Notion MCP not connected (NOTION_TOKEN missing or npx failed)")
+    except Exception as exc:
+        logger.warning("Notion MCP startup failed (non-fatal): %s", exc)
+
     yield
+
+    # Shutdown MCP
+    try:
+        from backend.integrations.notion_mcp import notion_mcp
+        await notion_mcp.disconnect()
+    except Exception:
+        pass
     logger.info("Backend shutting down")
 
 
@@ -161,6 +265,14 @@ async def _seed_default_agent_config():
             "word_limit_buffer_pct": 10,
             "context_chunks_per_section": 6,
             "custom_instructions": "",
+            "theme_settings": {
+                theme_key: {
+                    "tone": agent["tone"],
+                    "voice": agent["voice"],
+                    "temperature": agent["temperature"],
+                }
+                for theme_key, agent in THEME_AGENTS.items()
+            },
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
     ]
@@ -174,6 +286,34 @@ async def _seed_default_agent_config():
 @app.get("/health")
 async def health():
     return {"status": "ok", "ts": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/status/notion-mcp")
+async def notion_mcp_status():
+    """Check Notion MCP connection health."""
+    from backend.integrations.notion_mcp import notion_mcp
+    return await notion_mcp.health()
+
+
+@app.post("/run/notion-mcp/reconnect")
+async def reconnect_notion_mcp(
+    _: None = Depends(verify_internal),
+):
+    """Force reconnect the Notion MCP server."""
+    from backend.integrations.notion_mcp import notion_mcp
+    await notion_mcp.disconnect()
+    connected = await notion_mcp.connect()
+    return {"status": "connected" if connected else "failed"}
+
+
+@app.get("/status/api-health")
+async def api_health_status():
+    """Check credit/quota health of external APIs (Tavily, Exa, Perplexity, Jina)."""
+    from backend.utils.parsing import api_health
+    return {
+        "services": api_health.get_status(),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.get("/status/scout")
@@ -246,6 +386,20 @@ async def manual_knowledge_sync(
     return {"status": "knowledge_sync_started"}
 
 
+@app.post("/run/sync-profile")
+async def manual_sync_profile(
+    _: None = Depends(verify_internal),
+):
+    """Re-sync the AltCarbon static profile from Notion pages.
+
+    Fetches key Notion pages via the API and rebuilds
+    backend/knowledge/altcarbon_profile.md so agents have fresh context.
+    """
+    from backend.knowledge.sync_profile import sync_profile_from_notion
+    result = await sync_profile_from_notion()
+    return result
+
+
 # ── Analyst job state ─────────────────────────────────────────────────────────
 _analyst_running: bool = False
 _analyst_started_at: Optional[str] = None
@@ -303,6 +457,8 @@ async def manual_analyst(
 
             agent = AnalystAgent(
                 perplexity_api_key=s.perplexity_api_key,
+                gateway_api_key=s.ai_gateway_api_key,
+                gateway_url=s.ai_gateway_url,
                 weights=weights,
                 min_funding=min_funding,
             )
@@ -470,15 +626,70 @@ async def drafter_chat(
     grant_title = grant.get("grant_name") or grant.get("title") or "Unknown Grant"
     funder = grant.get("funder") or "Unknown"
 
-    # Load company context if available
-    company_context = ""
+    # Extract grant deep_analysis for context
+    grant_deep = ""
+    da = grant.get("deep_analysis") or {}
+    grant_context_parts = []
+    for field in ["opportunity_summary", "key_dates", "requirements", "eligibility_checklist"]:
+        val = da.get(field)
+        if val:
+            grant_context_parts.append(f"{field}: {json.dumps(val) if isinstance(val, (dict, list)) else val}")
+    grant_deep = "\n".join(grant_context_parts)
+
+    # Resolve theme-specific sub-agent
+    themes_detected = grant.get("themes_detected") or []
+    primary_theme = themes_detected[0] if themes_detected else "climatetech"
+    agent_info = THEME_AGENTS.get(primary_theme, THEME_AGENTS["climatetech"])
+    agent_name = agent_info["name"]
+    agent_theme = primary_theme
+
+    # Load company context — multiple layers for completeness
+
+    # Layer 1: Static profile (always available, has core company facts)
+    static_profile = ""
+    try:
+        from backend.agents.company_brain import _load_static_profile
+        static_profile = _load_static_profile() or ""
+    except Exception:
+        pass
+
+    # Layer 2: Knowledge chunks from MongoDB (theme-filtered)
+    chunks_text = ""
     try:
         from backend.db.mongo import get_db
         db = get_db()
-        chunks = await db["knowledge_chunks"].find({}).limit(10).to_list(length=10)
-        company_context = "\n".join(c.get("text", "") for c in chunks if c.get("text"))[:3000]
+        theme_filter = {"themes": {"$in": themes_detected}} if themes_detected else {}
+        chunks = await db["knowledge_chunks"].find(theme_filter).limit(10).to_list(length=10)
+        if not chunks and themes_detected:
+            chunks = await db["knowledge_chunks"].find({}).limit(10).to_list(length=10)
+        chunks_text = "\n".join(c.get("text", "") for c in chunks if c.get("text"))[:3000]
     except Exception:
         pass
+
+    # Layer 3: Notion MCP live search (if connected)
+    notion_context = ""
+    try:
+        from backend.integrations.notion_mcp import notion_mcp
+        if notion_mcp.connected:
+            results = await notion_mcp.search(body.message[:100])
+            for r in results[:3]:
+                page = await notion_mcp.fetch_page(r["id"])
+                if page:
+                    notion_context += f"\n---\n{page[:1500]}"
+                    if len(notion_context) > 4000:
+                        break
+    except Exception:
+        pass
+
+    # Combine context in priority order
+    context_parts = []
+    if static_profile:
+        context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:4000]}")
+    if chunks_text:
+        context_parts.append(f"[KNOWLEDGE CHUNKS]\n{chunks_text}")
+    if notion_context:
+        context_parts.append(f"[LIVE NOTION]\n{notion_context[:4000]}")
+    company_context = "\n\n".join(context_parts)
 
     # Build chat history for context
     history_block = ""
@@ -491,22 +702,59 @@ async def drafter_chat(
         if history_lines:
             history_block = "CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n\n"
 
-    system_prompt = f"""You are a grant writing assistant for AltCarbon, a climate technology company.
+    # Track which sources were loaded
+    sources_used = []
+    if static_profile:
+        sources_used.append("company_profile")
+    if chunks_text:
+        sources_used.append("knowledge_chunks")
+    if notion_context:
+        sources_used.append("notion_live")
+    if grant_deep:
+        sources_used.append("grant_deep_analysis")
+
+    # Load DB overrides for drafter config (theme-specific tone/voice/temperature)
+    from backend.db.mongo import agent_config
+    drafter_cfg = await agent_config().find_one({"agent": "drafter"}) or {}
+    theme_overrides = (drafter_cfg.get("theme_settings") or {}).get(primary_theme) or {}
+    agent_tone = theme_overrides.get("tone") or agent_info.get("tone", "")
+    agent_voice = theme_overrides.get("voice") or agent_info.get("voice", "")
+    agent_temp = theme_overrides.get("temperature") or agent_info.get("temperature", 0.4)
+    custom_instructions = drafter_cfg.get("custom_instructions") or ""
+
+    system_prompt = f"""You are {agent_name}, a grant writing assistant for AltCarbon, a climate technology company.
 You help draft responses to grant application questions and requirements.
+
+TONE: {agent_tone}
+VOICE: {agent_voice}
 
 GRANT: {grant_title}
 FUNDER: {funder}
 
-{f"COMPANY KNOWLEDGE (use as evidence base):{chr(10)}{company_context}" if company_context else ""}
+{agent_info["expertise"]}
 
-INSTRUCTIONS:
+{f"GRANT DETAILS:{chr(10)}{grant_deep}" if grant_deep else ""}
+
+{f"COMPANY KNOWLEDGE:{chr(10)}{company_context}" if company_context else ""}
+
+The COMPANY PROFILE section contains verified facts about AltCarbon — always use these for founding details, team, address, buyers, and technology specs. Never use placeholders like [YEAR] or [ADDRESS] when this data is available. The LIVE NOTION section has the latest information from the company workspace.
+
+{f"CUSTOM INSTRUCTIONS:{chr(10)}{custom_instructions}{chr(10)}" if custom_instructions else ""}INSTRUCTIONS:
 - Answer the user's question or draft the requested section
+- Adopt the TONE and VOICE described above consistently throughout your response
 - Be specific and concrete — use the company knowledge when available
-- For claims you cannot support with provided knowledge, write: [EVIDENCE NEEDED: brief description]
+- Only flag [EVIDENCE NEEDED: brief description] for information truly absent from all provided knowledge sources
 - Do NOT invent statistics, team names, or technical claims
-- Use professional grant-writing tone
 - Format your response in clear markdown with headings, bold, and lists where appropriate
-- Stay focused on what the user asked"""
+- Stay focused on what the user asked
+
+SOURCE ATTRIBUTION:
+At the end of your response, add a "---" divider followed by a small "Sources" section listing which knowledge sources you drew from. Use these labels:
+- "Company Profile" — if you used facts from the [COMPANY PROFILE] section
+- "Knowledge Base" — if you used facts from the [KNOWLEDGE CHUNKS] section
+- "Notion (Live)" — if you used facts from the [LIVE NOTION] section
+- "Grant Analysis" — if you used facts from the GRANT DETAILS section
+Only list sources you actually referenced. Format as a compact comma-separated line, e.g.: **Sources:** Company Profile, Grant Analysis"""
 
     prompt = f"""{history_block}USER MESSAGE:
 {body.message}
@@ -514,7 +762,10 @@ INSTRUCTIONS:
 Write a well-structured response in markdown format:"""
 
     try:
-        content = await llm_chat(prompt, model=SONNET, max_tokens=2048, system=system_prompt)
+        content = await llm_chat(
+            prompt, model=SONNET, max_tokens=2048, system=system_prompt,
+            temperature=agent_temp,
+        )
         content = content.strip()
 
         import re
@@ -526,6 +777,10 @@ Write a well-structured response in markdown format:"""
             "word_count": word_count,
             "evidence_gaps": evidence_gaps,
             "section_name": body.section_name,
+            "agent_name": agent_name,
+            "agent_theme": agent_theme,
+            "sources_used": sources_used,
+            "agent_temperature": agent_temp,
         }
     except Exception as e:
         logger.error("Drafter chat failed: %s", e, exc_info=True)

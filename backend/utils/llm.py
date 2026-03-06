@@ -3,6 +3,10 @@
 Uses the OpenAI-compatible SDK against the Vercel AI Gateway.
 Falls back to direct Anthropic API if no gateway key is set.
 
+Automatic fallback: when a model's API credits are exhausted (429/402/quota errors),
+the system tries the next model in the fallback chain and logs the event to
+Notion Mission Control for visibility.
+
 Usage:
     from backend.utils.llm import chat, SONNET, HAIKU
 
@@ -10,13 +14,128 @@ Usage:
 """
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+
 from openai import AsyncOpenAI
 
+logger = logging.getLogger(__name__)
 
-# Model name constants — gateway uses provider/model format
-SONNET = "anthropic/claude-sonnet-4-6"
-HAIKU  = "anthropic/claude-haiku-4-5-20251001"
+# ── Model constants ──────────────────────────────────────────────────────────
+# Testing with cheaper models; swap back to Anthropic for production:
+#   SONNET = "anthropic/claude-sonnet-4-6"
+#   HAIKU  = "anthropic/claude-haiku-4-5-20251001"
+SONNET = "google/gemini-2.5-flash-lite"
+HAIKU  = "openai/gpt-5-nano"
 
+# ── Fallback chains ──────────────────────────────────────────────────────────
+# When a model's credits/quota are exhausted, try the next in chain.
+# Each chain is ordered: primary → cheaper alternative → Anthropic backstop.
+_FALLBACK_CHAINS: Dict[str, List[str]] = {
+    # SONNET-tier (heavy: scoring, deep research, drafter)
+    "google/gemini-2.5-flash-lite": [
+        "openai/gpt-5-nano",
+        "anthropic/claude-sonnet-4-6",
+    ],
+    "anthropic/claude-sonnet-4-6": [
+        "google/gemini-2.5-flash-lite",
+        "openai/gpt-5-nano",
+    ],
+    # HAIKU-tier (light: extraction, currency, winners)
+    "openai/gpt-5-nano": [
+        "google/gemini-2.5-flash-lite",
+        "anthropic/claude-haiku-4-5-20251001",
+    ],
+    "anthropic/claude-haiku-4-5-20251001": [
+        "openai/gpt-5-nano",
+        "google/gemini-2.5-flash-lite",
+    ],
+}
+
+# ── Exhausted model tracking ─────────────────────────────────────────────────
+# When a model hits a credit/quota error, we mark it as exhausted for a cooldown
+# period so subsequent calls skip it immediately instead of wasting time.
+_exhausted_models: Dict[str, float] = {}  # model → expiry timestamp
+_EXHAUSTION_COOLDOWN_SECS = 300  # 5 minutes before retrying an exhausted model
+
+
+def _is_exhausted(model: str) -> bool:
+    """Check if a model is currently in the exhaustion cooldown window."""
+    expiry = _exhausted_models.get(model)
+    if expiry is None:
+        return False
+    if time.time() > expiry:
+        _exhausted_models.pop(model, None)
+        return False
+    return True
+
+
+def _mark_exhausted(model: str) -> None:
+    """Mark a model as credit-exhausted for the cooldown period."""
+    _exhausted_models[model] = time.time() + _EXHAUSTION_COOLDOWN_SECS
+    logger.warning("Model %s marked as exhausted for %ds", model, _EXHAUSTION_COOLDOWN_SECS)
+
+
+def _is_credit_error(exc: Exception) -> bool:
+    """Return True if the exception indicates credit/quota exhaustion."""
+    # OpenAI SDK wraps HTTP errors in specific exception types
+    exc_str = str(exc).lower()
+    credit_signals = (
+        "429", "rate limit", "rate_limit",
+        "402", "payment required", "insufficient",
+        "quota", "exceeded", "billing", "credits",
+        "resource_exhausted", "too many requests",
+        "limit reached", "spending limit",
+    )
+    if any(s in exc_str for s in credit_signals):
+        return True
+
+    # Check HTTP status code if available (openai.APIStatusError)
+    status = getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
+    if status in (429, 402, 403):
+        return True
+
+    return False
+
+
+# ── Notion Mission Control logging ───────────────────────────────────────────
+
+async def _log_fallback_to_notion(
+    primary_model: str,
+    fallback_model: str,
+    error_msg: str,
+) -> None:
+    """Log a model fallback event to Notion Mission Control (fire-and-forget)."""
+    try:
+        from backend.integrations.notion_sync import log_error
+        await log_error(
+            agent="llm_router",
+            error=Exception(f"Credit exhaustion fallback: {primary_model} → {fallback_model}"),
+            tb=f"Primary model: {primary_model}\nFallback model: {fallback_model}\nError: {error_msg}",
+            severity="Warning",
+        )
+    except Exception:
+        logger.debug("Notion fallback log skipped", exc_info=True)
+
+
+async def _log_all_models_failed(models_tried: List[str], error_msg: str) -> None:
+    """Log to Mission Control when ALL models in a chain are exhausted."""
+    try:
+        from backend.integrations.notion_sync import log_error
+        await log_error(
+            agent="llm_router",
+            error=Exception(f"ALL models exhausted: {', '.join(models_tried)}"),
+            tb=f"Models tried: {', '.join(models_tried)}\nLast error: {error_msg}",
+            severity="Critical",
+        )
+    except Exception:
+        logger.debug("Notion all-failed log skipped", exc_info=True)
+
+
+# ── Client ───────────────────────────────────────────────────────────────────
 
 def get_client() -> AsyncOpenAI:
     """Return an OpenAI-compatible client pointed at the AI Gateway."""
@@ -36,22 +155,90 @@ def get_client() -> AsyncOpenAI:
     )
 
 
+# ── Core chat with automatic fallback ────────────────────────────────────────
+
+async def _call_model(
+    client: AsyncOpenAI,
+    model: str,
+    messages: list,
+    max_tokens: int,
+    temperature: Optional[float] = None,
+) -> str:
+    """Make a single chat completion call. Raises on failure."""
+    kwargs: Dict = dict(model=model, max_tokens=max_tokens, messages=messages)
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    response = await client.chat.completions.create(**kwargs)
+    return response.choices[0].message.content or ""
+
+
 async def chat(
     prompt: str,
     model: str = SONNET,
     max_tokens: int = 1024,
     system: str = "",
+    temperature: Optional[float] = None,
 ) -> str:
-    """One-shot chat completion. Returns the text content."""
+    """One-shot chat completion with automatic model fallback.
+
+    If the primary model's credits are exhausted (429/402/quota errors),
+    tries each fallback model in order. Logs fallbacks to Mission Control.
+    """
     client = get_client()
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    response = await client.chat.completions.create(
-        model=model,
-        max_tokens=max_tokens,
-        messages=messages,
+    # Build the model chain: primary + fallbacks
+    chain = [model] + _FALLBACK_CHAINS.get(model, [])
+    models_tried: List[str] = []
+    last_error: Optional[Exception] = None
+
+    for candidate in chain:
+        # Skip models we already know are exhausted
+        if _is_exhausted(candidate):
+            logger.debug("Skipping exhausted model: %s", candidate)
+            models_tried.append(f"{candidate} (skipped-exhausted)")
+            continue
+
+        try:
+            result = await _call_model(client, candidate, messages, max_tokens, temperature)
+            # If we fell back from the primary, log it
+            if candidate != model:
+                logger.info(
+                    "Fallback success: %s → %s (primary was %s)",
+                    models_tried[-1] if models_tried else model, candidate, model,
+                )
+            return result
+
+        except Exception as exc:
+            models_tried.append(candidate)
+            last_error = exc
+
+            if _is_credit_error(exc):
+                _mark_exhausted(candidate)
+                error_msg = str(exc)[:200]
+                logger.warning(
+                    "Credits exhausted for %s: %s — trying next fallback",
+                    candidate, error_msg,
+                )
+                # Log fallback to Mission Control (non-blocking)
+                next_candidates = [c for c in chain if c not in models_tried and not _is_exhausted(c)]
+                if next_candidates:
+                    asyncio.create_task(_log_fallback_to_notion(
+                        candidate, next_candidates[0], error_msg,
+                    ))
+                continue
+            else:
+                # Non-credit error (network, malformed request, etc.) — don't fallback
+                raise
+
+    # All models exhausted
+    error_msg = str(last_error)[:300] if last_error else "Unknown error"
+    logger.error("ALL models exhausted: %s — error: %s", models_tried, error_msg)
+    asyncio.create_task(_log_all_models_failed(models_tried, error_msg))
+    raise RuntimeError(
+        f"All LLM models exhausted ({', '.join(models_tried)}). "
+        f"Last error: {error_msg}"
     )
-    return response.choices[0].message.content or ""

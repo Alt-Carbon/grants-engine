@@ -33,6 +33,9 @@ google-api-python-client>=2.0.0
 # HTTP
 httpx>=0.27.0,<1.0.0
 
+# MCP (Model Context Protocol) — Notion MCP client
+mcp>=1.0.0
+
 # Scheduling
 apscheduler>=3.10.0,<4.0.0
 

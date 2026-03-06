@@ -2,7 +2,15 @@
   "crons": [
     {
       "path": "/api/cron/scout",
-      "schedule": "0 2 * * 1"
+      "schedule": "0 2 */2 * *"
+    },
+    {
+      "path": "/api/cron/analyst",
+      "schedule": "0 4 */2 * *"
+    },
+    {
+      "path": "/api/cron/knowledge-sync",
+      "schedule": "0 6 * * *"
     }
   ]
 }

@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { GrantDetailSheet } from "@/components/GrantDetailSheet";
 import type { Grant } from "@/lib/queries";
 import { getPriority, getThemeLabel } from "@/lib/utils";
-import { CheckCircle, Eye, XCircle, ChevronDown, ChevronUp, AlertTriangle, ExternalLink } from "lucide-react";
+import { CheckCircle, XCircle, ChevronDown, ChevronUp, AlertTriangle, ExternalLink } from "lucide-react";
 
 interface TriageQueueProps {
   grants: Grant[];
@@ -17,12 +17,12 @@ interface TriageQueueProps {
 
 interface TriageResult {
   grantId: string;
-  decision: "pursue" | "watch" | "pass";
+  decision: "pursue" | "pass";
 }
 
 export function TriageQueue({ grants: initialGrants }: TriageQueueProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [decisions, setDecisions] = useState<Record<string, "pursue" | "watch" | "pass">>({});
+  const [decisions, setDecisions] = useState<Record<string, "pursue" | "pass">>({});
   const [overrideReasons, setOverrideReasons] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<Set<string>>(new Set());
@@ -220,14 +220,6 @@ export function TriageQueue({ grants: initialGrants }: TriageQueueProps) {
               >
                 <CheckCircle className="h-4 w-4" />
                 Pursue
-              </Button>
-              <Button
-                size="sm"
-                variant={decision === "watch" ? "default" : "outline"}
-                onClick={() => setDecisions((p) => ({ ...p, [grant._id]: "watch" }))}
-              >
-                <Eye className="h-4 w-4" />
-                Watch
               </Button>
               <Button
                 size="sm"

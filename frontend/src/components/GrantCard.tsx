@@ -8,6 +8,7 @@ interface GrantCardProps {
   grant: Grant;
   compact?: boolean;
   href?: string;
+  isNew?: boolean;
   onStatusChange?: (grantId: string, newStatus: string) => void;
 }
 
@@ -58,6 +59,7 @@ function PassedLabel({ status }: { status: string }) {
 export function GrantCard({
   grant,
   compact = false,
+  isNew = false,
   onStatusChange,
 }: GrantCardProps) {
   const name = grant.grant_name || grant.title || "Unnamed Grant";
@@ -68,15 +70,24 @@ export function GrantCard({
   );
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-3 shadow-sm hover:shadow-md transition-shadow">
+    <div className={`rounded-lg border bg-white p-3 shadow-sm hover:shadow-md transition-shadow ${
+      isNew ? "border-blue-300 ring-1 ring-blue-100" : "border-gray-200"
+    }`}>
       <div className="flex items-start justify-between gap-2">
-        <h3
-          className={`font-medium text-gray-900 ${
-            compact ? "line-clamp-2 text-xs" : "text-sm"
-          }`}
-        >
-          {name}
-        </h3>
+        <div className="flex items-center gap-1.5 min-w-0">
+          {isNew && (
+            <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-blue-700">
+              New
+            </span>
+          )}
+          <h3
+            className={`font-medium text-gray-900 ${
+              compact ? "line-clamp-2 text-xs" : "text-sm"
+            }`}
+          >
+            {name}
+          </h3>
+        </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <PriorityBadge score={score} />
           <ScoreBadge score={score} />

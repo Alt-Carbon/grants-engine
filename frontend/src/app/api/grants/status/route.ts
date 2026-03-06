@@ -9,7 +9,6 @@ const VALID_STATUSES = new Set([
   "triage",
   "pursue",
   "pursuing",
-  "watch",
   "drafting",
   "draft_complete",
   "submitted",
