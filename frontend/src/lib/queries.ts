@@ -46,6 +46,7 @@ export interface PipelineRecord {
   final_draft_url?: string | null;
   grant_title?: string;
   grant_funder?: string;
+  grant_themes?: string[];
   latest_draft?: DraftDoc | null;
 }
 
@@ -90,18 +91,17 @@ function serializeId(doc: Record<string, unknown>): Record<string, unknown> {
 
 export async function getDashboardStats() {
   const db = await getDb();
-  const [total, triage, pursuing, watching, onHold, drafting, complete, urgentCount] =
+  const [total, triage, pursuing, onHold, drafting, complete, urgentCount] =
     await Promise.all([
       db.collection("grants_scored").countDocuments({}),
       db.collection("grants_scored").countDocuments({ status: "triage" }),
       db.collection("grants_scored").countDocuments({ status: { $in: ["pursue", "pursuing"] } }),
-      db.collection("grants_scored").countDocuments({ status: "watch" }),
       db.collection("grants_scored").countDocuments({ status: "hold" }),
       db.collection("grants_pipeline").countDocuments({ status: "drafting" }),
       db.collection("grants_pipeline").countDocuments({ status: "draft_complete" }),
       db.collection("grants_scored").countDocuments({
         deadline_urgent: true,
-        status: { $in: ["triage", "pursue", "watch"] },
+        status: { $in: ["triage", "pursue"] },
       }),
     ]);
 
@@ -124,7 +124,6 @@ export async function getDashboardStats() {
     total_discovered: total,
     in_triage: triage,
     pursuing,
-    watching,
     on_hold: onHold,
     deadline_urgent_count: urgentCount,
     drafting,
@@ -171,7 +170,6 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
   const grouped: Record<string, Grant[]> = {
     shortlisted: [],
     pursue: [],
-    watch: [],
     drafting: [],
     submitted: [],
     rejected: [],
@@ -183,7 +181,6 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
 
     if (g.status === "triage") grouped.shortlisted.push(g);
     else if (g.status === "pursue" || g.status === "pursuing") grouped.pursue.push(g);
-    else if (g.status === "watch") grouped.watch.push(g);
     else if (g.status === "drafting") grouped.drafting.push(g);
     else if (g.status === "draft_complete" || g.status === "submitted" || g.status === "won")
       grouped.submitted.push(g);
@@ -235,6 +232,7 @@ export async function getDraftGrants(): Promise<PipelineRecord[]> {
       if (grant) {
         pid.grant_title = (grant.grant_name as string) || (grant.title as string) || "Unknown Grant";
         pid.grant_funder = (grant.funder as string) || "";
+        pid.grant_themes = (grant.themes_detected as string[]) || [];
       }
     }
 
@@ -355,4 +353,468 @@ export async function saveAgentConfig(agent: string, config: Record<string, unkn
   const db = await getDb();
   const update = { ...config, agent, updated_at: new Date().toISOString() };
   await db.collection("agent_config").updateOne({ agent }, { $set: update }, { upsert: true });
+}
+
+// ── Monitoring (B2) ─────────────────────────────────────────────────────────
+
+export interface AgentRun {
+  _id: string;
+  node: string;
+  action: string;
+  created_at: string;
+  grants_scored?: number;
+  new_grants?: number;
+  total_found?: number;
+  pursue_count?: number;
+  auto_pass_count?: number;
+  hold_count?: number;
+  top_score?: number;
+  run_at?: string;
+  quality_rejected?: number;
+  content_dupes?: number;
+  event?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentHealth {
+  agent: string;
+  lastRun: string | null;
+  lastStatus: string;
+  totalRuns: number;
+  successfulRuns: number;
+  failedRuns: number;
+  uptimePct: number;
+  lastGrantsProcessed: number;
+}
+
+export async function getAgentHealth(): Promise<AgentHealth[]> {
+  const db = await getDb();
+  const agents = ["scout", "analyst", "drafter", "knowledge_sync"];
+  const results: AgentHealth[] = [];
+
+  for (const agent of agents) {
+    const query = agent === "scout"
+      ? { node: "scout" }
+      : agent === "analyst"
+      ? { node: "analyst" }
+      : agent === "knowledge_sync"
+      ? { event: { $regex: /knowledge/i } }
+      : { node: agent };
+
+    const allRuns = await db.collection("audit_logs")
+      .find(query)
+      .sort({ created_at: -1 })
+      .limit(100)
+      .toArray();
+
+    const lastRun = allRuns[0];
+    const totalRuns = allRuns.length;
+
+    // For scout, also check scout_runs
+    let scoutRuns = 0;
+    if (agent === "scout") {
+      scoutRuns = await db.collection("scout_runs").countDocuments({});
+    }
+
+    const failedRuns = allRuns.filter(
+      (r) => String(r.action || "").toLowerCase().includes("fail")
+    ).length;
+
+    results.push({
+      agent,
+      lastRun: lastRun?.created_at ?? lastRun?.run_at ?? null,
+      lastStatus: lastRun ? "completed" : "never_run",
+      totalRuns: agent === "scout" ? Math.max(totalRuns, scoutRuns) : totalRuns,
+      successfulRuns: totalRuns - failedRuns,
+      failedRuns,
+      uptimePct: totalRuns > 0 ? Math.round(((totalRuns - failedRuns) / totalRuns) * 100) : 0,
+      lastGrantsProcessed: lastRun?.grants_scored ?? lastRun?.new_grants ?? 0,
+    });
+  }
+
+  return results;
+}
+
+export async function getRunHistory(limit = 50): Promise<AgentRun[]> {
+  const db = await getDb();
+  const docs = await db.collection("audit_logs")
+    .find({ node: { $in: ["scout", "analyst", "drafter", "company_brain", "grant_reader"] } })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray();
+
+  return docs.map((d) => serializeId(d as Record<string, unknown>) as unknown as AgentRun);
+}
+
+export async function getErrorTimeline(days = 7): Promise<{ date: string; agent: string; message: string; created_at: string }[]> {
+  const db = await getDb();
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  const docs = await db.collection("audit_logs")
+    .find({
+      created_at: { $gte: since },
+      $or: [
+        { action: { $regex: /fail|error/i } },
+        { event: { $regex: /fail|error/i } },
+      ],
+    })
+    .sort({ created_at: -1 })
+    .limit(50)
+    .toArray();
+
+  return docs.map((d) => ({
+    date: (d.created_at as string || "").slice(0, 10),
+    agent: (d.node as string) || "unknown",
+    message: (d.action as string) || (d.event as string) || "Error",
+    created_at: d.created_at as string || "",
+  }));
+}
+
+// ── Audit Log (B5) ──────────────────────────────────────────────────────────
+
+export interface AuditEntry {
+  _id: string;
+  node?: string;
+  event?: string;
+  action?: string;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+export async function getAuditLogs(
+  filters?: { agent?: string; days?: number },
+  limit = 100
+): Promise<AuditEntry[]> {
+  const db = await getDb();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const query: Record<string, any> = {};
+
+  if (filters?.agent) {
+    query.node = filters.agent;
+  }
+  if (filters?.days) {
+    const since = new Date(Date.now() - filters.days * 24 * 60 * 60 * 1000).toISOString();
+    query.created_at = { $gte: since };
+  }
+
+  const docs = await db.collection("audit_logs")
+    .find(query)
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray();
+
+  return docs.map((d) => serializeId(d as Record<string, unknown>) as unknown as AuditEntry);
+}
+
+// ── Grant Comments (B4) ─────────────────────────────────────────────────────
+
+export interface GrantComment {
+  _id: string;
+  grant_id: string;
+  user_name: string;
+  user_email: string;
+  message: string;
+  created_at: string;
+  parent_id?: string;
+}
+
+export async function getGrantComments(grantId: string): Promise<GrantComment[]> {
+  const db = await getDb();
+  const docs = await db.collection("grant_comments")
+    .find({ grant_id: grantId })
+    .sort({ created_at: 1 })
+    .limit(100)
+    .toArray();
+
+  return docs.map((d) => serializeId(d as Record<string, unknown>) as unknown as GrantComment);
+}
+
+export interface ScoutRunDetail {
+  _id: string;
+  run_at: string;
+  tavily_queries: number;
+  exa_queries: number;
+  perplexity_queries: number;
+  direct_sources_crawled: number;
+  total_found: number;
+  new_grants: number;
+  quality_rejected: number;
+  content_dupes: number;
+}
+
+export async function getScoutRuns(limit = 10): Promise<ScoutRunDetail[]> {
+  const db = await getDb();
+  const docs = await db.collection("scout_runs")
+    .find({})
+    .sort({ run_at: -1 })
+    .limit(limit)
+    .toArray();
+  return docs.map((d) => serializeId(d as Record<string, unknown>) as unknown as ScoutRunDetail);
+}
+
+export async function addGrantComment(
+  grantId: string,
+  userName: string,
+  userEmail: string,
+  message: string
+): Promise<GrantComment> {
+  const db = await getDb();
+  const doc = {
+    grant_id: grantId,
+    user_name: userName,
+    user_email: userEmail,
+    message,
+    created_at: new Date().toISOString(),
+  };
+  const result = await db.collection("grant_comments").insertOne(doc);
+  return { ...doc, _id: String(result.insertedId) };
+}
+
+// ── Recent Discoveries (Mission Control) ──────────────────────────────────
+
+export interface RecentDiscovery {
+  _id: string;
+  grant_name: string;
+  funder: string;
+  source: string;
+  scored_at: string | null;
+  scraped_at: string | null;
+  weighted_total: number | null;
+  status: string;
+  themes_detected: string[];
+  max_funding_usd: number | null;
+  url: string | null;
+}
+
+export async function getRecentDiscoveries(limit = 20): Promise<RecentDiscovery[]> {
+  const db = await getDb();
+
+  // Get recently scored grants (newest first)
+  const scored = await db.collection("grants_scored")
+    .find({})
+    .sort({ scored_at: -1, _id: -1 })
+    .limit(limit)
+    .toArray();
+
+  return scored.map((d) => ({
+    _id: String(d._id),
+    grant_name: (d.grant_name as string) || (d.title as string) || "Untitled",
+    funder: (d.funder as string) || "Unknown",
+    source: (d.source as string) || "scout",
+    scored_at: (d.scored_at as string) || null,
+    scraped_at: (d.scraped_at as string) || null,
+    weighted_total: (d.weighted_total as number) ?? null,
+    status: (d.status as string) || "triage",
+    themes_detected: (d.themes_detected as string[]) || [],
+    max_funding_usd: (d.max_funding_usd as number) ?? (d.max_funding as number) ?? null,
+    url: (d.url as string) || null,
+  }));
+}
+
+// ── Activity Feed (Mission Control) ────────────────────────────────────────
+
+export interface ActivityEvent {
+  _id: string;
+  agent: string;
+  action: string;
+  details: string;
+  created_at: string;
+  type: "success" | "error" | "info" | "warning";
+}
+
+export async function getActivityFeed(limit = 50): Promise<ActivityEvent[]> {
+  const db = await getDb();
+
+  const docs = await db.collection("audit_logs")
+    .find({})
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray();
+
+  return docs.map((d) => {
+    const action = (d.action as string) || (d.event as string) || "";
+    const isError = /fail|error/i.test(action);
+    const isWarning = /warn|skip|reject/i.test(action);
+
+    const details: string[] = [];
+    if (d.grants_scored) details.push(`${d.grants_scored} scored`);
+    if (d.new_grants) details.push(`${d.new_grants} new`);
+    if (d.total_found) details.push(`${d.total_found} found`);
+    if (d.pursue_count) details.push(`${d.pursue_count} pursue`);
+    if (d.auto_pass_count) details.push(`${d.auto_pass_count} auto-pass`);
+    if (d.scored_count) details.push(`${d.scored_count} scored`);
+    if (d.input_count) details.push(`${d.input_count} input`);
+
+    return {
+      _id: String(d._id),
+      agent: (d.node as string) || "system",
+      action,
+      details: details.join(" · ") || "",
+      created_at: (d.created_at as string) || "",
+      type: isError ? "error" : isWarning ? "warning" : "success",
+    };
+  });
+}
+
+// ── Pipeline Summary (Mission Control) ─────────────────────────────────────
+
+export interface PipelineSummary {
+  total_discovered: number;
+  in_triage: number;
+  pursuing: number;
+  on_hold: number;
+  drafting: number;
+  submitted: number;
+  rejected: number;
+  urgent: number;
+  unprocessed: number;
+}
+
+export async function getPipelineSummary(): Promise<PipelineSummary> {
+  const db = await getDb();
+  const [total, triage, pursuing, onHold, drafting, submitted, rejected, urgent, unprocessed] =
+    await Promise.all([
+      db.collection("grants_scored").countDocuments({}),
+      db.collection("grants_scored").countDocuments({ status: "triage" }),
+      db.collection("grants_scored").countDocuments({ status: { $in: ["pursue", "pursuing"] } }),
+      db.collection("grants_scored").countDocuments({ status: "hold" }),
+      db.collection("grants_pipeline").countDocuments({ status: "drafting" }),
+      db.collection("grants_pipeline").countDocuments({ status: { $in: ["draft_complete", "submitted", "won"] } }),
+      db.collection("grants_scored").countDocuments({ status: { $in: ["passed", "auto_pass", "human_passed"] } }),
+      db.collection("grants_scored").countDocuments({ deadline_urgent: true, status: { $in: ["triage", "pursue"] } }),
+      db.collection("grants_raw").countDocuments({ processed: false }),
+    ]);
+
+  return {
+    total_discovered: total,
+    in_triage: triage,
+    pursuing,
+    on_hold: onHold,
+    drafting,
+    submitted,
+    rejected,
+    urgent,
+    unprocessed,
+  };
+}
+
+// ── What's New Digest (returning user) ──────────────────────────────────
+
+export interface WhatsNewDigest {
+  daysSinceVisit: number;
+  scoutRuns: number;
+  totalFound: number;
+  newGrantsAdded: number;
+  grantsScored: number;
+  newInTriage: number;
+  urgentDeadlines: number;
+  errors: number;
+  topNewGrants: {
+    _id: string;
+    grant_name: string;
+    funder: string;
+    weighted_total: number | null;
+    themes_detected: string[];
+    scored_at: string | null;
+  }[];
+  recentAgentRuns: {
+    agent: string;
+    action: string;
+    created_at: string;
+  }[];
+}
+
+export async function getWhatsNewDigest(since: string): Promise<WhatsNewDigest> {
+  const db = await getDb();
+
+  const daysSinceVisit = Math.max(
+    1,
+    Math.floor((Date.now() - new Date(since).getTime()) / 86_400_000)
+  );
+
+  const [
+    scoutRunCount,
+    newGrantsAdded,
+    newInTriage,
+    urgentDeadlines,
+    errorCount,
+  ] = await Promise.all([
+    db.collection("scout_runs").countDocuments({ run_at: { $gte: since } }),
+    db.collection("grants_scored").countDocuments({ scored_at: { $gte: since } }),
+    db.collection("grants_scored").countDocuments({
+      scored_at: { $gte: since },
+      status: "triage",
+    }),
+    db.collection("grants_scored").countDocuments({
+      deadline_urgent: true,
+      status: { $in: ["triage", "pursue"] },
+    }),
+    db.collection("audit_logs").countDocuments({
+      created_at: { $gte: since },
+      $or: [
+        { action: { $regex: /fail|error/i } },
+        { event: { $regex: /fail|error/i } },
+      ],
+    }),
+  ]);
+
+  // Total found across scout runs since last visit
+  const scoutAgg = await db.collection("scout_runs")
+    .aggregate([
+      { $match: { run_at: { $gte: since } } },
+      { $group: { _id: null, total_found: { $sum: "$total_found" }, new_grants: { $sum: "$new_grants" } } },
+    ])
+    .toArray();
+  const totalFound = scoutAgg[0]?.total_found ?? 0;
+
+  // Analyst scoring count
+  const analystAgg = await db.collection("audit_logs")
+    .aggregate([
+      { $match: { created_at: { $gte: since }, event: "analyst_run_complete" } },
+      { $group: { _id: null, scored: { $sum: "$scored_count" } } },
+    ])
+    .toArray();
+  const grantsScored = analystAgg[0]?.scored ?? 0;
+
+  // Top new grants (highest score first)
+  const topNewDocs = await db.collection("grants_scored")
+    .find({ scored_at: { $gte: since } })
+    .sort({ weighted_total: -1 })
+    .limit(5)
+    .toArray();
+
+  const topNewGrants = topNewDocs.map((d) => ({
+    _id: String(d._id),
+    grant_name: (d.grant_name as string) || (d.title as string) || "Untitled",
+    funder: (d.funder as string) || "Unknown",
+    weighted_total: (d.weighted_total as number) ?? null,
+    themes_detected: (d.themes_detected as string[]) || [],
+    scored_at: (d.scored_at as string) || null,
+  }));
+
+  // Recent agent activity (latest 8)
+  const recentActivity = await db.collection("audit_logs")
+    .find({ created_at: { $gte: since } })
+    .sort({ created_at: -1 })
+    .limit(8)
+    .toArray();
+
+  const recentAgentRuns = recentActivity.map((d) => ({
+    agent: (d.node as string) || "system",
+    action: (d.action as string) || (d.event as string) || "",
+    created_at: (d.created_at as string) || "",
+  }));
+
+  return {
+    daysSinceVisit,
+    scoutRuns: scoutRunCount,
+    totalFound,
+    newGrantsAdded,
+    grantsScored,
+    newInTriage,
+    urgentDeadlines,
+    errors: errorCount,
+    topNewGrants,
+    recentAgentRuns,
+  };
 }

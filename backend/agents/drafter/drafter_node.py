@@ -24,6 +24,28 @@ logger = logging.getLogger(__name__)
 
 async def drafter_node(state: GrantState) -> Dict:
     """LangGraph node: write/revise section, set pending_interrupt for human review."""
+    import traceback as _tb
+
+    try:
+        return await _drafter_node_inner(state)
+    except Exception as exc:
+        grant_id = state.get("selected_grant_id", "")
+        try:
+            from backend.integrations.notion_sync import log_error
+            await log_error(
+                agent="drafter",
+                error=exc,
+                tb=_tb.format_exc(),
+                grant_name=str(grant_id),
+                severity="Critical",
+            )
+        except Exception:
+            logger.debug("Notion error sync skipped (drafter failure)", exc_info=True)
+        raise
+
+
+async def _drafter_node_inner(state: GrantState) -> Dict:
+    """Inner drafter logic, wrapped by drafter_node() for error handling."""
     from backend.db.mongo import grants_scored
     from bson import ObjectId
 
@@ -68,6 +90,22 @@ async def drafter_node(state: GrantState) -> Dict:
                 "approved_at": datetime.now(timezone.utc).isoformat(),
             }
             logger.info("Drafter: section '%s' approved", prev_name)
+
+            # Notion sync — mark section approved
+            try:
+                from backend.integrations.notion_sync import sync_draft_section
+                grant_name = grant.get("grant_name") or grant.get("title") or "Unknown"
+                await sync_draft_section(
+                    grant_id=str(grant_id or ""),
+                    grant_name=grant_name,
+                    section_name=prev_name,
+                    content=content_to_save,
+                    word_count=len(content_to_save.split()),
+                    word_limit=prev_section.get("word_limit") or 500,
+                    status="Approved",
+                )
+            except Exception:
+                logger.debug("Notion sync skipped (section approval)", exc_info=True)
 
     elif review_decision == "revise" and current_idx > 0:
         # Rewrite current section — stay on same index
@@ -128,6 +166,24 @@ async def drafter_node(state: GrantState) -> Dict:
         company_context=company_context,
         style_examples=style_examples,
     )
+
+    # ── Notion Mission Control sync ──────────────────────────────────
+    try:
+        from backend.integrations.notion_sync import sync_draft_section
+        grant_name = grant.get("grant_name") or grant.get("title") or "Unknown"
+        await sync_draft_section(
+            grant_id=str(grant_id or ""),
+            grant_name=grant_name,
+            section_name=result["section_name"],
+            content=result.get("content", ""),
+            word_count=result.get("word_count", 0),
+            word_limit=section.get("word_limit", 500),
+            version=1,
+            status="In Review",
+            evidence_gaps=result.get("evidence_gaps"),
+        )
+    except Exception:
+        logger.debug("Notion sync skipped (drafter section)", exc_info=True)
 
     return {
         "current_section_index": current_idx + 1,

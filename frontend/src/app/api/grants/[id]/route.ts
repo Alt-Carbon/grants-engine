@@ -3,10 +3,11 @@ import { NextRequest } from "next/server";
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { id: string } }
+  props: { params: Promise<{ id: string }> }
 ) {
   try {
-    const grant = await getGrantById(params.id);
+    const { id } = await props.params;
+    const grant = await getGrantById(id);
     if (!grant) {
       return Response.json({ error: "Grant not found" }, { status: 404 });
     }

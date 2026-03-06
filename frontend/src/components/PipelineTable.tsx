@@ -4,12 +4,15 @@ import { useState, useMemo } from "react";
 import { StatusPicker } from "./StatusPicker";
 import { DeadlineChip } from "./DeadlineChip";
 import { GrantDetailSheet } from "./GrantDetailSheet";
+import { getPriority, getThemeLabel } from "@/lib/utils";
+import { useLastSeen, isNewSince } from "@/hooks/useLastSeen";
 import type { Grant } from "@/lib/queries";
 import {
   ChevronUp,
   ChevronDown,
   ChevronsUpDown,
   ExternalLink,
+  Sparkles,
 } from "lucide-react";
 
 interface PipelineTableProps {
@@ -22,14 +25,15 @@ type SortField =
   | "weighted_total"
   | "max_funding_usd"
   | "days_to_deadline"
-  | "funder";
+  | "funder"
+  | "scored_at";
 type SortDir = "asc" | "desc";
 
 const STATUS_TABS = [
   { id: "all", label: "All" },
+  { id: "new", label: "New", icon: Sparkles },
   { id: "shortlisted", label: "Shortlisted" },
   { id: "pursue", label: "Pursue" },
-  { id: "watch", label: "Watch" },
   { id: "drafting", label: "Drafting" },
   { id: "submitted", label: "Submitted" },
   { id: "rejected", label: "Rejected" },
@@ -69,6 +73,24 @@ function SortIcon({
   );
 }
 
+function formatDateShort(iso: string | undefined | null): string {
+  if (!iso) return "--";
+  const d = new Date(iso);
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function timeAgo(iso: string | undefined | null): string {
+  if (!iso) return "";
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
 export function PipelineTable({
   initialGrants,
   defaultFilter = "shortlisted",
@@ -77,6 +99,7 @@ export function PipelineTable({
   const [sortField, setSortField] = useState<SortField>("weighted_total");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null);
+  const { lastSeenAt } = useLastSeen();
 
   // Mutable grant list — flattened from initial prop, updated optimistically
   const [allGrants, setAllGrants] = useState<Grant[]>(() => {
@@ -99,7 +122,7 @@ export function PipelineTable({
       });
       if (!res.ok) {
         // Revert on failure
-        setAllGrants((prev) => {
+        setAllGrants(() => {
           const flat: Grant[] = [];
           for (const col of Object.values(initialGrants)) flat.push(...col);
           return flat;
@@ -107,7 +130,7 @@ export function PipelineTable({
       }
     } catch {
       // Revert on error
-      setAllGrants((prev) => {
+      setAllGrants(() => {
         const flat: Grant[] = [];
         for (const col of Object.values(initialGrants)) flat.push(...col);
         return flat;
@@ -117,6 +140,10 @@ export function PipelineTable({
 
   const filtered = useMemo(() => {
     if (statusFilter === "all") return allGrants;
+    if (statusFilter === "new")
+      return allGrants.filter((g) =>
+        isNewSince(g.scored_at || g.scraped_at, lastSeenAt)
+      );
     if (statusFilter === "shortlisted")
       return allGrants.filter((g) => g.status === "triage");
     if (statusFilter === "pursue")
@@ -132,7 +159,7 @@ export function PipelineTable({
         ["passed", "auto_pass", "human_passed", "reported"].includes(g.status)
       );
     return allGrants.filter((g) => g.status === statusFilter);
-  }, [allGrants, statusFilter]);
+  }, [allGrants, statusFilter, lastSeenAt]);
 
   const sorted = useMemo(() => {
     const copy = [...filtered];
@@ -161,6 +188,10 @@ export function PipelineTable({
           av = a.days_to_deadline ?? 9999;
           bv = b.days_to_deadline ?? 9999;
           break;
+        case "scored_at":
+          av = a.scored_at || a.scraped_at || "";
+          bv = b.scored_at || b.scraped_at || "";
+          break;
       }
 
       if (av === undefined || bv === undefined) return 0;
@@ -187,7 +218,9 @@ export function PipelineTable({
 
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: allGrants.length };
+    let newCount = 0;
     for (const g of allGrants) {
+      if (isNewSince(g.scored_at || g.scraped_at, lastSeenAt)) newCount++;
       const key =
         g.status === "triage"
           ? "shortlisted"
@@ -202,8 +235,9 @@ export function PipelineTable({
           : g.status;
       c[key] = (c[key] ?? 0) + 1;
     }
+    c["new"] = newCount;
     return c;
-  }, [allGrants]);
+  }, [allGrants, lastSeenAt]);
 
   function ThCol({
     field,
@@ -231,22 +265,40 @@ export function PipelineTable({
     <div className="flex flex-col gap-4">
       {/* Status filter tabs */}
       <div className="flex flex-wrap gap-1.5">
-        {STATUS_TABS.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setStatusFilter(tab.id)}
-            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-              statusFilter === tab.id
-                ? "bg-gray-900 text-white"
-                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-            }`}
-          >
-            {tab.label}
-            {counts[tab.id] !== undefined && (
-              <span className="ml-1.5 opacity-70">{counts[tab.id]}</span>
-            )}
-          </button>
-        ))}
+        {STATUS_TABS.map((tab) => {
+          const isNewTab = tab.id === "new";
+          const count = counts[tab.id];
+          // Hide "New" tab if there are no new grants
+          if (isNewTab && (count === undefined || count === 0)) return null;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => {
+                setStatusFilter(tab.id);
+                // Auto-sort by date when clicking "New"
+                if (isNewTab) {
+                  setSortField("scored_at");
+                  setSortDir("desc");
+                }
+              }}
+              className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                statusFilter === tab.id
+                  ? isNewTab
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-900 text-white"
+                  : isNewTab
+                  ? "bg-blue-50 text-blue-700 ring-1 ring-blue-200 hover:bg-blue-100"
+                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+              }`}
+            >
+              {"icon" in tab && tab.icon && <tab.icon className="h-3 w-3" />}
+              {tab.label}
+              {count !== undefined && (
+                <span className="ml-1 opacity-70">{count}</span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Table */}
@@ -256,7 +308,7 @@ export function PipelineTable({
             No grants in this view
           </div>
         ) : (
-          <table className="w-full min-w-[800px] border-collapse text-sm">
+          <table className="w-full min-w-[900px] border-collapse text-sm">
             <thead className="border-b border-gray-200 bg-gray-50">
               <tr>
                 <th className="w-6 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-gray-400">
@@ -272,8 +324,15 @@ export function PipelineTable({
                   Status
                 </th>
                 <ThCol field="weighted_total" label="Score" />
+                <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">
+                  Priority
+                </th>
+                <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">
+                  Themes
+                </th>
                 <ThCol field="max_funding_usd" label="Funding" />
                 <ThCol field="days_to_deadline" label="Deadline" />
+                <ThCol field="scored_at" label="Added" />
                 <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">
                   Geography
                 </th>
@@ -284,11 +343,17 @@ export function PipelineTable({
               {sorted.map((grant, i) => {
                 const name = grant.grant_name || grant.title || "Unnamed";
                 const funding = grant.max_funding_usd || grant.max_funding;
+                const addedDate = grant.scored_at || grant.scraped_at;
+                const grantIsNew = isNewSince(addedDate, lastSeenAt);
 
                 return (
                   <tr
                     key={grant._id}
-                    className="cursor-pointer transition-colors hover:bg-indigo-50/40"
+                    className={`cursor-pointer transition-colors ${
+                      grantIsNew
+                        ? "bg-blue-50/30 hover:bg-blue-50/60"
+                        : "hover:bg-indigo-50/40"
+                    }`}
                     onClick={() => setSelectedGrantId(grant._id)}
                   >
                     <td className="px-4 py-3 text-center text-xs text-gray-400">
@@ -296,9 +361,16 @@ export function PipelineTable({
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-0.5">
-                        <span className="font-medium text-gray-900 line-clamp-2 leading-snug">
-                          {name}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {grantIsNew && (
+                            <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-blue-700">
+                              New
+                            </span>
+                          )}
+                          <span className="font-medium text-gray-900 line-clamp-2 leading-snug">
+                            {name}
+                          </span>
+                        </div>
                         {grant.grant_type && (
                           <span className="text-xs text-gray-400">
                             {grant.grant_type}
@@ -320,6 +392,32 @@ export function PipelineTable({
                     <td className="px-4 py-3">
                       <ScoreCell score={grant.weighted_total ?? 0} />
                     </td>
+                    <td className="px-4 py-3">
+                      {(() => {
+                        const p = getPriority(grant.weighted_total ?? 0);
+                        return (
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${p.className}`}>
+                            {p.label}
+                          </span>
+                        );
+                      })()}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-1">
+                        {grant.themes_detected?.map((t) => {
+                          const theme = getThemeLabel(t);
+                          return (
+                            <span
+                              key={t}
+                              className="rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap"
+                              style={{ backgroundColor: theme.bg, color: theme.color }}
+                            >
+                              {theme.label}
+                            </span>
+                          );
+                        }) ?? <span className="text-xs text-gray-300">{"\u2014"}</span>}
+                      </div>
+                    </td>
                     <td className="px-4 py-3 text-xs text-gray-700">
                       {funding
                         ? `$${(funding / 1000).toFixed(0)}K`
@@ -339,6 +437,20 @@ export function PipelineTable({
                         <span className="text-xs text-gray-300">
                           {"\u2014"}
                         </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {addedDate ? (
+                        <div className="flex flex-col">
+                          <span className="text-xs text-gray-700">
+                            {formatDateShort(addedDate)}
+                          </span>
+                          <span className="text-[10px] text-gray-400">
+                            {timeAgo(addedDate)}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-gray-300">{"\u2014"}</span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-600">
@@ -371,6 +483,7 @@ export function PipelineTable({
         {statusFilter !== "all" &&
           ` \u00b7 ${counts.all ?? 0} total discovered`}
         {" \u00b7 "}click a row to view full details
+        {" \u00b7 "}click column headers to sort
       </p>
 
       <GrantDetailSheet

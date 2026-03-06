@@ -8,7 +8,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { GrantDetailSheet } from "@/components/GrantDetailSheet";
 import type { Grant } from "@/lib/queries";
-import { CheckCircle, Eye, XCircle, ChevronDown, ChevronUp, AlertTriangle, ExternalLink } from "lucide-react";
+import { getPriority, getThemeLabel } from "@/lib/utils";
+import { CheckCircle, XCircle, ChevronDown, ChevronUp, AlertTriangle, ExternalLink } from "lucide-react";
 
 interface TriageQueueProps {
   grants: Grant[];
@@ -16,12 +17,12 @@ interface TriageQueueProps {
 
 interface TriageResult {
   grantId: string;
-  decision: "pursue" | "watch" | "pass";
+  decision: "pursue" | "pass";
 }
 
 export function TriageQueue({ grants: initialGrants }: TriageQueueProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [decisions, setDecisions] = useState<Record<string, "pursue" | "watch" | "pass">>({});
+  const [decisions, setDecisions] = useState<Record<string, "pursue" | "pass">>({});
   const [overrideReasons, setOverrideReasons] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<Set<string>>(new Set());
@@ -90,7 +91,7 @@ export function TriageQueue({ grants: initialGrants }: TriageQueueProps) {
           >
             {/* Card header — always visible */}
             <div className="flex items-start gap-4 p-4">
-              {/* Score badge */}
+              {/* Score + priority badge */}
               <div className="flex flex-col items-center gap-1">
                 <span
                   className={`rounded-full px-3 py-1 text-lg font-bold ${
@@ -103,6 +104,14 @@ export function TriageQueue({ grants: initialGrants }: TriageQueueProps) {
                 >
                   {(grant.weighted_total ?? 0).toFixed(1)}
                 </span>
+                {(() => {
+                  const p = getPriority(grant.weighted_total ?? 0);
+                  return (
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${p.className}`}>
+                      {p.label}
+                    </span>
+                  );
+                })()}
                 {aiRec && (
                   <span className="text-xs text-gray-400">AI: {aiRec}</span>
                 )}
@@ -129,6 +138,18 @@ export function TriageQueue({ grants: initialGrants }: TriageQueueProps) {
                       ${((grant.max_funding_usd || grant.max_funding || 0) / 1000).toFixed(0)}K
                     </Badge>
                   )}
+                  {grant.themes_detected?.map((t) => {
+                    const theme = getThemeLabel(t);
+                    return (
+                      <span
+                        key={t}
+                        className="rounded-full px-2 py-0.5 text-[10px] font-medium"
+                        style={{ backgroundColor: theme.bg, color: theme.color }}
+                      >
+                        {theme.label}
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -199,14 +220,6 @@ export function TriageQueue({ grants: initialGrants }: TriageQueueProps) {
               >
                 <CheckCircle className="h-4 w-4" />
                 Pursue
-              </Button>
-              <Button
-                size="sm"
-                variant={decision === "watch" ? "default" : "outline"}
-                onClick={() => setDecisions((p) => ({ ...p, [grant._id]: "watch" }))}
-              >
-                <Eye className="h-4 w-4" />
-                Watch
               </Button>
               <Button
                 size="sm"

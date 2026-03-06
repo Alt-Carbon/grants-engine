@@ -42,290 +42,193 @@ import httpx
 from backend.db.mongo import grants_raw, grants_scored, scout_runs, audit_logs
 from backend.graph.state import GrantState
 from backend.utils.llm import chat, HAIKU
-from backend.utils.parsing import parse_json_safe, retry_async
+from backend.utils.parsing import parse_json_safe, retry_async, api_health, CreditExhaustedError
 
 logger = logging.getLogger(__name__)
 
 # ── Tavily queries ─────────────────────────────────────────────────────────────
 DEFAULT_TAVILY_QUERIES: List[str] = [
-    # Climate Tech & CDR — core
-    "climatetech startup grant open call 2026",
-    "carbon removal CDR MRV startup funding 2026",
-    "net zero decarbonisation grant program 2026",
-    "climate innovation fund open call for proposals 2026",
-    "carbon credit verification technology grant 2026",
-    "nature based solutions NBS funding opportunity 2026",
-    "climate fintech grant accelerator 2026",
-    "biochar enhanced weathering carbon sequestration grant 2026",
-    "direct air capture DAC startup grant 2026",
-    # Agritech / Soil
-    "agritech soil carbon grant program 2026",
-    "regenerative agriculture funding open call 2026",
-    "sustainable food systems startup grant 2026",
-    "precision agriculture technology grant 2026",
-    # AI for Sciences
-    "AI for climate science research grant 2026",
-    "machine learning earth observation grant 2026",
-    "AI scientific discovery grant program 2026",
-    # Earth Sciences
-    "applied earth sciences remote sensing grant 2026",
-    "geospatial satellite land use grant 2026",
-    "subsurface geology technology grant 2026",
-    # India-specific — targeted by exact program names so Tavily returns program pages, not news
+    # ── CDR / Climate Core (merged from 9 → 4) ────────────────────────────────
+    "carbon removal CDR ERW biochar MRV startup grant funding 2026",
+    "climatetech net zero decarbonisation startup grant open call 2026",
+    "carbon credit verification monitoring technology grant 2026",
+    "nature based solutions climate adaptation resilience grant 2026",
+    # ── Agritech / Soil ────────────────────────────────────────────────────────
+    "agritech soil carbon regenerative agriculture grant program 2026",
+    "precision agriculture farmer technology startup grant 2026",
+    # ── AI for Sciences + Earth Sciences ────────────────────────────────────────
+    "AI for climate science earth observation machine learning grant 2026",
+    "remote sensing geospatial satellite land use grant 2026",
+    # ── India — central government (exact program names) ───────────────────────
     "BIRAC BIG Biotechnology Ignition Grant open 2026",
-    "BIRAC BIPP Biotechnology Industry Partnership Programme 2026",
-    "BIRAC SBIRI Small Business Innovation Research Initiative open call 2026",
-    "BIRAC ACE Accelerating Circular Economy startup grant 2026",
+    "BIRAC BIPP SBIRI ACE startup grant open call 2026",
     "ANRF DPIIT startup grant call for proposals 2026",
-    "ANRF Seed Grant new investigator 2026",
-    "DST NIDHI PRAYAS startup grant application 2026",
-    "DST SEED TIDE Technology Incubation grant 2026",
+    "DST NIDHI PRAYAS SEED TIDE startup grant 2026",
     "DST SERB startup research grant 2026 apply",
-    "DST Climate Change Programme grant India open call 2026",
-    "DBT Agribioinformatics soil carbon research grant 2026",
+    "DST Climate Change Programme grant India 2026",
+    "DBT soil carbon agritech research grant India 2026",
     "AIM Atal Innovation Mission startup grant India 2026",
-    "MeitY startup tech grant India 2026",
-    "TDB Technology Development Board India grant apply 2026",
-    "Startup India SISFS seed fund startup grant 2026 apply",
-    "India deep tech climate startup grant 2026",
-    # India state government grants
-    "Karnataka KSCST KBITS startup grant open call 2026",
+    "MeitY IndiaAI Innovation Challenge startup grant 2026",
+    "TDB Technology Development Board India grant 2026",
+    "Startup India SISFS seed fund startup grant 2026",
+    "BIRAC Green Hydrogen Mission startup grant 2026",
+    "NISE MNRE solar energy innovative projects grant 2026",
+    # ── India — state government ───────────────────────────────────────────────
+    "Karnataka KSCST KBITS startup grant 2026",
     "Maharashtra MSINS startup innovation grant 2026",
     "Telangana T-Hub WE Hub grant program 2026",
     "StartupTN Tamil Nadu climatetech agritech grant 2026",
     "KSUM Kerala startup mission grant 2026",
-    "iStart Rajasthan Gujarat i-Create grant 2026",
     "India state government startup grant climatetech agritech 2026",
-    # Indian philanthropic & impact orgs
-    "Tata Trusts climate environment grant India open call 2026",
-    "Rohini Nilekani Philanthropies grant open application 2026",
-    "Azim Premji Foundation environment climate grant India 2026",
-    "Social Alpha innovation grant India climatetech apply 2026",
-    "Villgro innovation fellowship grant India agritech 2026",
-    "India Climate Collaborative grant open call 2026",
-    # Social Impact
-    "social impact climate startup funding 2026",
-    "inclusive climate solutions grant 2026",
-    "rural livelihoods climate resilience grant 2026",
-    # DFIs & Multilateral
-    "World Bank IFC grant facility climate startups 2026",
-    "ADB AIIB climate finance grant 2026",
+    # ── India — philanthropic & impact ──────────────────────────────────────────
+    "Tata Trusts Azim Premji climate environment grant India 2026",
+    "Social Alpha Villgro innovation grant India climatetech agritech 2026",
+    "India Climate Collaborative Rohini Nilekani grant open call 2026",
+    # ── Social Impact ──────────────────────────────────────────────────────────
+    "social impact inclusive climate solutions rural livelihoods grant 2026",
+    # ── DFIs & Multilateral ──────────────────────────────────────────────────
+    "World Bank IFC ADB AIIB climate finance grant startups 2026",
     "Green Climate Fund GCF readiness grant 2026",
-    "USAID climate innovation grant 2026",
-    "UNDP climate innovation grant 2026",
-    "UNEP climate technology grant 2026",
-    # Philanthropic
-    "Bezos Earth Fund grant open call 2026",
-    "Grantham Foundation climate grant 2026",
-    "ClimateWorks Foundation grant 2026",
-    "Rockefeller Foundation climate grant 2026",
-    # Accelerators & challenges
-    "Google.org Impact Challenge climate 2026",
-    "XPRIZE carbon removal challenge 2026",
-    "Microsoft Climate Innovation Fund 2026",
-    "deep tech climate innovation grant India global 2026",
-    # ── Australia & Pacific ─────────────────────────────────────────────────────
-    "ARENA Australian Renewable Energy Agency grant open call 2026",
-    "Australia cleantech startup grant CSIRO accelerating commercialisation 2026",
-    "Australia climate tech innovation grant 2026",
-    "New Zealand climate innovation fund grant 2026",
-    # ── Canada ─────────────────────────────────────────────────────────────────
-    "Canada SDTC cleantech grant open call 2026",
-    "NRC IRAP Canada cleantech climate startup grant 2026",
-    "Foresight CleanTech Canada funding 2026",
-    "Canada climate innovation startup grant program 2026",
-    # ── Southeast Asia ─────────────────────────────────────────────────────────
-    "Singapore Enterprise cleantech startup grant 2026",
-    "Indonesia climate technology grant program 2026",
-    "Vietnam green innovation fund startup grant 2026",
-    "Thailand NSTDA startup climate agritech grant 2026",
-    "Philippines climate startup grant fund 2026",
-    "Malaysia green technology grant open call 2026",
-    "Southeast Asia climate innovation grant 2026",
-    "ASEAN climate tech startup grant program 2026",
-    "Temasek Foundation Southeast Asia climate grant 2026",
-    # ── East Asia ──────────────────────────────────────────────────────────────
-    "Japan NEDO green innovation fund grant 2026",
-    "South Korea K-startup climate innovation grant 2026",
-    "Taiwan climate tech startup grant program 2026",
-    "Japan green technology startup grant open call 2026",
-    # ── Africa ─────────────────────────────────────────────────────────────────
-    "African Development Bank AfDB climate grant open call 2026",
-    "Africa climate startup grant fund open applications 2026",
-    "SEFA sustainable energy fund Africa grant 2026",
-    "African Climate Foundation grant open call 2026",
-    "Africa50 climate infrastructure grant 2026",
-    "East Africa climate innovation fund grant 2026",
-    "West Africa clean energy startup grant 2026",
-    "South Africa cleantech climate grant program 2026",
-    "USAID Power Africa grant open call 2026",
-    "Africa climate agritech grant startup funding 2026",
-    # ── Latin America ──────────────────────────────────────────────────────────
-    "IDB Lab Latin America climate startup grant 2026",
-    "CAF development bank climate innovation grant Latin America 2026",
-    "CORFO Chile green innovation fund grant 2026",
-    "BNDES Brazil climate startup grant 2026",
-    "Latin America climate tech startup grant open call 2026",
-    "Colombia Innpulsa clean energy grant 2026",
-    "Mexico INADEM climate startup grant 2026",
-    # ── Middle East & North Africa ─────────────────────────────────────────────
-    "Islamic Development Bank ISDB climate grant 2026",
-    "UAE climate innovation fund grant open call 2026",
-    "Saudi Arabia climate startup grant Vision 2030 2026",
-    "Masdar Abu Dhabi climate innovation grant 2026",
-    "MENA climate tech grant startup program 2026",
-    # ── UK (post-Brexit) ───────────────────────────────────────────────────────
-    "Innovate UK net zero climate grant competition 2026",
-    "UK Research Innovation UKRI climate startup grant 2026",
-    "Carbon Trust UK climate grant fund 2026",
-    "UK DESNZ energy innovation grant 2026",
-    # ── Global / Thematic ──────────────────────────────────────────────────────
-    "climate MRV carbon monitoring startup grant global 2026",
-    "soil carbon sequestration grant developing countries 2026",
-    "blue carbon mangrove seagrass grant fund 2026",
-    "carbon markets integrity startup grant 2026",
-    "climate adaptation resilience startup grant 2026",
-    "clean cooking energy access Africa Asia grant 2026",
-    # ── Philanthropic ──────────────────────────────────────────────────────────
-    "Bloomberg Philanthropies Schmidt Futures climate grant open call 2026",
-    "Open Philanthropy Skoll Foundation climate technology grant 2026",
-    "Omidyar Network Laudes Foundation climate fintech grant 2026",
-    "Breakthrough Energy Ventures climate startup grant program 2026",
-    "Echoing Green social entrepreneur climate fellowship 2026",
-    "philanthropic foundation climate technology startup grant open call 2026",
-    "impact investment climate grant equity-free startup 2026",
-    "Earthshot Prize Norrsken Foundation climate grant challenge 2026",
-    # ── Challenges & Prizes ────────────────────────────────────────────────────
-    "XPRIZE Earthshot Prize climate technology challenge 2026",
-    "MIT Solve climate challenge open call for applications 2026",
-    "global cleantech innovation programme GCIP open call 2026",
-    "Climate Launchpad Hello Tomorrow deep tech climate challenge 2026",
-    "Zayed Sustainability Prize climate innovation award 2026",
-    "Mission Innovation challenge climate startup prize 2026",
-    "carbon removal prize competition startup applications 2026",
-    "climate innovation prize grant challenge application open 2026",
-    # CDR-specific funders from manually curated tracker sheets
+    "USAID UNDP UNEP climate innovation grant 2026",
+    # ── Philanthropic (merged) ─────────────────────────────────────────────────
+    "Bezos Earth Fund ClimateWorks Grantham climate grant 2026",
+    "Rockefeller Foundation Bloomberg Schmidt Futures climate grant 2026",
+    "Breakthrough Energy Omidyar Laudes Foundation climate startup grant 2026",
+    "Echoing Green Skoll Earthshot Prize climate fellowship 2026",
+    # ── Accelerators & Challenges (merged from 8 → 3) ──────────────────────────
+    "Google.org XPRIZE Microsoft climate innovation challenge 2026",
+    "MIT Solve Climate Launchpad Hello Tomorrow deep tech challenge 2026",
+    "global cleantech innovation programme GCIP Zayed Sustainability Prize 2026",
+    # ── CDR-specific funders ────────────────────────────────────────────────────
     "Cascade Climate CRN Enhanced Rock Weathering host site EOI 2026",
-    "Carbon to Sea Initiative ocean alkalinity enhancement OAE RFP 2026",
-    "CIEIF Climate Intervention Environmental Impact Fund grant 2026",
-    "ClimeFi Adyen carbon removal RFP dual track 2026",
-    "Milkywire Climate Transformation Fund CDR grant open 2026",
-    # Space & Earth Observation — programs in Excel tracker
-    "ESA InCubed earth observation commercial startup programme open 2026",
-    "CASSINI Challenges EUSPA EU space programme startup application 2026",
-    "ISRO RESPOND earth observation research grant India 2026",
-    "NASA ROSES research opportunities space earth science 2026",
-    # India specific programs found in Excel tracker
-    "IndiaAI Innovation Challenge 2026 MeitY apply",
-    "TDB Technology Development Board India startup grant 2026 apply",
-    "NISE MNRE solar energy innovative projects PMSGY grant 2026",
-    "BIRAC Green Hydrogen Mission startup grant 2026 apply",
-    "DST India France ANR bilateral research grant 2026",
-    "ISRO Venus archival data announcement of opportunity 2026",
-    "NRSC ISRO respond proposal earth observation India 2026",
-    # Global climate finance + food
+    "Carbon to Sea CIEIF ClimeFi Milkywire CDR grant RFP 2026",
+    # ── Space & Earth Observation ──────────────────────────────────────────────
+    "ESA InCubed CASSINI earth observation startup programme 2026",
+    "ISRO RESPOND NRSC earth observation research grant India 2026",
+    "NASA ROSES earth science remote sensing grant 2026",
+    # ── Australia & Pacific ──────────────────────────────────────────────────
+    "ARENA Australia cleantech CSIRO startup grant 2026",
+    "New Zealand climate innovation fund grant 2026",
+    # ── Canada ────────────────────────────────────────────────────────────────
+    "Canada SDTC NRC IRAP cleantech climate startup grant 2026",
+    "Natural Resources Canada carbon capture FEED grant 2026",
+    # ── Southeast Asia ────────────────────────────────────────────────────────
+    "Singapore Enterprise cleantech startup grant 2026",
+    "ASEAN Southeast Asia Temasek climate tech startup grant 2026",
+    "Indonesia Thailand Vietnam climate innovation grant 2026",
+    # ── East Asia ─────────────────────────────────────────────────────────────
+    "Japan NEDO green innovation fund startup grant 2026",
+    "South Korea K-startup climate innovation grant 2026",
+    # ── Africa (7 → 2) ─────────────────────────────────────────────────────────
+    "African Development Bank AfDB SEFA climate grant open call 2026",
+    "Africa climate startup agritech innovation fund grant 2026",
+    # ── Latin America (7 → 2) ──────────────────────────────────────────────────
+    "IDB Lab CORFO CAF Latin America climate startup grant 2026",
+    "Brazil BNDES Colombia Innpulsa climate innovation grant 2026",
+    # ── MENA (5 → 2) ──────────────────────────────────────────────────────────
+    "Islamic Development Bank UAE Masdar climate innovation grant 2026",
+    "MENA climate tech startup grant program 2026",
+    # ── UK ─────────────────────────────────────────────────────────────────────
+    "Innovate UK UKRI Carbon Trust net zero climate grant 2026",
+    "UK DESNZ energy innovation startup grant 2026",
+    # ── Global / Thematic ──────────────────────────────────────────────────────
+    "climate MRV soil carbon sequestration grant developing countries 2026",
+    "climate adaptation resilience startup grant global 2026",
+    "deep tech climate innovation grant India global 2026",
+    # ── Global climate finance + food ──────────────────────────────────────────
     "Global Innovation Lab Climate Finance CPI 2026 call for ideas",
-    "WFP Innovation Accelerator challenge food climate 2026",
+    "WFP Innovation Accelerator food climate challenge 2026",
     "ADB Climate Innovation Development Fund CIDF grant 2026",
-    "Greentown Go Make accelerator 2026 RFA Shell Technip application",
-    "LILAS4SOILS Horizon Europe soil carbon MRV farmer open call 2026",
-    "Innovation Fund Denmark agriculture data horizon europe 2026",
-    "Natural Resources Canada NRCan carbon capture FEED grant 2026",
-    "UNDP young climate leaders direct funding Italy 2026",
+    "Greentown Go Make accelerator 2026 RFA application",
+    "LILAS4SOILS Horizon Europe soil carbon MRV open call 2026",
     "Mitigation Action Facility call for projects 2026 climate",
+    "UNDP young climate leaders direct funding 2026",
+    # ── Deep Tech ──────────────────────────────────────────────────────────────
+    "deep tech frontier science startup grant 2026",
+    "advanced materials nanotechnology quantum computing grant 2026",
+    "synthetic biology biotech breakthrough innovation grant 2026",
+    "deep tech hardware robotics advanced manufacturing grant India global 2026",
+    # ── AI for Sciences ────────────────────────────────────────────────────────
+    "AI artificial intelligence scientific discovery grant program 2026",
+    "machine learning predictive model environmental data grant 2026",
+    "AI data science climate agriculture research grant India 2026",
+    # ── Applied Earth Sciences ─────────────────────────────────────────────────
+    "earth science geology subsurface geophysics research grant 2026",
+    "satellite remote sensing LIDAR mapping technology grant 2026",
+    "geospatial earth observation land use monitoring grant India 2026",
+    # ── Social Impact ──────────────────────────────────────────────────────────
+    "social impact rural livelihoods community resilience grant 2026",
+    "inclusive climate solutions marginalized communities grant India 2026",
+    "farmer livelihoods rural development climate grant developing countries 2026",
+    # ── AltCarbon-specific ───────────────────────────────────────────────────
+    "enhanced rock weathering ERW startup grant funding 2026",
+    "biochar carbon sequestration grant developing countries 2026",
+    "MRV carbon monitoring verification startup grant 2026",
 ]
 
 # ── Exa semantic queries ───────────────────────────────────────────────────────
 DEFAULT_EXA_QUERIES: List[str] = [
-    # Core thematic
-    "grant funding for startups measuring carbon removal and MRV verification",
-    "funding for AI-powered environmental monitoring and earth observation tools",
-    "grants for alternative carbon market infrastructure and registry startups",
-    "research grants for satellite-based land use change detection and geospatial",
-    "open calls for climate technology companies in India or globally",
-    "philanthropic funding for soil carbon sequestration technology startups",
-    "grant programs for AI applied to climate science and biodiversity monitoring",
-    "accelerator program for deep tech climate startups with equity-free funding",
-    "government grant program for cleantech and net zero startups",
-    "international development finance for climate resilience and adaptation startups",
-    # Major funders
-    "Bezos Earth Fund open grant call for climate technology",
-    "Green Climate Fund readiness support for developing countries",
-    "EU Horizon Europe EIC Accelerator climate deep tech grant",
-    "ARPA-E DOE energy innovation grant program open calls",
-    "UKRI Innovate UK sustainability and net zero funding competition",
-    # India — specific program searches to surface actual program pages, not news
-    "BIRAC BIG Biotechnology Ignition Grant open call for proposals",
-    "BIRAC SBIRI Small Business Innovation Research Initiative grant application",
-    "ANRF India open grant call for startups and innovators",
-    "DST NIDHI PRAYAS TIDE startup grant application open India",
-    "DBT Department Biotechnology climate agritech grant India apply",
-    "DST SERB Science Engineering Research Board startup grant",
-    "AIM Atal Innovation Mission grant open call India startup",
-    "TDB Technology Development Board India startup grant apply",
-    "India startup grant for climate technology social impact",
-    "Social Alpha Villgro India climate agritech startup grant open call",
-    "Tata Trusts Rohini Nilekani grant India climate livelihoods",
-    "India Climate Collaborative grant application open call",
-    "CSRBOX India CSR grant for climate environment NGO startup",
-    # Australia & Pacific
-    "ARENA Australia renewable energy grant startup open call",
-    "Australian clean energy climate startup grant funding program",
-    "New Zealand climate innovation cleantech grant program",
-    # Canada
-    "SDTC Sustainable Development Technology Canada cleantech grant",
-    "Canada NRC IRAP innovation assistance climate technology startup",
-    # Southeast Asia
-    "Singapore Enterprise Development Grant climate cleantech startup",
-    "ASEAN Southeast Asia climate technology startup grant funding",
-    "Indonesia Vietnam Thailand climate innovation grant program",
-    "Temasek Foundation Southeast Asia environmental grant",
-    # East Asia
-    "Japan NEDO green innovation fund technology grant startup",
-    "South Korea climate technology grant K-startup clean energy",
-    # Africa
-    "African Development Bank climate finance grant startup",
-    "Africa climate technology innovation fund grant open call",
-    "sub-Saharan Africa clean energy carbon grant program",
-    "African Climate Foundation grant for climate startups",
-    # Latin America
-    "IDB Lab Latin America climate startup innovation grant",
-    "CORFO Chile CAF Latin America green climate innovation fund",
-    "Brazil climate technology BNDES startup grant",
-    # MENA
-    "UAE Saudi Arabia climate innovation fund grant startup",
-    "Masdar Islamic Development Bank climate grant MENA",
-    # UK
-    "Innovate UK Carbon Trust climate net zero startup grant competition",
-    "UK DESNZ climate energy innovation startup grant",
-    # Global thematic
-    "blue carbon ocean climate nature-based solutions grant",
-    "climate adaptation resilience developing countries grant fund",
-    "carbon markets MRV integrity monitoring startup global grant",
-    # CDR-specific funders from Excel tracker — semantic search for these specific programs
+    # ── Core thematic (natural language — Exa's strength) ──────────────────────
+    "Grants and funding for startups building carbon removal measurement and verification tools",
+    "Open calls for companies doing enhanced rock weathering or biochar carbon sequestration",
+    "Funding programs for AI-powered environmental monitoring and earth observation startups",
+    "Grants for soil carbon sequestration and regenerative agriculture technology companies",
+    "Accelerator programs offering equity-free funding for deep tech climate startups",
+    "Government grants for cleantech and net zero startups in developing countries",
+    "Philanthropic foundations funding carbon dioxide removal CDR technology development",
+    # ── Major funders ──────────────────────────────────────────────────────────
+    "Bezos Earth Fund open grant opportunities for climate technology companies",
+    "EU Horizon Europe EIC Accelerator open calls for climate and deep tech",
+    "Green Climate Fund readiness grants for climate projects in developing countries",
+    "UKRI Innovate UK funding competitions for net zero and sustainability startups",
+    # ── India programs ─────────────────────────────────────────────────────────
+    "BIRAC BIG SBIRI BIPP biotechnology startup grants open for applications India",
+    "ANRF DST NIDHI PRAYAS TIDE startup grants currently accepting proposals India",
+    "DST SERB science research grants for startups and investigators India",
+    "AIM TDB MeitY startup grants for climate technology and AI India",
+    "Indian philanthropic foundations funding climate and agritech startups",
+    "India state government startup grants for climatetech and agritech companies",
+    # ── CDR-specific funders ────────────────────────────────────────────────────
     "Cascade Climate CRN enhanced rock weathering host site expression of interest",
-    "Carbon to Sea ocean alkalinity enhancement OAE startup research grant",
-    "CIEIF climate intervention environmental impact fund open grant application",
-    "ClimeFi carbon dioxide removal RFP dual-track application 2026",
-    "Milkywire CDR Climate Transformation Fund grant open call",
-    # Space and Earth Observation — Excel tracker entries
-    "ESA InCubed commercial earth observation startup funding programme",
-    "CASSINI Challenges European space programme SME startup application",
-    "ISRO RESPOND sponsored research earth observation grant India startup",
-    "NASA ROSES research grants earth science remote sensing 2025 2026",
-    # India programs from tracker
-    "IndiaAI Innovation Challenge MeitY artificial intelligence climate agriculture",
-    "TDB India startup grant call for proposals 2026 technology development board",
-    "NISE MNRE solar energy innovative projects grant India",
-    "BIRAC Green Hydrogen Mission biotech startup grant India 2026",
-    # Global climate finance
-    "Global Innovation Lab Climate Finance CPI call for ideas private capital",
-    "WFP Innovation Accelerator food system climate challenge grant",
-    "ADB Climate Innovation Development Fund CIDF open call",
-    "Greentown Go Make cleantech accelerator Shell Technip Energies 2026",
-    "LILAS4SOILS soil organic carbon MRV farmer test provider Horizon Europe",
-    "Natural Resources Canada carbon capture storage FEED engineering grant",
-    "UNDP young climate leaders innovative finance direct funding opportunity",
+    "Carbon to Sea CIEIF ClimeFi Milkywire carbon removal grant programs open calls",
+    # ── Space & Earth Observation ──────────────────────────────────────────────
+    "ESA InCubed CASSINI earth observation startup funding programmes open calls",
+    "ISRO RESPOND NASA ROSES earth science remote sensing research grants",
+    # ── Regional coverage ──────────────────────────────────────────────────────
+    "ARENA Australia cleantech renewable energy startup grants open for applications",
+    "Canada SDTC NRC IRAP cleantech climate startup grants and funding",
+    "Singapore ASEAN Southeast Asia climate technology startup grants and accelerators",
+    "Japan NEDO South Korea climate green innovation fund grants for startups",
+    "African Development Bank climate finance grants for startups and innovation",
+    "IDB Lab CORFO CAF Latin America climate innovation grants for startups",
+    "UAE Masdar ISDB MENA region climate technology innovation grants",
+    "Innovate UK Carbon Trust net zero climate startup grant competitions",
+    # ── Global thematic ────────────────────────────────────────────────────────
+    "Climate adaptation resilience grants for developing countries and emerging markets",
+    "Carbon markets MRV monitoring verification startup grants globally",
+    "Deep tech frontier science grants for climate and environmental companies",
+    # ── Global climate finance + food ──────────────────────────────────────────
+    "Global Innovation Lab for Climate Finance calls for ideas and applications",
+    "WFP Innovation Accelerator food system climate challenge applications open",
+    "ADB Climate Innovation Development Fund CIDF grants open for proposals",
+    "Soil carbon MRV farmer technology grants Horizon Europe open calls",
+    # ── Deep Tech ──────────────────────────────────────────────────────────────
+    "Grants for deep tech startups working on advanced materials nanotechnology or quantum computing",
+    "Funding for frontier science and engineering breakthroughs in climate and environment",
+    "Accelerators and grants for hardware robotics and advanced manufacturing startups",
+    # ── AI for Sciences ────────────────────────────────────────────────────────
+    "Grants for startups applying artificial intelligence and machine learning to scientific discovery",
+    "Funding for AI-powered predictive modeling for environmental and climate applications",
+    # ── Social Impact ──────────────────────────────────────────────────────────
+    "Grants for inclusive climate solutions benefiting rural and marginalized communities",
+    "Funding for social impact startups improving farmer livelihoods through climate technology",
+    "Community resilience and rural development grants for climate adaptation in developing countries",
+    # ── AltCarbon-specific ───────────────────────────────────────────────────
+    "Grants for companies selling carbon credits to corporate buyers like Google Stripe Shopify",
+    "Funding for Indian startups working on MRV platforms for carbon removal verification",
+    "ERW enhanced rock weathering field trials grants and pilot funding opportunities",
+    "Biochar production grants for developing country climate startups",
+    "CDR buyer programs accepting Indian companies for carbon removal credit purchases",
 ]
 
 # ── Perplexity Sonar queries ────────────────────────────────────────────────────
@@ -333,31 +236,32 @@ DEFAULT_PERPLEXITY_QUERIES: List[str] = [
     "What grant programs are currently open for climate technology startups in 2026?",
     "List open calls for funding for carbon removal MRV and net-zero technology startups 2026",
     "What grants or accelerators are accepting applications from agritech and soil carbon startups in 2026?",
-    "Open grant calls for AI applied to climate or earth sciences 2026",
     "Which foundations or government programs fund climate startups in India or globally right now?",
     "World Bank ADB IFC AIIB climate finance grant open calls 2026",
     "Bezos Earth Fund Grantham Foundation ClimateWorks open grant applications 2026",
     "Which BIRAC ANRF DST DBT AIM India government programs have open grant calls for startups in 2026? List with URLs",
     "EU Horizon EIC UKRI climate deep tech grant open calls 2026",
     "XPRIZE Google.org Microsoft climate innovation grant competition 2026",
-    # New global coverage
-    "What climate grants are open for startups in Africa and sub-Saharan Africa in 2026?",
-    "List open climate technology grant programs for Southeast Asia and ASEAN startups 2026",
-    "Australia ARENA CSIRO cleantech startup grant open calls 2026",
-    "Canada SDTC NRC IRAP cleantech climate grant open applications 2026",
+    # Global coverage
+    "Australia ARENA CSIRO Canada SDTC NRC IRAP cleantech startup grant open calls 2026",
     "Japan NEDO South Korea climate innovation grant open calls 2026",
-    "IDB Lab CORFO CAF Latin America climate startup grant open calls 2026",
-    "UAE Masdar ISDB MENA climate innovation grant program 2026",
-    "Innovate UK Carbon Trust UK climate net zero grant competition open 2026",
-    "African Development Bank African Climate Foundation climate grant open 2026",
-    "Singapore Temasek climate cleantech startup grant open calls 2026",
-    # New from Excel tracker
+    "IDB Lab CORFO Latin America UAE Masdar ISDB MENA climate grant 2026",
+    "Innovate UK Carbon Trust climate net zero grant competition open 2026",
+    "Africa AfDB SEFA Southeast Asia ASEAN climate startup grant open 2026",
+    # CDR + Earth Observation specific
     "What CDR-specific programs are open in 2026? Cascade Climate CRN, Carbon to Sea, CIEIF, ClimeFi, Milkywire CTF",
-    "ESA InCubed CASSINI Challenges space earth observation startup grants open in 2026",
-    "ISRO RESPOND NRSC NASA ROSES earth observation research grant open calls 2026",
+    "ESA InCubed CASSINI ISRO RESPOND NASA ROSES earth observation grants open 2026",
     "IndiaAI Innovation Challenge TDB NISE MNRE BIRAC Green Hydrogen open calls India 2026",
     "Greentown Go Make WFP Innovation Accelerator ADB CIDF Global Innovation Lab climate grant 2026",
-    "LILAS4SOILS MNRE EU Horizon Europe soil carbon MRV open calls 2026",
+    "LILAS4SOILS EU Horizon Europe soil carbon MRV open calls 2026",
+    # Deep Tech + AI for Sciences + Social Impact
+    "What grants fund deep tech startups working on advanced materials, nanotechnology, or frontier science in 2026?",
+    "Which AI for science or machine learning research grants are open for startups in India or globally in 2026?",
+    "What social impact grants fund rural livelihoods, inclusive climate solutions, or community resilience in 2026?",
+    # AltCarbon-specific
+    "What grants fund enhanced rock weathering ERW or biochar carbon sequestration startups in 2026?",
+    "Which MRV and carbon verification technology grants are open for Indian companies in 2026?",
+    "What CDR buyer programs or advance market commitments accept Indian companies for carbon removal credits?",
 ]
 
 # ── Direct source URLs to crawl ────────────────────────────────────────────────
@@ -449,9 +353,15 @@ DIRECT_SOURCE_URLS: Dict[str, List[Dict[str, str]]] = {
         {"funder": "CIEIF CDR Fund", "url": "https://cieif.org/"},
         {"funder": "ClimeFi CDR RFP", "url": "https://climefi.com/blog-posts/climefi-and-adyen-launch-new-dual-track-rfp-for-carbon-removal"},
         {"funder": "Milkywire Climate Transformation Fund", "url": "https://milkywire.com/"},
+        {"funder": "Puro.earth CDR Marketplace", "url": "https://puro.earth/"},
     ],
     "Government Programs": [
         {"funder": "EU EIC Accelerator", "url": "https://eic.ec.europa.eu/eic-funding-opportunities_en"},
+        {"funder": "EU Horizon Europe Cluster 5", "url": "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-search;callCode=HORIZON-CL5"},
+        {"funder": "EU Horizon Europe Cluster 6", "url": "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-search;callCode=HORIZON-CL6"},
+        {"funder": "NASA SBIR", "url": "https://sbir.nasa.gov/solicitations"},
+        {"funder": "UK SBRI", "url": "https://www.gov.uk/government/collections/sbri-the-small-business-research-initiative"},
+        {"funder": "Swiss Climate Foundation", "url": "https://www.swissclimatefoundation.ch/en/apply/"},
         {"funder": "NSF SBIR", "url": "https://www.nsf.gov/eng/iip/sbir/"},
         {"funder": "DOE ARPA-E", "url": "https://arpa-e.energy.gov/technologies/programs"},
         {"funder": "USAID", "url": "https://www.usaid.gov/work-usaid/find-a-funding-opportunity"},
@@ -717,6 +627,9 @@ Return this exact JSON (no other text):
   "application_url": "<DIRECT link to the application form or portal — NOT the program overview page; fill only if you see a dedicated apply/submit/portal link; else null>",
   "source_url": "<the funder's own official grant program page URL; if this content came from a news article or blog mentioning the grant, provide the funder's direct grant page URL if visible in the content; otherwise use {url}>",
   "past_winners_url": "<URL of a past winners / previous awardees / funded projects / portfolio page if visible in the content — e.g. '/awardees', '/winners', '/portfolio'; null if not found>",
+  "about_opportunity": "<2-4 sentences describing what this grant/program funds, its objectives, and what successful applicants receive — include any mentorship, networking, or non-monetary benefits>",
+  "eligibility_details": "<detailed eligibility: org types (startup/NGO/university/for-profit), stage (seed/early/growth), sector restrictions, geography (countries/regions), team size, revenue thresholds, registration requirements, any exclusions — max 300 words>",
+  "application_process": "<how to apply: portal/email/form, required documents (pitch deck, financials, LOI, etc.), number of stages (LOI → full proposal → interview), timeline, any registration prerequisites — max 200 words>",
   "notes": "<2-3 crisp sentences: what this program funds, who it targets, any key requirements or noteworthy conditions>"
 }}
 
@@ -727,6 +640,9 @@ EXTRACTION RULES (follow strictly):
 4. source_url — must be the funder's own official page for this specific grant. If content is from a news/blog/press article about the grant, look in the article for the funder's direct URL and use that instead.
 5. eligibility — always include: eligible org types, geographic restrictions (including explicit exclusions like "US only", "UK registered only"), stage requirements, and sector focus. Write up to 200 words.
 6. sponsor — use the full official organization name (e.g. "Bezos Earth Fund", not "BEF").
+8. about_opportunity — describe what the grant funds, its goals, and benefits (monetary and non-monetary). If the page is a listing/aggregator, summarize the specific opportunity being described.
+9. eligibility_details — be thorough: include org type, stage, sector, geography, team/revenue requirements, registration prerequisites, and any exclusions. More detailed than the short 'eligibility' field.
+10. application_process — describe how to apply step-by-step: portal vs email, required documents, number of review stages, timeline if mentioned. Write "Not specified" if no process details are given.
 7. Indian currency notation — CRITICAL for Indian grants:
    "1 lakh" = 100,000  |  "10 lakh" = 1,000,000  |  "1 crore" = 10,000,000
    Indian comma grouping: "5,00,000" = 500,000 (NOT 5,000 — Indian style groups by 2 after first 3)
@@ -759,9 +675,28 @@ _JUNK_TITLE_PATTERNS = (
     "investment landscape", "market report", "market overview",
     "industry report", "state of the market", "market analysis",
     "state of cdr", "state of carbon", "financing report",
-    "who should apply", "how to apply guide", "grant guide",
     "investor guide", "landscape report",
 )
+# Trusted grant aggregator domains — these list real grant opportunities,
+# so we bypass _JUNK_URL_PATTERNS and relax action keyword requirements.
+_TRUSTED_GRANT_AGGREGATORS = frozenset({
+    "finetrain.com",
+    "startupgrantsindia.com",
+    "fundsforngos.org",
+    "grantwatch.com",
+    "instrumentl.com",
+    "opengranting.com",
+    "fundingcircle.com",
+    "grants.gov",
+    "grants.gov.in",
+    "seedfund.startupindia.gov.in",
+    "icar.org.in",
+    "dst.gov.in",
+    "birac.nic.in",
+    "anrfonline.in",
+    "startupindia.gov.in",
+})
+
 _JUNK_URL_PATTERNS = (
     "/news/", "/blog/", "/press-release/", "/press_release/",
     "/events/", "/media/", "/webinar/", "/articles/",
@@ -782,6 +717,11 @@ _GRANT_ACTION_KEYWORDS = (
     "applications open", "open for applications", "call for proposals",
     "eligibility criteria", "who can apply", "submit a proposal",
     "apply by", "applications close", "deadline to apply",
+    "nominations welcome", "expressions of interest", "eoi",
+    "register your interest", "request for applications", "rfa",
+    "application form", "application portal", "grant application",
+    "closes on", "closing date", "submit by", "last date",
+    "open call", "invite applications", "accepting applications",
 )
 
 # Perplexity URL cleaner: strip common trailing punctuation
@@ -819,6 +759,22 @@ _HUB_SUBGRANT_PATTERNS: Dict[str, List[re.Pattern]] = {
     # Startup India individual scheme pages
     "startupindia.gov.in": [
         re.compile(r"/content/sih/en/[a-z0-9\-_/]+-scheme[a-z0-9\-_.]*\.html"),
+    ],
+    # Finetrain grant aggregator — individual grant pages
+    "finetrain.com": [
+        re.compile(r"/grants?/[a-z0-9][a-z0-9\-_/]+", re.I),
+        re.compile(r"/funding/[a-z0-9][a-z0-9\-_/]+", re.I),
+        re.compile(r"/opportunities?/[a-z0-9][a-z0-9\-_/]+", re.I),
+    ],
+    # StartupGrantsIndia — individual grant/scheme pages
+    "startupgrantsindia.com": [
+        re.compile(r"/grants?/[a-z0-9][a-z0-9\-_/]+", re.I),
+        re.compile(r"/scheme/[a-z0-9][a-z0-9\-_/]+", re.I),
+        re.compile(r"/funding/[a-z0-9][a-z0-9\-_/]+", re.I),
+    ],
+    # FundsForNGOs — individual opportunity pages
+    "fundsforngos.org": [
+        re.compile(r"/latest-funds-for-ngos/[a-z0-9][a-z0-9\-_/]+", re.I),
     ],
 }
 
@@ -882,6 +838,41 @@ def _normalized_url_hash(url: str) -> str:
         return _url_hash(url)
 
 
+# ── Deadline regex fallback ──────────────────────────────────────────────────
+_DEADLINE_PATTERNS = [
+    # "deadline: 31 March 2026" / "closes: March 31, 2026" / "due date: 2026-03-31"
+    re.compile(
+        r"(?:deadline|closes?|closing\s*date|due\s*date|submit\s*by|last\s*date"
+        r"|applications?\s*due)\s*[:–—-]?\s*"
+        r"(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})",
+        re.I,
+    ),
+    # Standalone date patterns near grant keywords: "31 March 2026"
+    re.compile(r"(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})", re.I),
+    # "March 31, 2026"
+    re.compile(r"((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4})", re.I),
+]
+
+
+def _extract_deadline_regex(content: str) -> Optional[str]:
+    """Try to extract a deadline date from raw content using regex patterns.
+    Returns the first match or None."""
+    # Search the first 5000 chars — deadlines are usually near the top
+    text = content[:5000]
+    for pat in _DEADLINE_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+_CONTENT_HASH_FILLER = re.compile(
+    r"\b(grant|program|programme|scheme|fund|call|open|application|"
+    r"20\d{2}|funding|initiative|opportunity)\b",
+    re.I,
+)
+
+
 def _content_hash(title: str, funder: str) -> str:
     # If both are empty, fall back to a uuid-like hash to avoid false dedup
     if not title.strip() and not funder.strip():
@@ -889,7 +880,8 @@ def _content_hash(title: str, funder: str) -> str:
 
     def norm(s: str) -> str:
         s = s.lower().strip()
-        s = re.sub(r"\s+", " ", s)
+        s = _CONTENT_HASH_FILLER.sub("", s)  # strip filler words before hashing
+        s = re.sub(r"\s+", " ", s).strip()
         s = re.sub(r"[^\w\s]", "", s)
         return s
 
@@ -904,67 +896,161 @@ def _is_quality_grant(raw_title: str, url: str, content: str) -> Optional[str]:
 
     if len(content_lower) < 200:
         return "Content too short"
-    # Block social media and blog platform URLs — these are mentions, not grant pages
+
+    # Determine if this URL is from a trusted grant aggregator
+    is_trusted = False
     try:
         domain = urlparse(url_lower).netloc.replace("www.", "")
         if any(s in domain for s in _SOCIAL_MEDIA_DOMAINS):
             return "Social media/blog URL — not a grant page"
+        is_trusted = domain in _TRUSTED_GRANT_AGGREGATORS
     except Exception:
         pass
+
     if any(p in title_lower for p in _JUNK_TITLE_PATTERNS):
         return f"Likely news/article: '{raw_title[:60]}'"
-    if any(p in url_lower for p in _JUNK_URL_PATTERNS):
+    # Trusted aggregators may have /blog/ or /articles/ in their URLs for real listings
+    if not is_trusted and any(p in url_lower for p in _JUNK_URL_PATTERNS):
         return "Non-grant URL pattern"
-    # Listicle pattern: "Top N companies/startups/tools/solutions" → not a grant page
-    if re.search(r"\btop\s+\d+\b", title_lower) and any(
-        w in title_lower for w in ("compan", "startup", "tool", "platform", "solution")
+    # Listicle pattern: "Top 10...", "Best 15...", "7 Funding...", "10 Best..." → not a grant page
+    if re.search(r"(?i)\b(?:top|best|leading)\s+\d+\b|\b\d+\s+(?:top|best|leading)\b", title_lower) and any(
+        w in title_lower for w in ("compan", "startup", "tool", "platform", "solution",
+                                    "funding", "investor", "venture", "vc ", "firm")
     ):
         return f"Listicle (not a grant page): '{raw_title[:60]}'"
     if not any(k in content_lower for k in _GRANT_KEYWORDS):
         return "No grant-related keywords in content"
+    # Trusted aggregators list real grants — skip action keyword check
+    if is_trusted:
+        return None
     # Must have at least one action-oriented grant keyword — articles that merely
     # discuss grants typically lack phrases like "apply now", "eligibility criteria" etc.
     if not any(k in content_lower for k in _GRANT_ACTION_KEYWORDS):
         # Allow through if title clearly signals it's a grant/program page
         _TITLE_GRANT_SIGNALS = ("grant", "fund", "award", "prize", "fellowship",
-                                "call for", "open call", "rfp", "accelerator")
+                                "call for", "open call", "rfp", "accelerator",
+                                "rfa", "eoi", "challenge", "competition",
+                                "programme", "scheme")
         if not any(k in title_lower for k in _TITLE_GRANT_SIGNALS):
             return "No action keywords — likely an article about grants, not a grant page"
     return None
 
 
 def _detect_themes(text: str) -> List[str]:
+    """Classify grant into AltCarbon's 6 themes based on keyword density.
+
+    A theme requires at least `min_hits` distinct keyword matches to qualify,
+    preventing false positives from stray mentions (e.g. a climate grant that
+    says "rural community" once should NOT be tagged Social Impact).
+    """
     t = text.lower()
     themes = []
-    if any(k in t for k in [
-        "climate", "carbon", "net zero", "decarboni", "emission", "cdr", "mrv",
-        "cleantech", "clean energy", "renewable", "solar", "wind", "green hydrogen",
-        "nature based", "biodiversity", "ocean", "methane", "ghg", "greenhouse",
-        "biochar", "enhanced weathering", "direct air capture", "dac", "blue carbon",
-    ]):
-        themes.append("climatetech")
-    if any(k in t for k in [
-        "agri", "soil", "farm", "crop", "food", "land use", "regenerative",
-        "precision agriculture", "agroforestry", "livestock", "fisheries",
-    ]):
-        themes.append("agritech")
-    if any(k in t for k in [
-        "artificial intelligence", "machine learning", "ai for", "deep learning",
-        "nlp", "computer vision", "neural network", "data science", "predictive model",
-    ]):
-        themes.append("ai_for_sciences")
-    if any(k in t for k in [
-        "earth science", "remote sensing", "satellite", "geology", "geospatial",
-        "subsurface", "lidar", "mapping", "geophysics", "hydrogeology",
-    ]):
-        themes.append("applied_earth_sciences")
-    if any(k in t for k in [
-        "social impact", "community", "rural", "livelihood", "inclusive",
-        "women", "gender", "equity", "vulnerable", "marginalized", "poverty",
-    ]):
-        themes.append("social_impact")
-    # Note: NO default fallback — empty list is valid and used by hard rules
+
+    # (keywords, theme_key, min_hits) — higher min_hits for themes with generic keywords
+    THEME_RULES = [
+        ([
+            "climate", "carbon", "net zero", "decarboni", "emission", "cdr", "mrv",
+            "cleantech", "clean energy", "renewable", "solar", "wind", "green hydrogen",
+            "nature based", "biodiversity", "ocean", "methane", "ghg", "greenhouse",
+            "biochar", "enhanced weathering", "direct air capture", "dac", "blue carbon",
+        ], "climatetech", 1),
+        ([
+            "agri", "soil carbon", "farming", "crop", "food security", "land use",
+            "precision agriculture", "agroforestry", "livestock", "fisheries",
+            "regenerative agriculture", "soil health",
+            "enhanced rock weathering", "basalt", "soil amendment", "crop yield",
+            "farmer technology",
+        ], "agritech", 1),
+        ([
+            "artificial intelligence", "machine learning", "ai for", "deep learning",
+            "nlp", "computer vision", "neural network", "data science", "predictive model",
+        ], "ai_for_sciences", 1),
+        ([
+            "earth science", "remote sensing", "satellite", "geology", "geospatial",
+            "subsurface", "lidar", "mapping", "geophysics", "hydrogeology",
+        ], "applied_earth_sciences", 1),
+        ([
+            "social impact", "livelihood", "marginalized", "poverty alleviation",
+            "gender equity", "vulnerable communities", "inclusive development",
+            "community resilience", "rural development",
+        ], "social_impact", 2),
+        ([
+            "deep tech", "deeptech", "frontier tech", "breakthrough", "advanced materials",
+            "quantum", "biotech", "synthetic biology", "nanotechnology", "robotics",
+            "novel hardware", "photonics", "semiconduct", "fusion", "space tech",
+            "advanced manufacturing", "lab-grown", "gene editing", "crispr",
+        ], "deeptech", 1),
+    ]
+
+    for keywords, theme_key, min_hits in THEME_RULES:
+        hits = sum(1 for k in keywords if k in t)
+        if hits >= min_hits:
+            themes.append(theme_key)
+
     return themes
+
+
+# ── Relevance pre-scoring (no LLM call) ────────────────────────────────────────
+# Lightweight 0-1 score using themes_detected + keyword matching.
+# Grants scoring < 0.3 are saved with processed=True, pre_filtered=True — skips analyst.
+
+_CORE_THEME_SCORES: Dict[str, float] = {
+    "climatetech": 0.35,
+    "agritech": 0.25,
+    "ai_for_sciences": 0.15,
+    "applied_earth_sciences": 0.15,
+    "social_impact": 0.10,
+    "deeptech": 0.15,
+}
+
+_ALTCARBON_KEYWORDS = frozenset({
+    "erw", "enhanced rock weathering", "biochar", "mrv", "cdr",
+    "carbon removal", "carbon dioxide removal", "basalt", "soil carbon",
+    "rock dust", "mineral weathering", "feluda", "isometric",
+    "carbon credit", "carbon verification", "dac",
+})
+
+_GEO_BOOST_KEYWORDS = frozenset({
+    "india", "indian", "south asia", "global", "worldwide", "international",
+    "developing countr", "emerging market", "asia", "asia-pacific", "apac",
+    "saarc", "brics", "g20", "lmic", "global south",
+})
+
+
+def _relevance_prescore(grant: Dict) -> float:
+    """Compute a 0–1 relevance score using already-computed themes + keyword matching.
+
+    Returns a float between 0.0 and 1.0. Grants below 0.3 are irrelevant to AltCarbon.
+    """
+    score = 0.0
+
+    # Theme hits (take the max single-theme score, plus 0.05 for each additional theme)
+    themes = grant.get("themes_detected") or []
+    if themes:
+        theme_scores = [_CORE_THEME_SCORES.get(t, 0.0) for t in themes]
+        score += max(theme_scores)
+        if len(theme_scores) > 1:
+            score += (len(theme_scores) - 1) * 0.05
+
+    # AltCarbon-specific keyword boost
+    text_lower = (
+        (grant.get("raw_content") or "")[:5000]
+        + " " + (grant.get("title") or "")
+        + " " + (grant.get("notes") or "")
+    ).lower()
+    ac_hits = sum(1 for kw in _ALTCARBON_KEYWORDS if kw in text_lower)
+    score += min(ac_hits * 0.08, 0.30)  # cap at 0.30
+
+    # Geography boost
+    geo_text = (
+        (grant.get("geography") or "")
+        + " " + (grant.get("eligibility") or "")
+        + " " + text_lower[:2000]
+    ).lower()
+    if any(kw in geo_text for kw in _GEO_BOOST_KEYWORDS):
+        score += 0.10
+
+    return min(score, 1.0)
 
 
 # ── HTTP fetch helpers ─────────────────────────────────────────────────────────
@@ -1022,6 +1108,10 @@ def _get_jina_sem() -> asyncio.Semaphore:
 
 async def _fetch_with_jina(url: str, api_key: str = "") -> str:
     """Fetch page content via Jina Reader with rate-limit-aware concurrency."""
+    if api_health.is_exhausted("jina"):
+        logger.debug("Skipping Jina (exhausted) for %s — falling back to plain HTTP", url[:60])
+        return ""
+
     jina_url = f"https://r.jina.ai/{url.strip()}"
     headers: Dict[str, str] = {
         "X-Return-Format": "markdown",
@@ -1042,11 +1132,17 @@ async def _fetch_with_jina(url: str, api_key: str = "") -> str:
 
     sem = _get_jina_sem()
     async with sem:
-        result = await retry_async(
-            _do_fetch, retries=3, base_delay=4.0, label=f"jina:{url[:60]}"
-        )
+        try:
+            result = await retry_async(
+                _do_fetch, retries=3, base_delay=4.0, label=f"jina:{url[:60]}", service="jina"
+            )
+        except CreditExhaustedError:
+            return ""
         await asyncio.sleep(_JINA_INTER_REQUEST_DELAY)
-    return result or ""
+    if result is None:
+        return ""
+    api_health.record_success("jina")
+    return result
 
 
 async def _fetch_plain(url: str) -> str:
@@ -1160,6 +1256,9 @@ class ScoutAgent:
     async def _tavily_search(self, query: str) -> List[Dict]:
         if not self._tavily:
             return []
+        if api_health.is_exhausted("tavily"):
+            logger.debug("Skipping Tavily (exhausted): %s", query[:50])
+            return []
 
         async def _do():
             result = await asyncio.to_thread(
@@ -1184,15 +1283,23 @@ class ScoutAgent:
                 })
             return items
 
-        result = await retry_async(_do, retries=3, base_delay=2.0, label=f"tavily:{query[:40]}")
-        items = result or []
-        logger.info("Tavily query=%r → %d results", query[:50], len(items))
-        return items
+        try:
+            result = await retry_async(_do, retries=3, base_delay=2.0, label=f"tavily:{query[:40]}", service="tavily")
+        except CreditExhaustedError:
+            return []
+        if result is None:
+            return []
+        api_health.record_success("tavily")
+        logger.info("Tavily query=%r → %d results", query[:50], len(result))
+        return result
 
     # ── Exa semantic search ────────────────────────────────────────────────────
 
     async def _exa_search(self, query: str) -> List[Dict]:
         if not self._exa:
+            return []
+        if api_health.is_exhausted("exa"):
+            logger.debug("Skipping Exa (exhausted): %s", query[:50])
             return []
 
         async def _do():
@@ -1223,19 +1330,27 @@ class ScoutAgent:
                 })
             return items
 
-        result = await retry_async(_do, retries=3, base_delay=2.0, label=f"exa:{query[:40]}")
-        items = result or []
-        logger.info("Exa query=%r → %d results", query[:50], len(items))
-        return items
+        try:
+            result = await retry_async(_do, retries=3, base_delay=2.0, label=f"exa:{query[:40]}", service="exa")
+        except CreditExhaustedError:
+            return []
+        if result is None:
+            return []
+        api_health.record_success("exa")
+        logger.info("Exa query=%r → %d results", query[:50], len(result))
+        return result
 
     # ── Perplexity Sonar search ────────────────────────────────────────────────
 
     async def _perplexity_search(self, query: str) -> List[Dict]:
-        """Query Perplexity. Uses direct API key if available, gateway as fallback."""
-        if self.perplexity_key:
-            return await self._perplexity_direct(query)
+        """Query Perplexity. Prefers AI Gateway; falls back to direct API key."""
+        if api_health.is_exhausted("perplexity"):
+            logger.debug("Skipping Perplexity (exhausted): %s", query[:50])
+            return []
         if self.gateway_key:
             return await self._perplexity_gateway(query)
+        if self.perplexity_key:
+            return await self._perplexity_direct(query)
         return []
 
     async def _perplexity_direct(self, query: str) -> List[Dict]:
@@ -1269,10 +1384,14 @@ class ScoutAgent:
                 r.raise_for_status()
                 return r.json()
 
-        data = await retry_async(_do, retries=3, base_delay=2.0, label=f"perplexity-direct:{query[:40]}")
+        try:
+            data = await retry_async(_do, retries=3, base_delay=2.0, label=f"perplexity-direct:{query[:40]}", service="perplexity")
+        except CreditExhaustedError:
+            return []
         if not data:
             return []
 
+        api_health.record_success("perplexity")
         answer = data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
         # Prefer structured citations, fallback to URL regex
         citations: List[str] = data.get("citations", [])
@@ -1310,9 +1429,13 @@ class ScoutAgent:
             )
             return response.choices[0].message.content or ""
 
-        answer = await retry_async(_do, retries=2, base_delay=2.0, label=f"perplexity-gw:{query[:40]}")
+        try:
+            answer = await retry_async(_do, retries=2, base_delay=2.0, label=f"perplexity-gw:{query[:40]}", service="perplexity")
+        except CreditExhaustedError:
+            return []
         if not answer:
             return []
+        api_health.record_success("perplexity")
         urls = _extract_urls_from_text(answer)[:15]
         return [
             {
@@ -1380,12 +1503,44 @@ class ScoutAgent:
 
     async def run(self) -> List[Dict]:
         """Run full scout: all search sources in parallel → dedup → enrich → save."""
+        import traceback as _tb
+
+        _run_start = datetime.now(timezone.utc)
+
         logger.info(
             "Scout starting: %d Tavily, %d Exa, %d Perplexity, %d direct sources",
             len(self.tavily_queries), len(self.exa_queries),
             len(self.perplexity_queries) if (self.perplexity_key or self.gateway_key) else 0,
             len(ALL_DIRECT_SOURCES) if self.enable_direct_crawl else 0,
         )
+
+        try:
+            return await self._run_inner()
+        except Exception as exc:
+            elapsed = (datetime.now(timezone.utc) - _run_start).total_seconds()
+            try:
+                from backend.integrations.notion_sync import log_error, log_agent_run
+                await log_error(
+                    agent="scout",
+                    error=exc,
+                    tb=_tb.format_exc(),
+                    severity="Critical",
+                )
+                await log_agent_run(
+                    agent="scout",
+                    status="Failed",
+                    trigger="Manual",
+                    started_at=_run_start,
+                    duration_seconds=elapsed,
+                    errors=1,
+                    summary=f"Scout failed: {str(exc)[:200]}",
+                )
+            except Exception:
+                logger.debug("Notion error sync skipped (scout failure)", exc_info=True)
+            raise
+
+    async def _run_inner(self) -> List[Dict]:
+        """Inner scout logic, wrapped by run() for error handling."""
 
         # ── Run all searches in parallel ──────────────────────────────────────
         tavily_tasks = [self._tavily_search(q) for q in self.tavily_queries]
@@ -1510,6 +1665,9 @@ class ScoutAgent:
                 item["max_funding_usd"] = item["max_funding"]
                 item["currency"] = extracted.get("currency") or "USD"
                 item["deadline"] = extracted.get("deadline")
+                # Deadline regex fallback: when LLM returns null, try common patterns
+                if not item["deadline"]:
+                    item["deadline"] = _extract_deadline_regex(content)
                 item["eligibility"] = extracted.get("eligibility") or ""
                 item["application_url"] = (
                     extracted.get("application_url") or item.get("url", "")
@@ -1518,6 +1676,9 @@ class ScoutAgent:
                     extracted.get("source_url") or item.get("url", "")
                 )
                 item["notes"] = extracted.get("notes") or ""
+                item["about_opportunity"] = extracted.get("about_opportunity") or ""
+                item["eligibility_details"] = extracted.get("eligibility_details") or ""
+                item["application_process"] = extracted.get("application_process") or ""
                 item["themes_text"] = extracted.get("themes") or ""
                 item["past_winners_url"] = extracted.get("past_winners_url") or None
                 item["last_verified_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1540,9 +1701,10 @@ class ScoutAgent:
         enriched_raw = await asyncio.gather(*(safe_enrich(g) for g in new_grants))
         enriched = [g for g in enriched_raw if g is not None]
 
-        # ── Quality filter + content-hash dedup + save ────────────────────────
+        # ── Quality filter + pre-score gate + content-hash dedup + save ──────
         saved = []
         quality_rejected = 0
+        pre_filtered = 0
         content_dupes = 0
 
         for grant in enriched:
@@ -1573,6 +1735,28 @@ class ScoutAgent:
                 continue
             known_content_hashes.add(ch)
 
+            # Relevance pre-score gate: skip analyst for clearly irrelevant grants
+            prescore = _relevance_prescore(grant)
+            grant["relevance_prescore"] = round(prescore, 3)
+            if prescore < 0.3:
+                logger.debug(
+                    "Pre-filtered (score=%.2f): %s",
+                    prescore, grant.get("title", "")[:50],
+                )
+                grant["processed"] = True
+                grant["pre_filtered"] = True
+                pre_filtered += 1
+                # Still save to DB but mark as processed so analyst skips it
+                try:
+                    await col.update_one(
+                        {"url_hash": grant["url_hash"]},
+                        {"$setOnInsert": grant},
+                        upsert=True,
+                    )
+                except Exception:
+                    pass
+                continue
+
             # Clean up internal tracking field
             grant.pop("_raw_title", None)
 
@@ -1591,8 +1775,8 @@ class ScoutAgent:
                 logger.warning("Failed to save grant %s: %s", grant.get("url"), e)
 
         logger.info(
-            "Scout: %d saved, %d quality-rejected, %d content-dupes",
-            len(saved), quality_rejected, content_dupes,
+            "Scout: %d saved, %d quality-rejected, %d pre-filtered, %d content-dupes",
+            len(saved), quality_rejected, pre_filtered, content_dupes,
         )
 
         # ── Log run stats ─────────────────────────────────────────────────────
@@ -1605,6 +1789,7 @@ class ScoutAgent:
             "total_found": len(unique),
             "new_grants": len(saved),
             "quality_rejected": quality_rejected,
+            "pre_filtered": pre_filtered,
             "content_dupes": content_dupes,
         }
         await scout_runs().insert_one(run_doc)
@@ -1615,7 +1800,30 @@ class ScoutAgent:
             **run_doc,
         })
 
-        logger.info("Scout complete: %d grants saved to grants_raw", len(saved))
+        # ── Notion Mission Control sync ──────────────────────────────────
+        try:
+            from backend.integrations.notion_sync import log_agent_run
+            await log_agent_run(
+                agent="scout",
+                status="Completed",
+                trigger="Manual",
+                started_at=datetime.now(timezone.utc),
+                grants_found=len(saved),
+                errors=0,
+                summary=f"Discovered {len(unique)} grants, saved {len(saved)} new. "
+                        f"{quality_rejected} quality-rejected, {pre_filtered} pre-filtered, "
+                        f"{content_dupes} content-dupes.",
+            )
+        except Exception:
+            logger.debug("Notion sync skipped (scout run)", exc_info=True)
+
+        # Log API health at end of run
+        health = api_health.get_status()
+        exhausted_svcs = [s for s, v in health.items() if v.get("status") == "exhausted"]
+        if exhausted_svcs:
+            logger.warning("Scout complete: %d grants saved. EXHAUSTED APIs: %s", len(saved), ", ".join(exhausted_svcs))
+        else:
+            logger.info("Scout complete: %d grants saved to grants_raw", len(saved))
         return saved
 
 

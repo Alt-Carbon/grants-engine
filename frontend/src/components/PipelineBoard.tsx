@@ -11,6 +11,7 @@ import {
 } from "@hello-pangea/dnd";
 import { GrantCard } from "./GrantCard";
 import { GrantDetailSheet } from "./GrantDetailSheet";
+import { useLastSeen, isNewSince } from "@/hooks/useLastSeen";
 import type { Grant } from "@/lib/queries";
 
 const COLUMNS = [
@@ -35,17 +36,6 @@ const COLUMNS = [
     dropHighlight: "bg-green-50/80 ring-2 ring-inset ring-green-300",
     barIdle: "border-green-200 bg-green-50 text-green-700",
     barOver: "border-green-400 bg-green-100 text-green-900 scale-105 shadow-md",
-  },
-  {
-    id: "watch",
-    label: "Watch",
-    targetStatus: "watch",
-    color: "blue",
-    headerCls: "border-blue-300 bg-blue-50",
-    countCls: "bg-blue-100 text-blue-800",
-    dropHighlight: "bg-blue-50/80 ring-2 ring-inset ring-blue-300",
-    barIdle: "border-blue-200 bg-blue-50 text-blue-700",
-    barOver: "border-blue-400 bg-blue-100 text-blue-900 scale-105 shadow-md",
   },
   {
     id: "drafting",
@@ -87,7 +77,6 @@ type ColumnId = (typeof COLUMNS)[number]["id"];
 function statusToColumn(status: string): ColumnId {
   if (status === "triage") return "shortlisted";
   if (status === "pursue" || status === "pursuing") return "pursue";
-  if (status === "watch") return "watch";
   if (status === "drafting") return "drafting";
   if (
     status === "submitted" ||
@@ -129,6 +118,7 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
   const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [dragSourceCol, setDragSourceCol] = useState<ColumnId | null>(null);
+  const { lastSeenAt } = useLastSeen();
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number>(0);
@@ -338,7 +328,7 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
       >
         {/* ── Quick-drop bar — visible only during drag ──────────────── */}
         <div
-          className={`grid grid-cols-6 gap-2 overflow-hidden transition-all duration-200 ${
+          className={`grid grid-cols-5 gap-2 overflow-hidden transition-all duration-200 ${
             isDragging
               ? "max-h-16 opacity-100"
               : "pointer-events-none max-h-0 opacity-0"
@@ -434,6 +424,7 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
                               <GrantCard
                                 grant={grant}
                                 compact
+                                isNew={isNewSince(grant.scored_at || grant.scraped_at, lastSeenAt)}
                                 onStatusChange={(grantId, newStatus) =>
                                   updateStatus(grantId, newStatus, col.id)
                                 }

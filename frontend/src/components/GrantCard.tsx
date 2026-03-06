@@ -1,12 +1,14 @@
 import { ExternalLink } from "lucide-react";
 import { DeadlineChip } from "./DeadlineChip";
 import { StatusPicker } from "./StatusPicker";
+import { getPriority, getThemeLabel } from "@/lib/utils";
 import type { Grant } from "@/lib/queries";
 
 interface GrantCardProps {
   grant: Grant;
   compact?: boolean;
   href?: string;
+  isNew?: boolean;
   onStatusChange?: (grantId: string, newStatus: string) => void;
 }
 
@@ -23,6 +25,17 @@ function ScoreBadge({ score }: { score: number }) {
       className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-bold ring-1 ${color}`}
     >
       {score.toFixed(1)}
+    </span>
+  );
+}
+
+function PriorityBadge({ score }: { score: number }) {
+  const { label, className } = getPriority(score);
+  return (
+    <span
+      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${className}`}
+    >
+      {label}
     </span>
   );
 }
@@ -46,6 +59,7 @@ function PassedLabel({ status }: { status: string }) {
 export function GrantCard({
   grant,
   compact = false,
+  isNew = false,
   onStatusChange,
 }: GrantCardProps) {
   const name = grant.grant_name || grant.title || "Unnamed Grant";
@@ -56,20 +70,50 @@ export function GrantCard({
   );
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-3 shadow-sm hover:shadow-md transition-shadow">
+    <div className={`rounded-lg border bg-white p-3 shadow-sm hover:shadow-md transition-shadow ${
+      isNew ? "border-blue-300 ring-1 ring-blue-100" : "border-gray-200"
+    }`}>
       <div className="flex items-start justify-between gap-2">
-        <h3
-          className={`font-medium text-gray-900 ${
-            compact ? "line-clamp-2 text-xs" : "text-sm"
-          }`}
-        >
-          {name}
-        </h3>
-        <ScoreBadge score={score} />
+        <div className="flex items-center gap-1.5 min-w-0">
+          {isNew && (
+            <span className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-blue-700">
+              New
+            </span>
+          )}
+          <h3
+            className={`font-medium text-gray-900 ${
+              compact ? "line-clamp-2 text-xs" : "text-sm"
+            }`}
+          >
+            {name}
+          </h3>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <PriorityBadge score={score} />
+          <ScoreBadge score={score} />
+        </div>
       </div>
 
       {grant.funder && (
         <p className="mt-1 truncate text-xs text-gray-500">{grant.funder}</p>
+      )}
+
+      {/* Theme badges */}
+      {grant.themes_detected && grant.themes_detected.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {grant.themes_detected.map((t) => {
+            const theme = getThemeLabel(t);
+            return (
+              <span
+                key={t}
+                className="rounded-full px-2 py-0.5 text-[10px] font-medium"
+                style={{ backgroundColor: theme.bg, color: theme.color }}
+              >
+                {theme.label}
+              </span>
+            );
+          })}
+        </div>
       )}
 
       {!compact && grant.eligibility && (

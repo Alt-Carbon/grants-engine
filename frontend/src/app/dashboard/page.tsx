@@ -5,6 +5,7 @@ import {
 } from "@/lib/queries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WarningsBanner } from "@/components/WarningsBanner";
+import { WhatsNewDigest } from "@/components/WhatsNewDigest";
 import { ActivityChart } from "@/components/ActivityChart";
 import { PipelineTable } from "@/components/PipelineTable";
 import {
@@ -72,6 +73,9 @@ export default async function DashboardPage() {
         <p className="mt-1 text-sm text-gray-500">Grant pipeline overview</p>
       </div>
 
+      {/* What's New — returning user digest */}
+      <WhatsNewDigest />
+
       {/* Warnings */}
       <WarningsBanner warnings={stats.warnings} />
 
@@ -115,15 +119,7 @@ export default async function DashboardPage() {
       </Card>
 
       {/* Extra stats row — stack on mobile, 3 cols on sm+ */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
-        <Card>
-          <CardContent className="p-4 sm:p-5">
-            <p className="text-xs font-medium text-gray-500">Watching</p>
-            <p className="mt-1 text-2xl font-bold text-blue-700">
-              {stats.watching}
-            </p>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
         <Card>
           <CardContent className="p-4 sm:p-5">
             <p className="text-xs font-medium text-gray-500">On Hold</p>

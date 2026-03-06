@@ -115,3 +115,7 @@ async def ensure_indexes():
     # funder context cache (7-day TTL index on cached_at)
     await _idx("funder_context_cache", "funder", unique=True)
     await _idx("funder_context_cache", "cached_at", expireAfterSeconds=7 * 24 * 3600)
+
+    # deep research cache (7-day TTL)
+    await _idx("deep_research_cache", "url_hash", unique=True)
+    await _idx("deep_research_cache", "cached_at", expireAfterSeconds=7 * 24 * 3600)

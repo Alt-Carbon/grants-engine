@@ -5,6 +5,10 @@ embeds with OpenAI text-embedding-3-small, stores in MongoDB Atlas Vector Search
 
 Query interface: given a grant's themes and requirements, return the most
 relevant chunks to ground Analyst scoring and Drafter writing.
+
+Notion sync modes:
+- NOTION_KNOWLEDGE_BASE_PAGE_ID set: sync only that page + all descendants (AltCarbon knowledge)
+- Otherwise: sync all workspace pages (legacy, with pagination)
 """
 from __future__ import annotations
 
@@ -13,15 +17,37 @@ import logging
 import re
 import textwrap
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
 
+import httpx
 from openai import AsyncOpenAI
 
+from backend.config.settings import get_settings
 from backend.db.mongo import knowledge_chunks, knowledge_sync_logs
 from backend.graph.state import GrantState
 from backend.utils.llm import chat, HAIKU
 
 logger = logging.getLogger(__name__)
+
+# ── Static knowledge profile (from Notion, cached locally) ─────────────────
+_PROFILE_PATH = Path(__file__).resolve().parent.parent / "knowledge" / "altcarbon_profile.md"
+_cached_profile: Optional[str] = None
+
+
+def _load_static_profile() -> str:
+    """Load the AltCarbon knowledge profile from the local markdown file."""
+    global _cached_profile
+    if _cached_profile is not None:
+        return _cached_profile
+    try:
+        _cached_profile = _PROFILE_PATH.read_text(encoding="utf-8")
+        logger.info("Loaded static AltCarbon profile (%d chars)", len(_cached_profile))
+    except FileNotFoundError:
+        logger.warning("Static profile not found at %s", _PROFILE_PATH)
+        _cached_profile = ""
+    return _cached_profile
+
 
 CHUNK_SIZE = 400       # words
 CHUNK_OVERLAP = 80     # words
@@ -76,67 +102,264 @@ class CompanyBrainAgent:
     # ── Notion sync ────────────────────────────────────────────────────────────
 
     async def _fetch_notion_pages(self) -> List[Dict]:
+        # Prefer MCP if connected
+        try:
+            from backend.integrations.notion_mcp import notion_mcp
+            if notion_mcp.connected:
+                return await self._fetch_via_mcp()
+        except Exception as e:
+            logger.debug("MCP not available, falling back to API: %s", e)
+
         if not self.notion_token:
             logger.warning("NOTION_TOKEN not set — skipping Notion sync")
             return []
-        import httpx
+        root_id = get_settings().notion_knowledge_base_page_id
+        if root_id:
+            return await self._fetch_from_root_page(root_id)
+        return await self._fetch_via_search()
+
+    async def _fetch_via_mcp(self) -> List[Dict]:
+        """Fetch Notion pages via the MCP server (preferred path)."""
+        from backend.integrations.notion_mcp import notion_mcp
+
+        # Search for AltCarbon-related content
+        queries = [
+            "AltCarbon company overview technology",
+            "Alt Carbon ERW biochar carbon removal MRV",
+            "Alt Carbon projects Darjeeling Bengal",
+            "Alt Carbon team methodology impact",
+        ]
+        seen: Set[str] = set()
+        pages: List[Dict] = []
+
+        for q in queries:
+            try:
+                results = await notion_mcp.search(q)
+                for r in results:
+                    page_id = r.get("id", "")
+                    if page_id in seen:
+                        continue
+                    seen.add(page_id)
+                    title = r.get("title", "Untitled")
+                    # Fetch full page content
+                    text = await notion_mcp.fetch_page(page_id)
+                    if text and len(text.split()) >= MIN_CHUNK_WORDS:
+                        pages.append({
+                            "id": page_id,
+                            "title": title,
+                            "text": text,
+                            "source": "notion",
+                        })
+            except Exception as e:
+                logger.debug("MCP search/fetch failed for '%s': %s", q, e)
+
+        logger.info("Notion (MCP): fetched %d pages", len(pages))
+        return pages
+
+    async def _fetch_from_root_page(self, root_page_id: str) -> List[Dict]:
+        """Fetch root page + all descendants. Use when NOTION_KNOWLEDGE_BASE_PAGE_ID is set."""
         headers = {
             "Authorization": f"Bearer {self.notion_token}",
             "Notion-Version": "2022-06-28",
             "Content-Type": "application/json",
         }
-        pages = []
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                # Search all pages
-                r = await client.post(
-                    "https://api.notion.com/v1/search",
-                    headers=headers,
-                    json={"filter": {"value": "page", "property": "object"}, "page_size": 100},
-                )
-                r.raise_for_status()
-                results = r.json().get("results", [])
+        pages: List[Dict] = []
+        seen: Set[str] = set()
 
-                for page in results:
-                    page_id = page["id"]
-                    title = ""
-                    # Get title from properties
-                    props = page.get("properties", {})
-                    for prop in props.values():
-                        if prop.get("type") == "title":
-                            title_parts = prop.get("title", [])
-                            title = "".join(t.get("plain_text", "") for t in title_parts)
-                            break
+        async def collect_page(page_id: str, title_prefix: str = "") -> None:
+            if page_id in seen:
+                return
+            seen.add(page_id)
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    # Fetch page metadata
+                    page_r = await client.get(
+                        f"https://api.notion.com/v1/pages/{page_id}",
+                        headers=headers,
+                    )
+                    if page_r.status_code != 200:
+                        return
+                    page = page_r.json()
+                    title = self._get_page_title(page)
+                    full_title = f"{title_prefix}{title}" if title_prefix else title
 
-                    # Fetch page blocks (content)
+                    # Fetch blocks (with recursive children)
+                    text = await self._blocks_to_text_recursive(client, headers, page_id)
+                    if len(text.split()) >= MIN_CHUNK_WORDS:
+                        pages.append({
+                            "id": page_id,
+                            "title": full_title or title or "Untitled",
+                            "text": text,
+                            "source": "notion",
+                        })
+
+                    # Recurse into child_page and child_database blocks
                     blocks_r = await client.get(
                         f"https://api.notion.com/v1/blocks/{page_id}/children",
                         headers=headers,
+                        params={"page_size": 100},
                     )
                     if blocks_r.status_code != 200:
-                        continue
+                        return
                     blocks = blocks_r.json().get("results", [])
-                    text = self._blocks_to_text(blocks)
-                    if len(text.split()) < MIN_CHUNK_WORDS:
-                        continue
-                    pages.append({"id": page_id, "title": title, "text": text, "source": "notion"})
+                    for block in blocks:
+                        btype = block.get("type", "")
+                        bid = block.get("id", "")
+                        if btype == "child_page":
+                            child_title = block.get("child_page", {}).get("title", "Untitled")
+                            await collect_page(bid, f"{full_title} > ")
+                        elif btype == "child_database":
+                            await collect_database(bid, full_title)
+            except Exception as e:
+                logger.debug("Notion page fetch failed for %s: %s", page_id, e)
 
+        async def collect_database(database_id: str, prefix: str) -> None:
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    cursor = None
+                    while True:
+                        body: Dict[str, Any] = {"page_size": 100}
+                        if cursor:
+                            body["start_cursor"] = cursor
+                        r = await client.post(
+                            f"https://api.notion.com/v1/databases/{database_id}/query",
+                            headers=headers,
+                            json=body,
+                        )
+                        if r.status_code != 200:
+                            break
+                        data = r.json()
+                        for page in data.get("results", []):
+                            pid = page["id"]
+                            if pid in seen:
+                                continue
+                            seen.add(pid)
+                            title = self._get_page_title(page)
+                            text = await self._blocks_to_text_recursive(client, headers, pid)
+                            if len(text.split()) >= MIN_CHUNK_WORDS:
+                                pages.append({
+                                    "id": pid,
+                                    "title": f"{prefix} > {title}" if prefix else title,
+                                    "text": text,
+                                    "source": "notion",
+                                })
+                        cursor = data.get("next_cursor")
+                        if not cursor:
+                            break
+            except Exception as e:
+                logger.debug("Notion database fetch failed for %s: %s", database_id, e)
+
+        await collect_page(root_page_id)
+        logger.info("Notion (root mode): fetched %d pages from %s", len(pages), root_page_id[:8])
+        return pages
+
+    def _get_page_title(self, page: Dict) -> str:
+        props = page.get("properties", {})
+        for prop in props.values():
+            if prop.get("type") == "title":
+                title_parts = prop.get("title", [])
+                return "".join(t.get("plain_text", "") for t in title_parts)
+        return ""
+
+    async def _blocks_to_text_recursive(
+        self,
+        client: httpx.AsyncClient,
+        headers: Dict[str, str],
+        block_id: str,
+    ) -> str:
+        """Fetch blocks and recursively fetch nested children. Returns plain text."""
+        lines: List[str] = []
+        cursor = None
+        while True:
+            try:
+                params: Dict[str, Any] = {"page_size": 100}
+                if cursor:
+                    params["start_cursor"] = cursor
+                r = await client.get(
+                    f"https://api.notion.com/v1/blocks/{block_id}/children",
+                    headers=headers,
+                    params=params,
+                )
+                if r.status_code != 200:
+                    break
+                data = r.json()
+                blocks = data.get("results", [])
+                for block in blocks:
+                    text = await self._block_to_text(client, headers, block)
+                    if text.strip():
+                        lines.append(text)
+                cursor = data.get("next_cursor")
+                if not cursor:
+                    break
+            except Exception:
+                break
+        return "\n".join(lines)
+
+    async def _block_to_text(
+        self,
+        client: httpx.AsyncClient,
+        headers: Dict[str, str],
+        block: Dict,
+    ) -> str:
+        btype = block.get("type", "")
+        content = block.get(btype, {})
+        rich = content.get("rich_text", [])
+        text = "".join(r.get("plain_text", "") for r in rich)
+        if block.get("has_children"):
+            child_text = await self._blocks_to_text_recursive(
+                client, headers, block["id"]
+            )
+            if child_text:
+                text = f"{text}\n{child_text}" if text else child_text
+        return text
+
+    async def _fetch_via_search(self) -> List[Dict]:
+        """Legacy: search all workspace pages with pagination."""
+        headers = {
+            "Authorization": f"Bearer {self.notion_token}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+        }
+        pages: List[Dict] = []
+        cursor = None
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                while True:
+                    body: Dict[str, Any] = {
+                        "filter": {"value": "page", "property": "object"},
+                        "page_size": 100,
+                    }
+                    if cursor:
+                        body["start_cursor"] = cursor
+                    r = await client.post(
+                        "https://api.notion.com/v1/search",
+                        headers=headers,
+                        json=body,
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                    results = data.get("results", [])
+
+                    for page in results:
+                        page_id = page["id"]
+                        title = self._get_page_title(page)
+                        text = await self._blocks_to_text_recursive(client, headers, page_id)
+                        if len(text.split()) >= MIN_CHUNK_WORDS:
+                            pages.append({
+                                "id": page_id,
+                                "title": title or "Untitled",
+                                "text": text,
+                                "source": "notion",
+                            })
+
+                    cursor = data.get("next_cursor")
+                    if not cursor:
+                        break
         except Exception as e:
             logger.error("Notion sync error: %s", e)
 
-        logger.info("Notion: fetched %d pages", len(pages))
+        logger.info("Notion (search mode): fetched %d pages", len(pages))
         return pages
-
-    def _blocks_to_text(self, blocks: List[Dict]) -> str:
-        lines = []
-        for block in blocks:
-            btype = block.get("type", "")
-            content = block.get(btype, {})
-            rich = content.get("rich_text", [])
-            text = "".join(r.get("plain_text", "") for r in rich)
-            if text.strip():
-                lines.append(text)
-        return "\n".join(lines)
 
     # ── Google Drive sync ──────────────────────────────────────────────────────
 
@@ -307,6 +530,16 @@ class CompanyBrainAgent:
             logger.error("Embedding query failed: %s", e)
             return []
 
+        # Build filter: themes and/or doc_types
+        vs_filter: Dict[str, Any] = {}
+        if themes or doc_types:
+            parts = []
+            if themes:
+                parts.append({"themes": {"$in": themes}})
+            if doc_types:
+                parts.append({"doc_type": {"$in": doc_types}})
+            vs_filter = {"$and": parts} if len(parts) > 1 else parts[0]
+
         pipeline: List[Dict] = [
             {
                 "$vectorSearch": {
@@ -315,7 +548,7 @@ class CompanyBrainAgent:
                     "queryVector": query_embedding,
                     "numCandidates": top_k * 10,
                     "limit": top_k,
-                    **({"filter": {"themes": {"$in": themes}}} if themes else {}),
+                    **({"filter": vs_filter} if vs_filter else {}),
                 }
             },
             {
@@ -357,6 +590,51 @@ class CompanyBrainAgent:
             doc_types=["past_grant_application"],
             top_k=4,
         )
+
+    async def get_company_overview(
+        self,
+        themes: Optional[List[str]] = None,
+        max_chars: int = 4000,
+    ) -> str:
+        """Get AltCarbon company knowledge for Analyst/Drafter prompts.
+        Prioritizes company_overview, technical_methodology, project_description.
+        Falls back to the static Notion-sourced profile if vector search is empty.
+        """
+        chunks = await self.query(
+            "AltCarbon company overview technology methodology pilots team",
+            themes=themes,
+            doc_types=[
+                "company_overview",
+                "technical_methodology",
+                "project_description",
+                "impact_metrics",
+                "team_bio",
+            ],
+            top_k=10,
+        )
+        if not chunks:
+            chunks = await self.query(
+                "AltCarbon climate technology carbon removal MRV",
+                themes=themes or ["climatetech"],
+                top_k=8,
+            )
+        parts = []
+        total = 0
+        for c in chunks:
+            content = c.get("content", "")
+            if content and total + len(content) <= max_chars:
+                parts.append(f"[{c.get('doc_type', 'misc')} | {c.get('source_title', '')}]\n{content}")
+                total += len(content)
+
+        if parts:
+            return "\n\n---\n\n".join(parts)
+
+        # Fallback: use the static profile sourced from Notion
+        profile = _load_static_profile()
+        if profile:
+            logger.info("Using static AltCarbon profile as fallback (no vector chunks found)")
+            return profile[:max_chars]
+        return ""
 
     async def health(self) -> Dict:
         col = knowledge_chunks()
@@ -411,6 +689,13 @@ async def company_brain_node(state: GrantState) -> Dict:
         f"[{c.get('doc_type','misc')} | {c.get('source_title','')}]\n{c['content']}"
         for c in context_chunks
     )
+
+    # Always prepend the static profile for rich baseline context
+    static_profile = _load_static_profile()
+    if static_profile and not company_context:
+        company_context = static_profile[:6000]
+    elif static_profile:
+        company_context = f"[STATIC PROFILE]\n{static_profile[:3000]}\n\n---\n\n{company_context}"
     style_text = "\n\n---\n\n".join(
         f"[PAST APPLICATION EXAMPLE]\n{c['content']}"
         for c in style_examples

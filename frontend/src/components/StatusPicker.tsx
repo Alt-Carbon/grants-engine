@@ -7,7 +7,6 @@ const STATUS_STYLES: Record<string, string> = {
   triage:         "bg-amber-100 text-amber-800 hover:ring-2 hover:ring-amber-300",
   pursue:         "bg-green-100 text-green-800 hover:ring-2 hover:ring-green-300",
   pursuing:       "bg-green-100 text-green-800 hover:ring-2 hover:ring-green-300",
-  watch:          "bg-blue-100 text-blue-800 hover:ring-2 hover:ring-blue-300",
   drafting:       "bg-purple-100 text-purple-800 hover:ring-2 hover:ring-purple-300",
   draft_complete: "bg-indigo-100 text-indigo-800 hover:ring-2 hover:ring-indigo-300",
   submitted:      "bg-cyan-100 text-cyan-800 hover:ring-2 hover:ring-cyan-300",
@@ -23,7 +22,6 @@ const STATUS_LABELS: Record<string, string> = {
   triage:         "Shortlisted",
   pursue:         "Pursue",
   pursuing:       "Pursuing",
-  watch:          "Watch",
   drafting:       "Drafting",
   draft_complete: "Draft Complete",
   submitted:      "Submitted",
@@ -38,7 +36,6 @@ const STATUS_LABELS: Record<string, string> = {
 const MOVE_OPTIONS = [
   { value: "triage",       label: "Shortlisted", dot: "bg-amber-400" },
   { value: "pursue",       label: "Pursue",      dot: "bg-green-400" },
-  { value: "watch",        label: "Watch",        dot: "bg-blue-400" },
   { value: "drafting",     label: "Drafting",     dot: "bg-purple-400" },
   { value: "submitted",    label: "Submitted",    dot: "bg-cyan-400" },
   { value: "human_passed", label: "Rejected",      dot: "bg-red-400" },

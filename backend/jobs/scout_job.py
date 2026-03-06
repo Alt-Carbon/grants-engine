@@ -57,4 +57,15 @@ async def run_scout_pipeline() -> dict:
         return {"status": "paused_at_triage", "thread_id": thread_id}
     except Exception as e:
         logger.error("Scout job failed: %s", e)
+        try:
+            import traceback as _tb
+            from backend.integrations.notion_sync import log_error
+            await log_error(
+                agent="scout",
+                error=e,
+                tb=_tb.format_exc(),
+                severity="Critical",
+            )
+        except Exception:
+            logger.debug("Notion error sync skipped (scout job)", exc_info=True)
         return {"status": "error", "error": str(e), "thread_id": thread_id}

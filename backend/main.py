@@ -5,6 +5,7 @@ Endpoints:
   POST /cron/knowledge-sync     ← Vercel cron daily
   POST /run/scout               ← Streamlit manual trigger
   POST /run/knowledge-sync      ← Streamlit manual trigger
+  POST /run/sync-profile        ← Re-sync AltCarbon profile from Notion
   POST /resume/triage           ← Streamlit triage decision
   POST /resume/section-review   ← Streamlit section approve/revise
   POST /resume/start-draft      ← Streamlit start draft for a grant
@@ -14,6 +15,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -34,6 +36,89 @@ from backend.jobs.scout_job import run_scout_pipeline
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# ── Theme-specific sub-agent prompts ──────────────────────────────────────────
+
+THEME_AGENTS = {
+    "climatetech": {
+        "name": "ClimaTech Drafter",
+        "temperature": 0.4,
+        "tone": "Authoritative and evidence-driven. Convey scientific credibility with measured confidence.",
+        "voice": "Technical expert who translates complex climate science into compelling funder narratives. Precise but accessible.",
+        "expertise": """DOMAIN EXPERTISE — Climate Technology:
+- You are an expert in carbon dioxide removal (CDR), MRV frameworks, and net-zero pathways
+- Use precise climate terminology: additionality, permanence, leakage, baseline scenarios, tCO2e
+- Reference relevant frameworks: Paris Agreement, SBTi, IPCC AR6, Verra/Gold Standard methodologies
+- Emphasize measurable climate impact with quantified emissions reductions
+- Speak to funder priorities: scalability, co-benefits, technology readiness levels (TRL)
+- Address carbon accounting rigor and third-party verification""",
+    },
+    "agritech": {
+        "name": "AgriTech Drafter",
+        "temperature": 0.4,
+        "tone": "Grounded and practical. Balance scientific rigor with on-the-ground agricultural realities.",
+        "voice": "Field-aware scientist who speaks both lab and farm. Emphasize real-world outcomes for farming communities.",
+        "expertise": """DOMAIN EXPERTISE — Agricultural Technology:
+- You are an expert in soil carbon sequestration, regenerative agriculture, and precision farming
+- Use agriscience terminology: soil organic carbon (SOC), no-till, cover cropping, biochar amendment, MRV for soil
+- Reference relevant standards: FAO guidelines, 4 per 1000 initiative, VERRA VM0042
+- Emphasize food security co-benefits, farmer livelihood improvements, and scalability
+- Address measurement challenges: permanence of soil carbon, sampling protocols, remote sensing validation
+- Speak to smallholder adoption barriers and technology transfer""",
+    },
+    "ai_for_sciences": {
+        "name": "AI for Sciences Drafter",
+        "temperature": 0.3,
+        "tone": "Methodical and precise. Demonstrate computational sophistication without jargon overload.",
+        "voice": "Applied ML researcher bridging algorithms and real-world environmental impact. Data-first storytelling.",
+        "expertise": """DOMAIN EXPERTISE — AI for Scientific Applications:
+- You are an expert in applying ML/AI to environmental monitoring, earth observation, and scientific discovery
+- Use ML terminology precisely: model architectures, training data pipelines, validation metrics, inference at scale
+- Reference relevant benchmarks and datasets where applicable
+- Emphasize novel methodological contributions and reproducibility
+- Address responsible AI: bias mitigation, interpretability, open-source commitments
+- Speak to computational requirements, scalability, and real-world deployment pathways""",
+    },
+    "applied_earth_sciences": {
+        "name": "Earth Sciences Drafter",
+        "temperature": 0.3,
+        "tone": "Rigorous and data-centric. Let geospatial evidence and measurement precision speak for themselves.",
+        "voice": "Geoscientist who connects remote sensing data to actionable environmental insights. Systematic and thorough.",
+        "expertise": """DOMAIN EXPERTISE — Applied Earth Sciences:
+- You are an expert in remote sensing, geospatial analysis, and subsurface characterization
+- Use geoscience terminology: spectral bands, spatial/temporal resolution, ground truth validation, geological formations
+- Reference relevant platforms and tools: Sentinel, Landsat, SAR, LiDAR, GIS frameworks
+- Emphasize data quality, calibration procedures, and uncertainty quantification
+- Address scalability from pilot sites to regional/national coverage
+- Speak to integration with existing monitoring infrastructure and government systems""",
+    },
+    "social_impact": {
+        "name": "Social Impact Drafter",
+        "temperature": 0.5,
+        "tone": "Empathetic and compelling. Centre human stories within rigorous impact frameworks.",
+        "voice": "Development practitioner who amplifies community voices. Warm but structured, balancing narrative with metrics.",
+        "expertise": """DOMAIN EXPERTISE — Social Impact & Inclusive Climate Action:
+- You are an expert in community-centered climate adaptation, gender equity, and inclusive development
+- Use development terminology: theory of change, participatory methods, intersectionality, just transition
+- Reference relevant frameworks: SDGs, UNFCCC Local Communities platform, gender-responsive climate action
+- Emphasize community ownership, local capacity building, and sustainability beyond project timelines
+- Address safeguards: FPIC, do-no-harm principles, grievance mechanisms
+- Speak to monitoring & evaluation with both quantitative and qualitative indicators""",
+    },
+    "deeptech": {
+        "name": "Deep Tech Drafter",
+        "temperature": 0.3,
+        "tone": "Bold and technically assured. Convey frontier innovation with commercial viability.",
+        "voice": "Deep tech strategist who bridges breakthrough science and market readiness. Confident, precise, IP-aware.",
+        "expertise": """DOMAIN EXPERTISE — Deep Technology & Frontier Science:
+- You are an expert in frontier technology commercialization, advanced materials, and breakthrough engineering
+- Use precise technical terminology specific to the technology domain (biotech, quantum, nanotech, etc.)
+- Reference technology readiness levels (TRL), IP strategy, and path from lab to market
+- Emphasize scientific novelty, defensible IP, and differentiation from existing approaches
+- Address scale-up challenges, manufacturing readiness, and regulatory pathways
+- Speak to team credentials, facilities access, and strategic partnerships""",
+    },
+}
+
 # ── Scout job state (in-process flag) ─────────────────────────────────────────
 _scout_running: bool = False
 _scout_started_at: Optional[str] = None
@@ -49,7 +134,26 @@ async def lifespan(app: FastAPI):
         logger.info("AltCarbon Grants Intelligence backend started")
     except Exception as exc:
         logger.error("Startup DB init failed (non-fatal — check MONGODB_URI): %s", exc)
+
+    # Start Notion MCP connection (non-fatal)
+    try:
+        from backend.integrations.notion_mcp import notion_mcp
+        connected = await notion_mcp.connect()
+        if connected:
+            logger.info("Notion MCP server connected at startup")
+        else:
+            logger.warning("Notion MCP not connected (NOTION_TOKEN missing or npx failed)")
+    except Exception as exc:
+        logger.warning("Notion MCP startup failed (non-fatal): %s", exc)
+
     yield
+
+    # Shutdown MCP
+    try:
+        from backend.integrations.notion_mcp import notion_mcp
+        await notion_mcp.disconnect()
+    except Exception:
+        pass
     logger.info("Backend shutting down")
 
 
@@ -100,6 +204,13 @@ class SectionReviewRequest(BaseModel):
 class StartDraftRequest(BaseModel):
     grant_id: str
     thread_id: Optional[str] = None
+
+
+class DrafterChatRequest(BaseModel):
+    grant_id: str
+    section_name: str
+    message: str
+    chat_history: Optional[list] = None  # [{role, content}, ...]
 
 
 class UpdateGrantStatusRequest(BaseModel):
@@ -154,6 +265,14 @@ async def _seed_default_agent_config():
             "word_limit_buffer_pct": 10,
             "context_chunks_per_section": 6,
             "custom_instructions": "",
+            "theme_settings": {
+                theme_key: {
+                    "tone": agent["tone"],
+                    "voice": agent["voice"],
+                    "temperature": agent["temperature"],
+                }
+                for theme_key, agent in THEME_AGENTS.items()
+            },
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
     ]
@@ -167,6 +286,34 @@ async def _seed_default_agent_config():
 @app.get("/health")
 async def health():
     return {"status": "ok", "ts": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/status/notion-mcp")
+async def notion_mcp_status():
+    """Check Notion MCP connection health."""
+    from backend.integrations.notion_mcp import notion_mcp
+    return await notion_mcp.health()
+
+
+@app.post("/run/notion-mcp/reconnect")
+async def reconnect_notion_mcp(
+    _: None = Depends(verify_internal),
+):
+    """Force reconnect the Notion MCP server."""
+    from backend.integrations.notion_mcp import notion_mcp
+    await notion_mcp.disconnect()
+    connected = await notion_mcp.connect()
+    return {"status": "connected" if connected else "failed"}
+
+
+@app.get("/status/api-health")
+async def api_health_status():
+    """Check credit/quota health of external APIs (Tavily, Exa, Perplexity, Jina)."""
+    from backend.utils.parsing import api_health
+    return {
+        "services": api_health.get_status(),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.get("/status/scout")
@@ -239,6 +386,20 @@ async def manual_knowledge_sync(
     return {"status": "knowledge_sync_started"}
 
 
+@app.post("/run/sync-profile")
+async def manual_sync_profile(
+    _: None = Depends(verify_internal),
+):
+    """Re-sync the AltCarbon static profile from Notion pages.
+
+    Fetches key Notion pages via the API and rebuilds
+    backend/knowledge/altcarbon_profile.md so agents have fresh context.
+    """
+    from backend.knowledge.sync_profile import sync_profile_from_notion
+    result = await sync_profile_from_notion()
+    return result
+
+
 # ── Analyst job state ─────────────────────────────────────────────────────────
 _analyst_running: bool = False
 _analyst_started_at: Optional[str] = None
@@ -296,6 +457,8 @@ async def manual_analyst(
 
             agent = AnalystAgent(
                 perplexity_api_key=s.perplexity_api_key,
+                gateway_api_key=s.ai_gateway_api_key,
+                gateway_url=s.ai_gateway_url,
                 weights=weights,
                 min_funding=min_funding,
             )
@@ -313,6 +476,17 @@ async def manual_analyst(
             })
         except Exception as e:
             logger.error("Analyst run failed: %s", e)
+            try:
+                import traceback as _tb
+                from backend.integrations.notion_sync import log_error
+                await log_error(
+                    agent="analyst",
+                    error=e,
+                    tb=_tb.format_exc(),
+                    severity="Critical",
+                )
+            except Exception:
+                logger.debug("Notion error sync skipped (analyst job)", exc_info=True)
         finally:
             _analyst_running = False
             _analyst_started_at = None
@@ -353,6 +527,33 @@ async def resume_triage(
                 "Failed to persist human_override for grant %s: %s", body.grant_id, exc
             )
 
+    # ── Notion Mission Control sync — log triage decision ──────────────
+    try:
+        from backend.integrations.notion_sync import (
+            log_triage_decision,
+            update_grant_status,
+        )
+        from backend.db.mongo import grants_scored as _gs
+        from bson import ObjectId as _ObjId
+        _grant_doc = await _gs().find_one({"_id": _ObjId(body.grant_id)})
+        _grant_name = ""
+        _ai_rec = None
+        if _grant_doc:
+            _grant_name = _grant_doc.get("grant_name") or _grant_doc.get("title") or ""
+            _ai_rec = _grant_doc.get("recommended_action")
+        background_tasks.add_task(
+            log_triage_decision,
+            grant_id=body.grant_id,
+            grant_name=_grant_name,
+            decision=body.decision,
+            ai_recommendation=_ai_rec,
+            is_override=body.human_override or False,
+            override_reason=body.override_reason or "",
+        )
+        background_tasks.add_task(update_grant_status, body.grant_id, body.decision)
+    except Exception:
+        logger.debug("Notion triage sync skipped", exc_info=True)
+
     async def _resume():
         graph = get_graph()
         config = {"configurable": {"thread_id": body.thread_id}}
@@ -377,21 +578,213 @@ async def resume_section_review(
 ):
     """Human approved or requested revision on a section. Resume drafter."""
     async def _resume():
-        graph = get_graph()
-        config = {"configurable": {"thread_id": body.thread_id}}
-        update: dict = {"section_review_decision": body.action}
-        if body.edited_content:
-            update["section_edited_content"] = body.edited_content
-        if body.instructions:
-            # Merge revision instructions into state
-            from backend.db.mongo import graph_checkpoints
-            update["section_revision_instructions"] = {body.section_name: body.instructions}
-        if body.critique:
-            update["section_critiques"] = {body.section_name: body.critique}
-        await graph.ainvoke(update, config=config)
+        try:
+            from langgraph.types import Command
+
+            graph = get_graph()
+            config = {"configurable": {"thread_id": body.thread_id}}
+            update: dict = {"section_review_decision": body.action}
+            if body.edited_content:
+                update["section_edited_content"] = body.edited_content
+            if body.instructions:
+                update["section_revision_instructions"] = {body.section_name: body.instructions}
+            if body.critique:
+                update["section_critiques"] = {body.section_name: body.critique}
+
+            # Resume the interrupted drafter using Command — this properly
+            # resumes from interrupt_before and injects state updates.
+            await graph.ainvoke(Command(resume=True, update=update), config=config)
+        except Exception as e:
+            logger.error("Section review resume failed for thread %s: %s", body.thread_id, e, exc_info=True)
 
     background_tasks.add_task(_resume)
     return {"status": "section_review_resumed", "thread_id": body.thread_id}
+
+
+@app.post("/drafter/chat")
+async def drafter_chat(
+    body: DrafterChatRequest,
+    _: None = Depends(verify_internal),
+):
+    """Direct chat endpoint for the Drafter UI.
+
+    Takes the user's message (grant question, revision instructions, etc.)
+    along with grant context, and returns an LLM-generated response.
+    This bypasses LangGraph for a synchronous chat experience.
+    """
+    from backend.db.mongo import grants_scored
+    from backend.utils.llm import chat as llm_chat, SONNET
+    from bson import ObjectId
+
+    # Load grant context
+    grant = {}
+    try:
+        grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)}) or {}
+    except Exception:
+        pass
+
+    grant_title = grant.get("grant_name") or grant.get("title") or "Unknown Grant"
+    funder = grant.get("funder") or "Unknown"
+
+    # Extract grant deep_analysis for context
+    grant_deep = ""
+    da = grant.get("deep_analysis") or {}
+    grant_context_parts = []
+    for field in ["opportunity_summary", "key_dates", "requirements", "eligibility_checklist"]:
+        val = da.get(field)
+        if val:
+            grant_context_parts.append(f"{field}: {json.dumps(val) if isinstance(val, (dict, list)) else val}")
+    grant_deep = "\n".join(grant_context_parts)
+
+    # Resolve theme-specific sub-agent
+    themes_detected = grant.get("themes_detected") or []
+    primary_theme = themes_detected[0] if themes_detected else "climatetech"
+    agent_info = THEME_AGENTS.get(primary_theme, THEME_AGENTS["climatetech"])
+    agent_name = agent_info["name"]
+    agent_theme = primary_theme
+
+    # Load company context — multiple layers for completeness
+
+    # Layer 1: Static profile (always available, has core company facts)
+    static_profile = ""
+    try:
+        from backend.agents.company_brain import _load_static_profile
+        static_profile = _load_static_profile() or ""
+    except Exception:
+        pass
+
+    # Layer 2: Knowledge chunks from MongoDB (theme-filtered)
+    chunks_text = ""
+    try:
+        from backend.db.mongo import get_db
+        db = get_db()
+        theme_filter = {"themes": {"$in": themes_detected}} if themes_detected else {}
+        chunks = await db["knowledge_chunks"].find(theme_filter).limit(10).to_list(length=10)
+        if not chunks and themes_detected:
+            chunks = await db["knowledge_chunks"].find({}).limit(10).to_list(length=10)
+        chunks_text = "\n".join(c.get("text", "") for c in chunks if c.get("text"))[:3000]
+    except Exception:
+        pass
+
+    # Layer 3: Notion MCP live search (if connected)
+    notion_context = ""
+    try:
+        from backend.integrations.notion_mcp import notion_mcp
+        if notion_mcp.connected:
+            results = await notion_mcp.search(body.message[:100])
+            for r in results[:3]:
+                page = await notion_mcp.fetch_page(r["id"])
+                if page:
+                    notion_context += f"\n---\n{page[:1500]}"
+                    if len(notion_context) > 4000:
+                        break
+    except Exception:
+        pass
+
+    # Combine context in priority order
+    context_parts = []
+    if static_profile:
+        context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:4000]}")
+    if chunks_text:
+        context_parts.append(f"[KNOWLEDGE CHUNKS]\n{chunks_text}")
+    if notion_context:
+        context_parts.append(f"[LIVE NOTION]\n{notion_context[:4000]}")
+    company_context = "\n\n".join(context_parts)
+
+    # Build chat history for context
+    history_block = ""
+    if body.chat_history:
+        history_lines = []
+        for msg in body.chat_history[-6:]:  # last 6 messages for context
+            role = msg.get("role", "user").upper()
+            content = msg.get("content", "")[:500]
+            history_lines.append(f"[{role}]: {content}")
+        if history_lines:
+            history_block = "CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n\n"
+
+    # Track which sources were loaded
+    sources_used = []
+    if static_profile:
+        sources_used.append("company_profile")
+    if chunks_text:
+        sources_used.append("knowledge_chunks")
+    if notion_context:
+        sources_used.append("notion_live")
+    if grant_deep:
+        sources_used.append("grant_deep_analysis")
+
+    # Load DB overrides for drafter config (theme-specific tone/voice/temperature)
+    from backend.db.mongo import agent_config
+    drafter_cfg = await agent_config().find_one({"agent": "drafter"}) or {}
+    theme_overrides = (drafter_cfg.get("theme_settings") or {}).get(primary_theme) or {}
+    agent_tone = theme_overrides.get("tone") or agent_info.get("tone", "")
+    agent_voice = theme_overrides.get("voice") or agent_info.get("voice", "")
+    agent_temp = theme_overrides.get("temperature") or agent_info.get("temperature", 0.4)
+    custom_instructions = drafter_cfg.get("custom_instructions") or ""
+
+    system_prompt = f"""You are {agent_name}, a grant writing assistant for AltCarbon, a climate technology company.
+You help draft responses to grant application questions and requirements.
+
+TONE: {agent_tone}
+VOICE: {agent_voice}
+
+GRANT: {grant_title}
+FUNDER: {funder}
+
+{agent_info["expertise"]}
+
+{f"GRANT DETAILS:{chr(10)}{grant_deep}" if grant_deep else ""}
+
+{f"COMPANY KNOWLEDGE:{chr(10)}{company_context}" if company_context else ""}
+
+The COMPANY PROFILE section contains verified facts about AltCarbon — always use these for founding details, team, address, buyers, and technology specs. Never use placeholders like [YEAR] or [ADDRESS] when this data is available. The LIVE NOTION section has the latest information from the company workspace.
+
+{f"CUSTOM INSTRUCTIONS:{chr(10)}{custom_instructions}{chr(10)}" if custom_instructions else ""}INSTRUCTIONS:
+- Answer the user's question or draft the requested section
+- Adopt the TONE and VOICE described above consistently throughout your response
+- Be specific and concrete — use the company knowledge when available
+- Only flag [EVIDENCE NEEDED: brief description] for information truly absent from all provided knowledge sources
+- Do NOT invent statistics, team names, or technical claims
+- Format your response in clear markdown with headings, bold, and lists where appropriate
+- Stay focused on what the user asked
+
+SOURCE ATTRIBUTION:
+At the end of your response, add a "---" divider followed by a small "Sources" section listing which knowledge sources you drew from. Use these labels:
+- "Company Profile" — if you used facts from the [COMPANY PROFILE] section
+- "Knowledge Base" — if you used facts from the [KNOWLEDGE CHUNKS] section
+- "Notion (Live)" — if you used facts from the [LIVE NOTION] section
+- "Grant Analysis" — if you used facts from the GRANT DETAILS section
+Only list sources you actually referenced. Format as a compact comma-separated line, e.g.: **Sources:** Company Profile, Grant Analysis"""
+
+    prompt = f"""{history_block}USER MESSAGE:
+{body.message}
+
+Write a well-structured response in markdown format:"""
+
+    try:
+        content = await llm_chat(
+            prompt, model=SONNET, max_tokens=2048, system=system_prompt,
+            temperature=agent_temp,
+        )
+        content = content.strip()
+
+        import re
+        word_count = len(content.split())
+        evidence_gaps = re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", content)
+
+        return {
+            "revised_content": content,
+            "word_count": word_count,
+            "evidence_gaps": evidence_gaps,
+            "section_name": body.section_name,
+            "agent_name": agent_name,
+            "agent_theme": agent_theme,
+            "sources_used": sources_used,
+            "agent_temperature": agent_temp,
+        }
+    except Exception as e:
+        logger.error("Drafter chat failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/resume/start-draft")
@@ -428,12 +821,13 @@ async def start_draft(
         raise HTTPException(status_code=500, detail=str(e))
 
     async def _run_draft():
-        from backend.graph.state import GrantState
         graph = get_graph()
         config = {"configurable": {"thread_id": thread_id}}
 
-        # Start from company_brain (triage already done)
-        initial_state: GrantState = {
+        # Inject state as if human_triage just ran with "pursue" decision.
+        # This skips scout/analyst/notify_triage entirely and resumes from
+        # the next node after human_triage → company_brain.
+        triage_state = {
             "raw_grants": [],
             "scored_grants": [],
             "human_triage_decision": "pursue",
@@ -460,13 +854,22 @@ async def start_draft(
             "thread_id": thread_id,
             "run_id": run_id,
             "errors": [],
-            "audit_log": [],
+            "audit_log": [{
+                "node": "human_triage",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "decision": "pursue",
+                "grant_id": body.grant_id,
+            }],
         }
-        # Skip scout/analyst — start directly at company_brain
-        # We do this by building a separate subgraph or invoking with correct config
-        # For now: invoke the full graph but with human_triage already decided
-        # The interrupt_before=["human_triage"] will pause — we pre-fill the decision
-        await graph.ainvoke(initial_state, config=config)
+
+        # Write state as if human_triage just completed → graph resumes at company_brain
+        await graph.aupdate_state(config, triage_state, as_node="human_triage")
+
+        # First resume: runs company_brain → grant_reader → pauses at interrupt_before drafter
+        await graph.ainvoke(None, config=config)
+
+        # Second resume: runs drafter (writes first section) → pauses at next interrupt_before drafter
+        await graph.ainvoke(None, config=config)
 
     background_tasks.add_task(_run_draft)
     return {"status": "draft_started", "thread_id": thread_id, "pipeline_id": pipeline_id}
@@ -565,6 +968,204 @@ async def admin_deduplicate(
     """Remove duplicate grants from grants_raw and grants_scored collections."""
     background_tasks.add_task(run_deduplication)
     return {"status": "deduplication_started", "ts": datetime.now(timezone.utc).isoformat()}
+
+
+# ── Notion webhook endpoints (for Notion → Backend automation) ──────────────
+
+
+class NotionTriageWebhookRequest(BaseModel):
+    """Payload from Notion automation when a grant's Status property changes."""
+    mongo_id: str                      # MongoDB _id of the grant (stored in Notion as "MongoDB ID")
+    new_status: str                    # "Pursue" | "Watch" | "Pass"
+    notes: Optional[str] = None
+
+
+class NotionSectionReviewWebhookRequest(BaseModel):
+    """Payload from Notion automation when a Draft Section's Status changes."""
+    mongo_grant_id: str                # MongoDB _id of the grant
+    section_name: str                  # Name of the section being reviewed
+    action: str                        # "approve" | "revise"
+    revision_notes: Optional[str] = None
+
+
+@app.post("/api/notion-webhook/triage")
+async def notion_webhook_triage(
+    body: NotionTriageWebhookRequest,
+    background_tasks: BackgroundTasks,
+):
+    """Notion automation fires this when a grant Status changes to Pursue/Watch/Pass.
+
+    Finds the matching LangGraph thread and resumes the human_triage checkpoint.
+    """
+    from backend.db.mongo import grants_scored, grants_pipeline, graph_checkpoints
+    from bson import ObjectId
+
+    # Normalize Notion status → internal status
+    status_map = {
+        "Pursue": "pursue", "pursue": "pursue",
+        "Watch": "watch", "watch": "watch",
+        "Pass": "pass", "pass": "pass",
+    }
+    decision = status_map.get(body.new_status)
+    if not decision:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status '{body.new_status}'. Expected Pursue, Watch, or Pass.",
+        )
+
+    # Verify grant exists
+    try:
+        grant = await grants_scored().find_one({"_id": ObjectId(body.mongo_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid mongo_id")
+    if not grant:
+        raise HTTPException(status_code=404, detail="Grant not found in grants_scored")
+
+    # Update grant status in MongoDB
+    await grants_scored().update_one(
+        {"_id": ObjectId(body.mongo_id)},
+        {"$set": {
+            "status": decision,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "triage_source": "notion_webhook",
+        }},
+    )
+
+    # Find the LangGraph thread paused at human_triage for this grant
+    # Look for the most recent pipeline that has this grant in its state
+    pipeline = await grants_pipeline().find_one(
+        {"grant_id": body.mongo_id},
+        sort=[("started_at", -1)],
+    )
+
+    # Also check checkpoints for scout/analyst threads waiting on triage
+    checkpoint = await graph_checkpoints().find_one(
+        {},
+        sort=[("checkpoint_id", -1)],
+    )
+
+    thread_id = None
+    if pipeline:
+        thread_id = pipeline.get("thread_id")
+    elif checkpoint:
+        thread_id = checkpoint.get("thread_id")
+
+    if thread_id:
+        async def _resume():
+            try:
+                graph = get_graph()
+                config = {"configurable": {"thread_id": thread_id}}
+                await graph.ainvoke(
+                    {
+                        "human_triage_decision": decision,
+                        "selected_grant_id": body.mongo_id,
+                        "triage_notes": body.notes,
+                    },
+                    config=config,
+                )
+            except Exception as e:
+                logger.error("Notion webhook triage resume failed: %s", e)
+
+        background_tasks.add_task(_resume)
+        logger.info(
+            "Notion webhook: triage %s for grant %s (thread %s)",
+            decision, body.mongo_id, thread_id,
+        )
+        return {
+            "status": "triage_resumed",
+            "decision": decision,
+            "grant_id": body.mongo_id,
+            "thread_id": thread_id,
+        }
+    else:
+        # No active thread — just update the status (already done above)
+        logger.info(
+            "Notion webhook: triage %s for grant %s (no active thread — status updated only)",
+            decision, body.mongo_id,
+        )
+        return {
+            "status": "status_updated",
+            "decision": decision,
+            "grant_id": body.mongo_id,
+            "thread_id": None,
+            "note": "No active LangGraph thread found. Grant status updated in MongoDB.",
+        }
+
+
+@app.post("/api/notion-webhook/section-review")
+async def notion_webhook_section_review(
+    body: NotionSectionReviewWebhookRequest,
+    background_tasks: BackgroundTasks,
+):
+    """Notion automation fires this when a Draft Section status changes to
+    Approved or Needs Revision.
+
+    Finds the matching LangGraph thread and resumes the drafter checkpoint.
+    """
+    from backend.db.mongo import grants_pipeline
+
+    action = body.action.lower()
+    if action not in ("approve", "revise"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid action '{body.action}'. Expected 'approve' or 'revise'.",
+        )
+
+    # Find the drafting pipeline for this grant
+    pipeline = await grants_pipeline().find_one(
+        {"grant_id": body.mongo_grant_id, "status": "drafting"},
+        sort=[("started_at", -1)],
+    )
+    if not pipeline:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active drafting pipeline found for grant {body.mongo_grant_id}",
+        )
+
+    thread_id = pipeline["thread_id"]
+
+    async def _resume():
+        try:
+            graph = get_graph()
+            config = {"configurable": {"thread_id": thread_id}}
+            update: dict = {"section_review_decision": action}
+            if body.revision_notes and action == "revise":
+                update["section_revision_instructions"] = {body.section_name: body.revision_notes}
+            await graph.ainvoke(update, config=config)
+        except Exception as e:
+            logger.error("Notion webhook section review resume failed: %s", e)
+
+    background_tasks.add_task(_resume)
+    logger.info(
+        "Notion webhook: section '%s' %s for grant %s (thread %s)",
+        body.section_name, action, body.mongo_grant_id, thread_id,
+    )
+    return {
+        "status": "section_review_resumed",
+        "action": action,
+        "section_name": body.section_name,
+        "grant_id": body.mongo_grant_id,
+        "thread_id": thread_id,
+    }
+
+
+@app.post("/admin/notion-backfill")
+async def admin_notion_backfill(
+    background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
+):
+    """Backfill all scored grants to Notion Mission Control."""
+    from backend.db.mongo import grants_scored
+    from backend.integrations.notion_sync import backfill_grants
+
+    async def _backfill():
+        cursor = grants_scored().find({}).sort("weighted_total", -1)
+        all_grants = await cursor.to_list(length=2000)
+        count = await backfill_grants(all_grants)
+        logger.info("Notion backfill complete: %d grants synced", count)
+
+    background_tasks.add_task(_backfill)
+    return {"status": "notion_backfill_started", "ts": datetime.now(timezone.utc).isoformat()}
 
 
 # ── Grant management ───────────────────────────────────────────────────────────
@@ -718,6 +1319,14 @@ async def update_grant_status_api(
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Grant not found")
+
+    # Sync status change to Notion
+    try:
+        from backend.integrations.notion_sync import update_grant_status
+        await update_grant_status(body.grant_id, body.status)
+    except Exception:
+        logger.debug("Notion status sync skipped for grant %s", body.grant_id, exc_info=True)
+
     return {"status": "updated", "grant_id": body.grant_id, "new_status": body.status}
 
 
