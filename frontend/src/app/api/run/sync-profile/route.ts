@@ -4,7 +4,7 @@
  * Triggers the backend to fetch key Notion pages and rebuild
  * the static knowledge profile used by Analyst & Drafter agents.
  */
-const FASTAPI_URL = process.env.FASTAPI_URL!;
+const FASTAPI_URL = process.env.FASTAPI_URL!.replace(/\/+$/, "");
 const INTERNAL_SECRET = process.env.INTERNAL_SECRET!;
 
 export async function POST() {

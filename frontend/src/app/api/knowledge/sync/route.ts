@@ -4,7 +4,7 @@
  */
 export async function POST() {
   try {
-    const res = await fetch(`${process.env.FASTAPI_URL}/run/knowledge-sync`, {
+    const res = await fetch(`${process.env.FASTAPI_URL!.replace(/\/+$/, "")}/run/knowledge-sync`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

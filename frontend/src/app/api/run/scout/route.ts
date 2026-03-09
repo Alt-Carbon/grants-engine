@@ -2,7 +2,7 @@
  * POST /api/run/scout   — trigger a manual scout run
  * GET  /api/run/scout   — poll scout job status
  */
-const FASTAPI_URL = process.env.FASTAPI_URL!;
+const FASTAPI_URL = process.env.FASTAPI_URL!.replace(/\/+$/, "");
 const INTERNAL_SECRET = process.env.INTERNAL_SECRET!;
 
 export async function POST() {
