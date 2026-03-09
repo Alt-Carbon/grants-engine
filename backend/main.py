@@ -790,13 +790,43 @@ async def drafter_chat(
     try:
         from backend.integrations.notion_mcp import notion_mcp
         if notion_mcp.connected:
-            results = await notion_mcp.search(body.message[:100])
-            for r in results[:3]:
-                page = await notion_mcp.fetch_page(r["id"])
-                if page:
-                    notion_context += f"\n---\n{page[:1500]}"
-                    if len(notion_context) > 4000:
-                        break
+            # Search using the user message + grant title for better relevance
+            search_queries = [body.message[:80]]
+            if grant_title and grant_title != "Unknown Grant":
+                search_queries.append(grant_title[:80])
+            if body.section_name:
+                search_queries.append(body.section_name[:60])
+
+            seen_page_ids: set = set()
+            for sq in search_queries:
+                try:
+                    results = await notion_mcp.search(sq)
+                    for r in results[:5]:
+                        pid = r.get("id", "")
+                        if pid in seen_page_ids:
+                            continue
+                        seen_page_ids.add(pid)
+                        page = await notion_mcp.fetch_page(pid)
+                        if page:
+                            # Extract title from properties
+                            ptitle = ""
+                            props = r.get("properties", {})
+                            for p in props.values():
+                                if isinstance(p, dict) and p.get("type") == "title":
+                                    ta = p.get("title", [])
+                                    ptitle = "".join(
+                                        t.get("plain_text", "")
+                                        for t in ta
+                                        if isinstance(t, dict)
+                                    )
+                                    break
+                            notion_context += f"\n---\n[{ptitle or 'Notion Page'}]\n{page[:2000]}"
+                            if len(notion_context) > 8000:
+                                break
+                except Exception:
+                    continue
+                if len(notion_context) > 8000:
+                    break
     except Exception:
         pass
 

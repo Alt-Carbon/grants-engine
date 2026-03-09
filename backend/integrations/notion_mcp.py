@@ -156,20 +156,30 @@ class NotionMCPClient:
 
     async def search(self, query: str, **kwargs) -> List[Dict]:
         """Search Notion workspace. Returns list of results."""
-        args = {"query": query, **kwargs}
-        result = await self._call_tool("search", args)
+        args = {"query": query, "page_size": 100, **kwargs}
+        result = await self._call_tool("API-post-search", args)
         if isinstance(result, dict):
             return result.get("results", [])
         return []
 
     async def fetch_page(self, page_id: str) -> Optional[str]:
         """Fetch a Notion page. Returns markdown content string."""
-        result = await self._call_tool("retrieve-a-page", {"page_id": page_id})
+        result = await self._call_tool("API-retrieve-a-page", {"page_id": page_id})
         if isinstance(result, str):
             return result
         if isinstance(result, dict):
             return result.get("markdown") or result.get("text") or json.dumps(result)
         return None
+
+    async def get_block_children(self, block_id: str) -> List[Dict]:
+        """Fetch child blocks of a page/block. Returns list of blocks."""
+        result = await self._call_tool("API-get-block-children", {
+            "block_id": block_id,
+            "page_size": 100,
+        })
+        if isinstance(result, dict):
+            return result.get("results", [])
+        return []
 
     async def create_page(
         self,
@@ -194,7 +204,7 @@ class NotionMCPClient:
         if content:
             args["content"] = content
 
-        result = await self._call_tool("create-a-page", args)
+        result = await self._call_tool("API-post-page", args)
         if isinstance(result, dict):
             return result.get("id")
         return None
@@ -207,13 +217,13 @@ class NotionMCPClient:
     ) -> bool:
         """Update a Notion page's properties or content."""
         if properties:
-            await self._call_tool("update-a-page", {
+            await self._call_tool("API-patch-page", {
                 "page_id": page_id,
                 "properties": properties,
             })
 
         if content is not None:
-            await self._call_tool("update-a-page", {
+            await self._call_tool("API-patch-page", {
                 "page_id": page_id,
                 "content": content,
             })
@@ -222,7 +232,7 @@ class NotionMCPClient:
 
     async def fetch_database(self, database_id: str) -> Optional[Dict]:
         """Fetch a Notion database schema."""
-        result = await self._call_tool("retrieve-a-database", {
+        result = await self._call_tool("API-retrieve-a-database", {
             "database_id": database_id,
         })
         return result if isinstance(result, dict) else None
@@ -241,14 +251,14 @@ class NotionMCPClient:
         if sort:
             args["sort"] = sort
         args["limit"] = limit
-        result = await self._call_tool("query-data-source", args)
+        result = await self._call_tool("API-query-data-source", args)
         if isinstance(result, dict):
             return result.get("results", [])
         return []
 
     async def get_comments(self, page_id: str) -> List[Dict]:
         """Get comments on a Notion page."""
-        result = await self._call_tool("retrieve-comments", {
+        result = await self._call_tool("API-retrieve-a-comment", {
             "page_id": page_id,
         })
         if isinstance(result, dict):
@@ -257,7 +267,7 @@ class NotionMCPClient:
 
     async def add_comment(self, page_id: str, text: str) -> bool:
         """Add a comment to a Notion page."""
-        await self._call_tool("create-a-comment", {
+        await self._call_tool("API-create-a-comment", {
             "page_id": page_id,
             "rich_text": [{"text": {"content": text}}],
         })
