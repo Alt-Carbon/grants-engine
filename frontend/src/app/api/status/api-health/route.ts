@@ -1,11 +1,10 @@
 /**
  * GET /api/status/api-health — poll external API credit/quota health
  */
-const FASTAPI_URL = (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
-
 export async function GET() {
+  const url = (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
   try {
-    const res = await fetch(`${FASTAPI_URL}/status/api-health`, {
+    const res = await fetch(`${url}/status/api-health`, {
       cache: "no-store",
     });
     const data = await res.json();

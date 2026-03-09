@@ -3,12 +3,13 @@
  * Proxy to FastAPI POST /run/knowledge-sync.
  */
 export async function POST() {
+  const url = (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
   try {
-    const res = await fetch(`${(process.env.FASTAPI_URL ?? "").replace(/\/+$/, "")}/run/knowledge-sync`, {
+    const res = await fetch(`${url}/run/knowledge-sync`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-internal-secret": process.env.INTERNAL_SECRET!,
+        "x-internal-secret": process.env.INTERNAL_SECRET ?? "",
       },
       cache: "no-store",
     });

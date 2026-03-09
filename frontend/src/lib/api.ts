@@ -1,12 +1,16 @@
-const FASTAPI_URL = (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
-const INTERNAL_SECRET = process.env.INTERNAL_SECRET!;
+function getUrl() {
+  return (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
+}
+function getSecret() {
+  return process.env.INTERNAL_SECRET ?? "";
+}
 
 export async function apiPost<T = unknown>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${FASTAPI_URL}${path}`, {
+  const res = await fetch(`${getUrl()}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-internal-secret": INTERNAL_SECRET,
+      "x-internal-secret": getSecret(),
     },
     body: JSON.stringify(body),
     cache: "no-store",
@@ -19,8 +23,8 @@ export async function apiPost<T = unknown>(path: string, body: unknown): Promise
 }
 
 export async function apiGet<T = unknown>(path: string): Promise<T> {
-  const res = await fetch(`${FASTAPI_URL}${path}`, {
-    headers: { "x-internal-secret": INTERNAL_SECRET },
+  const res = await fetch(`${getUrl()}${path}`, {
+    headers: { "x-internal-secret": getSecret() },
     cache: "no-store",
   });
   if (!res.ok) {

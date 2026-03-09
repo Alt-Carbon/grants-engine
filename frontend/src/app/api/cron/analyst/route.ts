@@ -9,12 +9,13 @@ export async function GET(req: Request) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const url = (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
   try {
-    const res = await fetch(`${(process.env.FASTAPI_URL ?? "").replace(/\/+$/, "")}/run/analyst`, {
+    const res = await fetch(`${url}/run/analyst`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-internal-secret": process.env.INTERNAL_SECRET!,
+        "x-internal-secret": process.env.INTERNAL_SECRET ?? "",
       },
       cache: "no-store",
     });
