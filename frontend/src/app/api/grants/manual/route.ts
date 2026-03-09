@@ -3,14 +3,15 @@
  * Proxy to FastAPI POST /grants/manual — saves a manually entered grant URL.
  */
 export async function POST(req: Request) {
+  const url = (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
   try {
     const body = await req.json();
 
-    const res = await fetch(`${(process.env.FASTAPI_URL ?? "").replace(/\/+$/, "")}/grants/manual`, {
+    const res = await fetch(`${url}/grants/manual`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-internal-secret": process.env.INTERNAL_SECRET!,
+        "x-internal-secret": process.env.INTERNAL_SECRET ?? "",
       },
       body: JSON.stringify(body),
       cache: "no-store",

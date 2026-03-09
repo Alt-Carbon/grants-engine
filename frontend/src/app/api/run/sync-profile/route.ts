@@ -4,16 +4,21 @@
  * Triggers the backend to fetch key Notion pages and rebuild
  * the static knowledge profile used by Analyst & Drafter agents.
  */
-const FASTAPI_URL = (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
-const INTERNAL_SECRET = process.env.INTERNAL_SECRET!;
+function env() {
+  return {
+    url: (process.env.FASTAPI_URL ?? "").replace(/\/+$/, ""),
+    secret: process.env.INTERNAL_SECRET ?? "",
+  };
+}
 
 export async function POST() {
+  const { url, secret } = env();
   try {
-    const res = await fetch(`${FASTAPI_URL}/run/sync-profile`, {
+    const res = await fetch(`${url}/run/sync-profile`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-internal-secret": INTERNAL_SECRET,
+        "x-internal-secret": secret,
       },
       cache: "no-store",
     });
