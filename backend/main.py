@@ -306,6 +306,125 @@ async def reconnect_notion_mcp(
     return {"status": "connected" if connected else "failed"}
 
 
+
+@app.get("/status/knowledge-sources")
+async def knowledge_sources_status():
+    """Return all Notion workspace pages and MCP connection status."""
+    from backend.integrations.notion_mcp import notion_mcp
+    from backend.knowledge.sync_profile import (
+        NOTION_PAGES, SECTION_TITLES, PROFILE_PATH,
+    )
+
+    health = await notion_mcp.health()
+    indexed_ids = set(NOTION_PAGES.values())
+
+    # Fetch workspace pages via MCP search
+    workspace_pages: list = []
+    if notion_mcp.connected:
+        try:
+            # Search with broad queries to discover workspace content
+            seen_ids: set = set()
+            search_queries = [
+                "Alt Carbon", "carbon", "climate", "project", "report",
+                "grant", "studio", "team", "plan", "data", "science",
+                "biochar", "darjeeling", "ERW", "MRV", "investor",
+                "budget", "design", "brand", "policy", "sales",
+            ]
+            for query in search_queries:
+                try:
+                    raw = await notion_mcp._call_tool("API-post-search", {
+                        "query": query,
+                        "page_size": 100,
+                    })
+                    results = []
+                    if isinstance(raw, dict):
+                        results = raw.get("results", [])
+                    elif isinstance(raw, list):
+                        results = raw
+
+                    for r in results:
+                        if not isinstance(r, dict):
+                            continue
+                        page_id = r.get("id", "")
+                        if not page_id or page_id in seen_ids:
+                            continue
+                        seen_ids.add(page_id)
+
+                        obj_type = r.get("object", "page")
+                        # Extract title
+                        title = ""
+                        props = r.get("properties", {})
+                        for prop in props.values():
+                            if isinstance(prop, dict) and prop.get("type") == "title":
+                                title_arr = prop.get("title", [])
+                                if title_arr and isinstance(title_arr, list):
+                                    title = "".join(
+                                        t.get("plain_text", "")
+                                        for t in title_arr
+                                        if isinstance(t, dict)
+                                    )
+                                break
+                        if not title:
+                            title = r.get("title", "Untitled")
+                            if isinstance(title, list):
+                                title = "".join(
+                                    t.get("plain_text", "")
+                                    for t in title
+                                    if isinstance(t, dict)
+                                ) or "Untitled"
+
+                        # Get icon
+                        icon = ""
+                        icon_obj = r.get("icon")
+                        if isinstance(icon_obj, dict):
+                            if icon_obj.get("type") == "emoji":
+                                icon = icon_obj.get("emoji", "")
+
+                        clean_id = page_id.replace("-", "")
+                        workspace_pages.append({
+                            "page_id": page_id,
+                            "title": title,
+                            "type": obj_type,
+                            "icon": icon,
+                            "indexed": page_id in indexed_ids,
+                            "notion_url": f"https://notion.so/{clean_id}",
+                            "last_edited": r.get("last_edited_time", ""),
+                        })
+                except Exception as e:
+                    logger.warning("Workspace search query '%s' failed: %s", query, e)
+        except Exception as e:
+            logger.warning("Workspace page discovery failed: %s", e)
+
+    # Sort: indexed first, then by last_edited descending
+    workspace_pages.sort(
+        key=lambda p: (not p["indexed"], p.get("last_edited", "") or ""),
+        reverse=False,
+    )
+    # Re-sort: indexed first, then most recently edited
+    workspace_pages.sort(key=lambda p: (not p["indexed"],), reverse=False)
+
+    # Profile sync time
+    last_synced = None
+    try:
+        if PROFILE_PATH.exists():
+            last_synced = datetime.fromtimestamp(
+                PROFILE_PATH.stat().st_mtime, tz=timezone.utc
+            ).isoformat()
+    except Exception:
+        pass
+
+    indexed_count = sum(1 for p in workspace_pages if p["indexed"])
+
+    return {
+        "mcp_status": health.get("status", "unknown"),
+        "mcp_tools": health.get("tools"),
+        "sources": workspace_pages,
+        "total_sources": len(workspace_pages),
+        "indexed_count": indexed_count,
+        "last_synced": last_synced,
+    }
+
+
 @app.get("/status/api-health")
 async def api_health_status():
     """Check credit/quota health of external APIs (Tavily, Exa, Perplexity, Jina)."""

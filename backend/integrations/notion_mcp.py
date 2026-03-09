@@ -265,7 +265,7 @@ class NotionMCPClient:
 
     async def health(self) -> Dict:
         """Check MCP connection health."""
-        if not self._connected:
+        if not self._connected or self._session is None:
             return {"status": "disconnected"}
         try:
             tools = await self._session.list_tools()
