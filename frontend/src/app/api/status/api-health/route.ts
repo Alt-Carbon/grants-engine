@@ -1,7 +1,7 @@
 /**
  * GET /api/status/api-health — poll external API credit/quota health
  */
-const FASTAPI_URL = process.env.FASTAPI_URL!;
+const FASTAPI_URL = process.env.FASTAPI_URL!.replace(/\/+$/, "");
 
 export async function GET() {
   try {

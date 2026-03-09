@@ -10,7 +10,7 @@ export async function GET(req: Request) {
   }
 
   try {
-    const res = await fetch(`${process.env.FASTAPI_URL}/run/analyst`, {
+    const res = await fetch(`${process.env.FASTAPI_URL!.replace(/\/+$/, "")}/run/analyst`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

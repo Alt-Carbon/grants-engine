@@ -2,7 +2,7 @@
  * POST /api/run/analyst  — trigger analyst to score unprocessed grants
  * GET  /api/run/analyst  — poll analyst job status
  */
-const FASTAPI_URL = process.env.FASTAPI_URL!;
+const FASTAPI_URL = process.env.FASTAPI_URL!.replace(/\/+$/, "");
 const INTERNAL_SECRET = process.env.INTERNAL_SECRET!;
 
 export async function POST() {

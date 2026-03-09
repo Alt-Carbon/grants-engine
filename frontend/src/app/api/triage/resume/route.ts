@@ -6,7 +6,7 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
 
-    const res = await fetch(`${process.env.FASTAPI_URL}/resume/triage`, {
+    const res = await fetch(`${process.env.FASTAPI_URL!.replace(/\/+$/, "")}/resume/triage`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

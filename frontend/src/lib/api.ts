@@ -1,4 +1,4 @@
-const FASTAPI_URL = process.env.FASTAPI_URL!;
+const FASTAPI_URL = process.env.FASTAPI_URL!.replace(/\/+$/, "");
 const INTERNAL_SECRET = process.env.INTERNAL_SECRET!;
 
 export async function apiPost<T = unknown>(path: string, body: unknown): Promise<T> {
