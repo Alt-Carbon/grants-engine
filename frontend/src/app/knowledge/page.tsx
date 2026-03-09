@@ -1,6 +1,7 @@
 import { getKnowledgeStatus, getSyncLogs } from "@/lib/queries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SyncButton } from "./SyncButton";
+import { NotionSources } from "./NotionSources";
 import { Database, FileText, Cloud, CheckCircle, AlertTriangle, XCircle } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -62,6 +63,9 @@ export default async function KnowledgePage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Notion Sources */}
+      <NotionSources />
 
       {/* By type */}
       {Object.keys(health.by_type).length > 0 && (
