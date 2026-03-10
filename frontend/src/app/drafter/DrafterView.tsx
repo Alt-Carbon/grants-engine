@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useSession } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import ReactMarkdown from "react-markdown";
 import type { PipelineRecord, DraftSection } from "@/lib/queries";
@@ -8,13 +9,13 @@ import {
   Send,
   CheckCircle,
   FileText,
-  ChevronRight,
   ChevronDown,
   Download,
   MessageSquare,
   Bot,
-  User,
   AlertTriangle,
+  Copy,
+  Check,
   Loader2,
   Plus,
   Pencil,
@@ -457,33 +458,73 @@ function isDifferentDay(a: string, b: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Session cache — survives unmount/remount when navigating between pages
+// ---------------------------------------------------------------------------
+
+interface DrafterCache {
+  selectedId: string;
+  activeTileId: string | null;
+  tilesMap: Record<string, Tile[]>;
+  chatHistories: Record<string, ChatMessage[]>;
+  approvedSections: string[]; // serializable version of Set
+  agentInfo: Record<string, { name: string; theme: string }>;
+  historyLoaded: string[];
+}
+
+const _cache: { current: DrafterCache | null } = { current: null };
+
+function saveToCache(c: DrafterCache) {
+  _cache.current = c;
+}
+
+function loadFromCache(): DrafterCache | null {
+  return _cache.current;
+}
+
+// ---------------------------------------------------------------------------
 // Main Component
 // ---------------------------------------------------------------------------
 
 export function DrafterView({ pipelines }: DrafterViewProps) {
-  const [selectedId, setSelectedId] = useState(pipelines[0]?._id ?? "");
-  const [activeTileId, setActiveTileId] = useState<string | null>(null);
-  const [tilesMap, setTilesMap] = useState<Record<string, Tile[]>>({});
+  const { data: session } = useSession();
+  const cached = loadFromCache();
+  const [selectedId, setSelectedId] = useState(
+    cached?.selectedId ?? pipelines[0]?._id ?? ""
+  );
+  const [activeTileId, setActiveTileId] = useState<string | null>(
+    cached?.activeTileId ?? null
+  );
+  const [tilesMap, setTilesMap] = useState<Record<string, Tile[]>>(
+    cached?.tilesMap ?? {}
+  );
   const [chatHistories, setChatHistories] = useState<
     Record<string, ChatMessage[]>
-  >({});
+  >(cached?.chatHistories ?? {});
   const [approvedSections, setApprovedSections] = useState<Set<string>>(
-    new Set()
+    new Set(cached?.approvedSections ?? [])
   );
   const [inputValue, setInputValue] = useState("");
-  const [sending, setSending] = useState(false);
+  const [sendingKeys, setSendingKeys] = useState<Set<string>>(new Set());
   const [approving, setApproving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editingTileId, setEditingTileId] = useState<string | null>(null);
   const [editingLabel, setEditingLabel] = useState("");
+  const [editingMsgIdx, setEditingMsgIdx] = useState<number | null>(null);
+  const [editingMsgContent, setEditingMsgContent] = useState("");
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentInfo, setAgentInfo] = useState<
     Record<string, { name: string; theme: string }>
-  >({});
-  const [historyLoaded, setHistoryLoaded] = useState<Set<string>>(new Set());
+  >(cached?.agentInfo ?? {});
+  const [historyLoaded, setHistoryLoaded] = useState<Set<string>>(
+    new Set(cached?.historyLoaded ?? [])
+  );
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [clearingSection, setClearingSection] = useState(false);
+  const [generatingBrief, setGeneratingBrief] = useState(false);
+  const [streamingByKey, setStreamingByKey] = useState<Record<string, string>>({});
+  const [streamStatusByKey, setStreamStatusByKey] = useState<Record<string, string>>({});
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -491,6 +532,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const chatHistoriesRef = useRef(chatHistories);
   chatHistoriesRef.current = chatHistories;
   const tilesRef = useRef<Tile[]>([]);
+  const abortRef = useRef<Record<string, AbortController>>({});
 
   // -- Derived ---------------------------------------------------------------
   const selectedPipeline = pipelines.find((p) => p._id === selectedId);
@@ -504,6 +546,11 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const allApproved =
     tiles.length > 0 &&
     tiles.every((t) => approvedSections.has(buildKey(selectedId, t.id)));
+
+  // Per-key streaming state → derive active values
+  const sending = activeKey ? sendingKeys.has(activeKey) : false;
+  const streamingContent = activeKey ? streamingByKey[activeKey] ?? "" : "";
+  const streamStatus = activeKey ? streamStatusByKey[activeKey] ?? null : null;
 
   // Theme-specific sub-agent for the selected pipeline
   const activeTheme = getThemeForPipeline(selectedPipeline as { grant_themes?: string[] } | undefined);
@@ -607,6 +654,37 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, tiles.length]);
 
+  // -- Cache state for navigation persistence ---------------------------------
+  useEffect(() => {
+    saveToCache({
+      selectedId,
+      activeTileId,
+      tilesMap,
+      chatHistories,
+      approvedSections: Array.from(approvedSections),
+      agentInfo,
+      historyLoaded: Array.from(historyLoaded),
+    });
+  }, [selectedId, activeTileId, tilesMap, chatHistories, approvedSections, agentInfo, historyLoaded]);
+
+  // -- Flush pending save on unmount ------------------------------------------
+  useEffect(() => {
+    return () => {
+      // Cancel any debounced save and save immediately
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+      const pipeline = pipelines.find((p) => p._id === selectedId);
+      if (pipeline && tilesRef.current.length > 0) {
+        saveChatHistories(
+          selectedId,
+          pipeline.grant_id,
+          tilesRef.current,
+          chatHistoriesRef.current
+        );
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
   // -- Debounced auto-save (uses refs for latest state) ----------------------
   const triggerSave = useCallback(() => {
     if (!selectedPipeline) return;
@@ -625,10 +703,217 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     }, 800);
   }, [selectedId, selectedPipeline]);
 
+  // -- Non-streaming fallback -------------------------------------------------
+  const chatFallback = useCallback(
+    async (
+      key: string,
+      tile: Tile,
+      pipeline: PipelineRecord,
+      userMessage: string,
+      chatHistory: { role: string; content: string }[]
+    ) => {
+      const res = await fetch("/api/drafter/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          section_name: tile.label,
+          message: userMessage,
+          grant_id: pipeline.grant_id,
+          chat_history: chatHistory,
+        }),
+      });
+
+      if (!res.ok) throw new Error((await res.text()) || `Error ${res.status}`);
+      const data = await res.json();
+      const revised = data.revised_content ?? data.content ?? data.message ?? "";
+      const wc = countWords(revised);
+      const guidance = SECTION_GUIDANCE[tile.label];
+
+      if (data.agent_name && data.agent_theme) {
+        setAgentInfo((prev) => ({
+          ...prev,
+          [selectedId]: { name: data.agent_name, theme: data.agent_theme },
+        }));
+      }
+
+      const agentMsg: ChatMessage = {
+        role: "agent",
+        content: revised,
+        timestamp: now(),
+        metadata: {
+          wordCount: wc,
+          wordLimit: guidance?.wordLimit,
+          evidenceGaps: data.evidence_gaps ?? [],
+          status: "Draft",
+          agentName: data.agent_name,
+          agentTheme: data.agent_theme,
+          sourcesUsed: data.sources_used ?? [],
+          agentTemperature: data.agent_temperature,
+        },
+      };
+
+      setChatHistories((prev) => ({
+        ...prev,
+        [key]: [...(prev[key] ?? []), agentMsg],
+      }));
+      setTimeout(() => triggerSave(), 50);
+    },
+    [selectedId, triggerSave]
+  );
+
+  // -- Streaming SSE helper (per-key, falls back to non-streaming) ----------
+  const streamChat = useCallback(
+    async (
+      key: string,
+      tile: Tile,
+      pipeline: PipelineRecord,
+      userMessage: string,
+      chatHistory: { role: string; content: string }[]
+    ) => {
+      setSendingKeys((prev) => new Set(prev).add(key));
+      setError(null);
+      setStreamingByKey((prev) => ({ ...prev, [key]: "" }));
+      setStreamStatusByKey((prev) => ({ ...prev, [key]: "" }));
+
+      // Abort any previous stream for this key
+      abortRef.current[key]?.abort();
+      const controller = new AbortController();
+      abortRef.current[key] = controller;
+
+      try {
+        // Try streaming first
+        let streamed = false;
+        try {
+          const res = await fetch("/api/drafter/chat-stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              section_name: tile.label,
+              message: userMessage,
+              grant_id: pipeline.grant_id,
+              chat_history: chatHistory,
+            }),
+            signal: controller.signal,
+          });
+
+          if (!res.ok || !res.body) throw new Error("Stream unavailable");
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let fullContent = "";
+          let metadata: ChatMessage["metadata"] | undefined;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+
+            let event = "";
+            for (const line of lines) {
+              if (line.startsWith("event: ")) {
+                event = line.slice(7).trim();
+              } else if (line.startsWith("data: ") && event) {
+                const currentEvent = event;
+                event = "";
+                let data;
+                try {
+                  data = JSON.parse(line.slice(6));
+                } catch {
+                  continue; // skip malformed JSON
+                }
+                if (currentEvent === "status") {
+                  setStreamStatusByKey((prev) => ({ ...prev, [key]: data.step || "" }));
+                } else if (currentEvent === "token") {
+                  fullContent += data.content || "";
+                  setStreamingByKey((prev) => ({ ...prev, [key]: fullContent }));
+                } else if (currentEvent === "metadata") {
+                  const guidance = SECTION_GUIDANCE[tile.label];
+                  metadata = {
+                    wordCount: data.word_count,
+                    wordLimit: guidance?.wordLimit,
+                    evidenceGaps: data.evidence_gaps ?? [],
+                    status: "Draft",
+                    agentName: data.agent_name,
+                    agentTheme: data.agent_theme,
+                    sourcesUsed: data.sources_used ?? [],
+                    agentTemperature: data.agent_temperature,
+                  };
+                  if (data.agent_name && data.agent_theme) {
+                    setAgentInfo((prev) => ({
+                      ...prev,
+                      [selectedId]: { name: data.agent_name, theme: data.agent_theme },
+                    }));
+                  }
+                } else if (currentEvent === "error") {
+                  throw new Error(data.message || "Agent error");
+                }
+              }
+            }
+          }
+
+          // Finalize — add the complete agent message
+          if (fullContent) {
+            const agentMsg: ChatMessage = {
+              role: "agent",
+              content: fullContent,
+              timestamp: now(),
+              metadata: metadata ?? {
+                wordCount: countWords(fullContent),
+                status: "Draft",
+              },
+            };
+            setChatHistories((prev) => ({
+              ...prev,
+              [key]: [...(prev[key] ?? []), agentMsg],
+            }));
+            setTimeout(() => triggerSave(), 50);
+            streamed = true;
+          }
+        } catch (streamErr) {
+          if ((streamErr as Error).name === "AbortError") throw streamErr;
+          // Stream failed — will fall back below
+          console.warn("[Drafter] Streaming failed, falling back:", (streamErr as Error).message);
+        }
+
+        // Fallback to non-streaming if streaming produced nothing
+        if (!streamed) {
+          setStreamStatusByKey((prev) => ({ ...prev, [key]: "Waiting for response..." }));
+          await chatFallback(key, tile, pipeline, userMessage, chatHistory);
+        }
+      } catch (e) {
+        if ((e as Error).name === "AbortError") return;
+        setError(e instanceof Error ? e.message : "Failed to get response");
+      } finally {
+        setSendingKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+        setStreamingByKey((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+        setStreamStatusByKey((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+        delete abortRef.current[key];
+        textareaRef.current?.focus();
+      }
+    },
+    [selectedId, triggerSave, chatFallback]
+  );
+
   // -- Auto-scroll -----------------------------------------------------------
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeMessages.length, sending]);
+  }, [activeMessages.length, sending, streamingContent]);
 
   // -- Add new tile ----------------------------------------------------------
   const addTile = useCallback(() => {
@@ -665,7 +950,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     [selectedId]
   );
 
-  // -- Send message ----------------------------------------------------------
+  // -- Send message (streaming) ----------------------------------------------
   const sendMessage = useCallback(async () => {
     if (!activeKey || !activeTile || !selectedPipeline || !inputValue.trim())
       return;
@@ -681,8 +966,6 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       [activeKey]: [...(prev[activeKey] ?? []), userMsg],
     }));
     setInputValue("");
-    setSending(true);
-    setError(null);
 
     // Auto-rename tile if still a default "Section N" name
     if (/^Section \d+$/.test(activeTile.label)) {
@@ -695,72 +978,16 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       }));
     }
 
-    try {
-      const currentMsgs = chatHistories[activeKey] ?? [];
-      const chatHistory = currentMsgs
-        .filter((m) => m.role !== "system")
-        .map((m) => ({
-          role: m.role === "agent" ? "assistant" : m.role,
-          content: m.content,
-        }));
-
-      const res = await fetch("/api/drafter/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          section_name: activeTile.label,
-          message: userMsg.content,
-          grant_id: selectedPipeline.grant_id,
-          chat_history: chatHistory,
-        }),
-      });
-
-      if (!res.ok)
-        throw new Error((await res.text()) || `Error ${res.status}`);
-
-      const data = await res.json();
-      const revised =
-        data.revised_content ?? data.content ?? data.message ?? "";
-      const wc = countWords(revised);
-      const guidance = SECTION_GUIDANCE[activeTile.label];
-
-      // Store agent info from backend response
-      if (data.agent_name && data.agent_theme) {
-        setAgentInfo((prev) => ({
-          ...prev,
-          [selectedId]: { name: data.agent_name, theme: data.agent_theme },
-        }));
-      }
-
-      const agentMsg: ChatMessage = {
-        role: "agent",
-        content: revised,
-        timestamp: now(),
-        metadata: {
-          wordCount: wc,
-          wordLimit: guidance?.wordLimit,
-          evidenceGaps: data.evidence_gaps ?? [],
-          status: "Draft",
-          agentName: data.agent_name,
-          agentTheme: data.agent_theme,
-          sourcesUsed: data.sources_used ?? [],
-          agentTemperature: data.agent_temperature,
-        },
-      };
-
-      setChatHistories((prev) => ({
-        ...prev,
-        [activeKey]: [...(prev[activeKey] ?? []), agentMsg],
+    const currentMsgs = chatHistories[activeKey] ?? [];
+    const chatHistory = currentMsgs
+      .filter((m) => m.role !== "system")
+      .map((m) => ({
+        role: m.role === "agent" ? "assistant" : m.role,
+        content: m.content,
       }));
-      // Auto-save after agent response (next tick so state is updated)
-      setTimeout(() => triggerSave(), 50);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to get revision");
-    } finally {
-      setSending(false);
-      textareaRef.current?.focus();
-    }
-  }, [activeKey, activeTile, selectedPipeline, inputValue, selectedId, chatHistories, triggerSave]);
+
+    await streamChat(activeKey, activeTile, selectedPipeline, userMsg.content, chatHistory);
+  }, [activeKey, activeTile, selectedPipeline, inputValue, selectedId, chatHistories, streamChat]);
 
   // -- Approve section -------------------------------------------------------
   const approveSection = useCallback(async () => {
@@ -857,6 +1084,93 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     }
   }, [activeKey, activeTile, selectedPipeline, selectedId, triggerSave]);
 
+  // -- Download Intelligence Brief ------------------------------------------
+  const downloadIntelBrief = useCallback(async () => {
+    if (!selectedPipeline || generatingBrief) return;
+    setGeneratingBrief(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/drafter/intelligence-brief", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grant_id: selectedPipeline.grant_id }),
+      });
+      if (!res.ok) throw new Error((await res.text()) || `Error ${res.status}`);
+      const data = await res.json();
+      const { generateIntelBrief } = await import("@/lib/generateIntelBrief");
+      await generateIntelBrief(data, selectedPipeline.grant_title);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to generate brief");
+    } finally {
+      setGeneratingBrief(false);
+    }
+  }, [selectedPipeline, generatingBrief]);
+
+  // -- Copy agent response ---------------------------------------------------
+  const copySnippet = useCallback((msgIdx: number) => {
+    const msg = activeMessages[msgIdx];
+    if (!msg) return;
+    navigator.clipboard.writeText(msg.content);
+    setCopiedIdx(msgIdx);
+    setTimeout(() => setCopiedIdx(null), 2000);
+  }, [activeMessages]);
+
+  // -- Regenerate (re-send last user message, streaming) --------------------
+  const regenerate = useCallback(async () => {
+    if (!activeKey || !activeTile || !selectedPipeline || sending) return;
+
+    const lastUserIdx = [...activeMessages].reverse().findIndex((m) => m.role === "user");
+    if (lastUserIdx === -1) return;
+    const lastUser = activeMessages[activeMessages.length - 1 - lastUserIdx];
+
+    // Remove all messages after the last user message (agent responses)
+    const trimmed = activeMessages.slice(0, activeMessages.length - lastUserIdx);
+
+    setChatHistories((prev) => ({
+      ...prev,
+      [activeKey]: trimmed,
+    }));
+
+    const chatHistory = trimmed
+      .filter((m) => m.role !== "system")
+      .map((m) => ({
+        role: m.role === "agent" ? "assistant" : m.role,
+        content: m.content,
+      }));
+
+    await streamChat(activeKey, activeTile, selectedPipeline, lastUser.content, chatHistory.slice(0, -1));
+  }, [activeKey, activeTile, selectedPipeline, activeMessages, sending, streamChat]);
+
+  // -- Edit user message (replaces message and re-sends, streaming) ---------
+  const saveEditMessage = useCallback(async (msgIdx: number) => {
+    if (!activeKey || !activeTile || !selectedPipeline) return;
+    const trimmedContent = editingMsgContent.trim();
+    if (!trimmedContent) return;
+
+    const before = activeMessages.slice(0, msgIdx);
+    const editedMsg: ChatMessage = {
+      role: "user",
+      content: trimmedContent,
+      timestamp: now(),
+    };
+
+    setChatHistories((prev) => ({
+      ...prev,
+      [activeKey]: [...before, editedMsg],
+    }));
+    setEditingMsgIdx(null);
+    setEditingMsgContent("");
+
+    const chatHistory = before
+      .filter((m) => m.role !== "system")
+      .map((m) => ({
+        role: m.role === "agent" ? "assistant" : m.role,
+        content: m.content,
+      }));
+
+    await streamChat(activeKey, activeTile, selectedPipeline, trimmedContent, chatHistory);
+  }, [activeKey, activeTile, selectedPipeline, activeMessages, editingMsgContent, streamChat]);
+
   // -- Enter key handler -----------------------------------------------------
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -871,7 +1185,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   return (
     <div className="relative flex h-full overflow-hidden">
       {/* ---- LEFT SIDEBAR ------------------------------------------------ */}
-      <div className="flex w-[280px] shrink-0 flex-col border-r border-gray-200 bg-white">
+      <div className="flex w-[280px] shrink-0 flex-col border-r border-gray-200 bg-white shadow-sm">
         {/* Header */}
         <div className="border-b border-gray-100 px-4 py-3">
           <div className="flex items-center justify-between">
@@ -976,6 +1290,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
               );
               const isActive = activeTileId === tile.id;
               const isEditing = editingTileId === tile.id;
+              const isTileStreaming = sendingKeys.has(key);
               const msgCount = (chatHistories[key] ?? []).filter(
                 (m) => m.role !== "system"
               ).length;
@@ -998,14 +1313,18 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                   {/* Number badge */}
                   <span
                     className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[11px] font-bold ${
-                      status === "Approved"
-                        ? "bg-green-100 text-green-600"
-                        : isActive
-                          ? "bg-violet-100 text-violet-600"
-                          : "bg-gray-100 text-gray-500"
+                      isTileStreaming
+                        ? "bg-violet-100 text-violet-600"
+                        : status === "Approved"
+                          ? "bg-green-100 text-green-600"
+                          : isActive
+                            ? "bg-violet-100 text-violet-600"
+                            : "bg-gray-100 text-gray-500"
                     }`}
                   >
-                    {status === "Approved" ? (
+                    {isTileStreaming ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : status === "Approved" ? (
                       <CheckCircle className="h-3.5 w-3.5" />
                     ) : (
                       idx + 1
@@ -1099,9 +1418,26 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           </div>
         </div>
 
-        {/* Export */}
-        {allApproved && tiles.length > 0 && (
-          <div className="border-t border-gray-100 p-3">
+        {/* Export & Intelligence Brief */}
+        <div className="border-t border-gray-100 p-3 space-y-2">
+          {/* Intelligence Brief — always available */}
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full gap-1.5 border-violet-200 text-violet-700 hover:bg-violet-50"
+            onClick={downloadIntelBrief}
+            disabled={generatingBrief}
+          >
+            {generatingBrief ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <FileText className="h-3.5 w-3.5" />
+            )}
+            {generatingBrief ? "Generating..." : "Intelligence Brief (.docx)"}
+          </Button>
+
+          {/* Export Draft — only when all sections approved */}
+          {allApproved && tiles.length > 0 && (
             <Button
               variant="default"
               size="sm"
@@ -1111,22 +1447,22 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
               <Download className="h-4 w-4" />
               Export Draft
             </Button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {/* ---- CENTER: CHAT PANEL ------------------------------------------ */}
-      <div className="flex flex-1 flex-col overflow-hidden bg-gray-50">
+      <div className="flex flex-1 flex-col overflow-hidden bg-gradient-to-b from-gray-50 to-gray-100/50">
         {!activeTile ? (
           <div className="flex flex-1 items-center justify-center">
-            <div className="text-center">
-              <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-white shadow-sm ring-1 ring-gray-100">
+            <div className="text-center px-6">
+              <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-white shadow-md ring-1 ring-gray-100">
                 <MessageSquare className="h-7 w-7 text-violet-400" />
               </div>
-              <p className="text-base font-semibold text-gray-700">
+              <p className="text-lg font-semibold text-gray-800">
                 Select a section to begin
               </p>
-              <p className="mx-auto mt-2 max-w-xs text-sm leading-relaxed text-gray-400">
+              <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-gray-400">
                 Pick a section tile on the left, then paste the grant question or
                 requirements. The agent will draft a response.
               </p>
@@ -1135,28 +1471,25 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         ) : (
           <>
             {/* Chat header */}
-            <div className="flex items-center justify-between border-b border-gray-200 bg-white px-5 py-2.5 shadow-sm">
+            <div className="flex items-center justify-between border-b border-gray-200 bg-white px-5 py-3">
               <div className="flex items-center gap-3 min-w-0">
                 <div
-                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${themeConfig.gradient}`}
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br ${themeConfig.gradient} shadow-sm`}
                 >
-                  <Bot className="h-4 w-4 text-white" />
+                  <Bot className="h-4.5 w-4.5 text-white" />
                 </div>
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <h2 className="truncate text-sm font-semibold text-gray-900">
-                      {currentAgent.name}
-                    </h2>
-                    <span className="text-gray-300">·</span>
-                    <span className="text-sm text-gray-500 truncate">
+                    <h2 className="truncate text-sm font-bold text-gray-900">
                       {activeTile.label}
-                    </span>
+                    </h2>
                   </div>
                   <p className="text-[11px] text-gray-400 truncate">
-                    {selectedPipeline?.grant_title ?? ""}
+                    {currentAgent.name}
                     {SECTION_GUIDANCE[activeTile.label]
-                      ? ` · ~${SECTION_GUIDANCE[activeTile.label].wordLimit} words target`
+                      ? ` · ~${SECTION_GUIDANCE[activeTile.label].wordLimit} words`
                       : ""}
+                    {selectedPipeline?.grant_title ? ` · ${selectedPipeline.grant_title}` : ""}
                   </p>
                 </div>
               </div>
@@ -1210,7 +1543,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
             </div>
 
             {/* Chat messages */}
-            <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
+            <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
               {activeMessages.map((msg, i) => {
                 const showDateSep =
                   i > 0 && isDifferentDay(activeMessages[i - 1].timestamp, msg.timestamp);
@@ -1225,26 +1558,89 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                         <div className="flex-1 border-t border-gray-200" />
                       </div>
                     )}
-                    <ChatBubble message={msg} />
+                    <ChatBubble
+                      message={msg}
+                      msgIdx={i}
+                      userName={session?.user?.name ?? "You"}
+                      userImage={session?.user?.image ?? undefined}
+                      onCopy={copySnippet}
+                      onRegenerate={regenerate}
+                      onEditStart={(idx) => {
+                        setEditingMsgIdx(idx);
+                        setEditingMsgContent(activeMessages[idx].content);
+                      }}
+                      onEditSave={saveEditMessage}
+                      onEditCancel={() => {
+                        setEditingMsgIdx(null);
+                        setEditingMsgContent("");
+                      }}
+                      editingMsgIdx={editingMsgIdx}
+                      editingMsgContent={editingMsgContent}
+                      onEditChange={setEditingMsgContent}
+                      copiedIdx={copiedIdx}
+                      isLastAgent={
+                        i ===
+                        activeMessages.length -
+                          1 -
+                          [...activeMessages]
+                            .reverse()
+                            .findIndex((m) => m.role === "agent")
+                      }
+                      sending={sending}
+                    />
                   </div>
                 );
               })}
 
-              {/* Typing indicator */}
+              {/* Streaming / typing indicator */}
               {sending && (
-                <div className="flex gap-3">
-                  <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br ${themeConfig.gradient} shadow-sm`}>
-                    <Bot className="h-4 w-4 text-white" />
+                <div className="flex gap-2.5">
+                  <div className="mt-0.5 shrink-0">
+                    <DrafterAvatar
+                      name={currentAgent.name}
+                      gradient={themeConfig.gradient}
+                      icon={<Bot className="h-3.5 w-3.5 text-white" />}
+                    />
                   </div>
-                  <div className="flex items-center gap-2.5 rounded-2xl rounded-tl-md bg-white px-4 py-3 shadow-sm ring-1 ring-gray-100">
-                    <div className="flex gap-1">
-                      <span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:0ms]" />
-                      <span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:150ms]" />
-                      <span className="h-2 w-2 animate-bounce rounded-full bg-violet-400 [animation-delay:300ms]" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline gap-2">
+                      <span className={`text-xs font-semibold ${themeConfig.color}`}>
+                        {currentAgent.name}
+                      </span>
+                      {streamStatus && (
+                        <span className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          {streamStatus}
+                        </span>
+                      )}
                     </div>
-                    <span className="text-sm text-gray-500">
-                      {currentAgent.name} drafting...
-                    </span>
+
+                    {streamingContent ? (
+                      /* Live streaming content */
+                      <div className="mt-1.5 rounded-lg bg-white p-4 shadow-sm ring-1 ring-gray-100">
+                        <div className="prose prose-sm max-w-none text-gray-800 prose-headings:text-gray-900 prose-headings:mt-4 prose-headings:mb-2 prose-p:my-2 prose-p:leading-relaxed prose-li:my-0.5 prose-ul:my-2 prose-ol:my-2 prose-strong:text-gray-900 prose-h2:text-base prose-h3:text-sm first:prose-headings:mt-0">
+                          <ReactMarkdown>{streamingContent}</ReactMarkdown>
+                        </div>
+                        <div className="mt-2 flex items-center gap-1.5 text-[10px] text-gray-400">
+                          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
+                          {countWords(streamingContent)} words so far...
+                        </div>
+                      </div>
+                    ) : (
+                      /* Status steps before streaming begins */
+                      <div className="mt-1.5 rounded-lg bg-white px-4 py-3 shadow-sm ring-1 ring-gray-100">
+                        <div className="flex items-center gap-2.5">
+                          <div className="flex gap-1">
+                            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-violet-400 [animation-delay:0ms]" />
+                            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-violet-400 [animation-delay:150ms]" />
+                            <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-violet-400 [animation-delay:300ms]" />
+                          </div>
+                          <span className="text-sm text-gray-400">
+                            {streamStatus || "Connecting..."}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -1267,14 +1663,14 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
             )}
 
             {/* Input area */}
-            <div className="border-t border-gray-200 bg-white px-5 py-3">
+            <div className="border-t border-gray-200 bg-white px-5 py-3.5 shadow-[0_-1px_3px_rgba(0,0,0,0.04)]">
               {activeKey && approvedSections.has(activeKey) ? (
-                <p className="py-2 text-center text-sm text-gray-400">
-                  This section is approved. Select another section or export the
-                  draft.
-                </p>
+                <div className="flex items-center justify-center gap-2 rounded-xl bg-green-50 py-3 text-sm text-green-700">
+                  <CheckCircle className="h-4 w-4" />
+                  Section approved. Select another section or export the draft.
+                </div>
               ) : (
-                <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-2.5">
                   <div className="relative">
                     <textarea
                       ref={textareaRef}
@@ -1287,15 +1683,19 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                           ? "Type revision instructions or follow-up..."
                           : "Paste the grant question or requirements here..."
                       }
-                      className="w-full resize-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 pr-14 text-sm text-gray-800 placeholder:text-gray-400 transition-colors focus:border-violet-300 focus:bg-white focus:outline-none focus:ring-2 focus:ring-violet-100"
+                      className="w-full resize-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 pr-14 text-sm text-gray-800 placeholder:text-gray-400 transition-all focus:border-violet-300 focus:bg-white focus:outline-none focus:ring-2 focus:ring-violet-100"
                       disabled={sending}
                     />
                     <button
                       onClick={sendMessage}
                       disabled={!inputValue.trim() || sending}
-                      className="absolute bottom-3 right-3 flex h-8 w-8 items-center justify-center rounded-lg bg-violet-600 text-white shadow-sm transition-all hover:bg-violet-700 disabled:opacity-40 disabled:hover:bg-violet-600"
+                      className="absolute bottom-3 right-3 flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-r from-violet-600 to-purple-600 text-white shadow-sm transition-all hover:from-violet-700 hover:to-purple-700 disabled:opacity-40"
                     >
-                      <Send className="h-3.5 w-3.5" />
+                      {sending ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Send className="h-3.5 w-3.5" />
+                      )}
                     </button>
                   </div>
                   <div className="flex items-center justify-between px-1">
@@ -1429,16 +1829,90 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
 }
 
 // ---------------------------------------------------------------------------
-// ChatBubble
+// Avatar (matches CommentThread style)
 // ---------------------------------------------------------------------------
 
-function ChatBubble({ message }: { message: ChatMessage }) {
+function DrafterAvatar({
+  name,
+  image,
+  icon,
+  gradient,
+}: {
+  name: string;
+  image?: string;
+  icon?: React.ReactNode;
+  gradient?: string;
+}) {
+  if (icon && gradient) {
+    return (
+      <div
+        className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br ${gradient} ring-1 ring-gray-200`}
+      >
+        {icon}
+      </div>
+    );
+  }
+  if (image) {
+    return (
+      <img
+        src={image}
+        alt=""
+        className="h-7 w-7 rounded-full object-cover ring-1 ring-gray-200"
+        referrerPolicy="no-referrer"
+      />
+    );
+  }
+  return (
+    <div className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-100 text-xs font-bold text-blue-600">
+      {(name || "?")[0].toUpperCase()}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ChatBubble — collaboration-style (left-aligned, avatar + name + timestamp)
+// ---------------------------------------------------------------------------
+
+function ChatBubble({
+  message,
+  msgIdx,
+  userName,
+  userImage,
+  onCopy,
+  onRegenerate,
+  onEditStart,
+  onEditSave,
+  onEditCancel,
+  editingMsgIdx,
+  editingMsgContent,
+  onEditChange,
+  copiedIdx,
+  isLastAgent,
+  sending,
+}: {
+  message: ChatMessage;
+  msgIdx: number;
+  userName: string;
+  userImage?: string;
+  onCopy: (idx: number) => void;
+  onRegenerate: () => void;
+  onEditStart: (idx: number) => void;
+  onEditSave: (idx: number) => void;
+  onEditCancel: () => void;
+  editingMsgIdx: number | null;
+  editingMsgContent: string;
+  onEditChange: (val: string) => void;
+  copiedIdx: number | null;
+  isLastAgent: boolean;
+  sending: boolean;
+}) {
   const { role, content, timestamp, metadata } = message;
 
+  // ── System message (centered, compact) ──
   if (role === "system") {
     return (
-      <div className="flex justify-center">
-        <div className={`max-w-lg rounded-xl border border-violet-100 bg-violet-50/50 px-5 py-3 text-center`}>
+      <div className="flex justify-center py-1">
+        <div className="max-w-lg rounded-xl border border-violet-100 bg-violet-50/60 px-5 py-3 text-center">
           <div className="prose prose-sm max-w-none text-violet-700 [&_p]:text-[13px] [&_p]:leading-relaxed [&_strong]:text-violet-800">
             <ReactMarkdown>{content}</ReactMarkdown>
           </div>
@@ -1450,6 +1924,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
     );
   }
 
+  // ── Agent message ──
   if (role === "agent") {
     const msgTheme = metadata?.agentTheme
       ? THEME_CONFIG[metadata.agentTheme]
@@ -1459,12 +1934,17 @@ function ChatBubble({ message }: { message: ChatMessage }) {
     const agentLabel = metadata?.agentName || "Drafter Agent";
 
     return (
-      <div className="flex gap-3">
-        <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br ${gradient} shadow-sm`}>
-          <Bot className="h-4 w-4 text-white" />
+      <div className="group flex gap-2.5">
+        <div className="mt-0.5 shrink-0">
+          <DrafterAvatar
+            name={agentLabel}
+            gradient={gradient}
+            icon={<Bot className="h-3.5 w-3.5 text-white" />}
+          />
         </div>
         <div className="flex-1 min-w-0">
-          <div className="mb-1.5 flex items-center gap-2">
+          {/* Name + timestamp row */}
+          <div className="flex items-baseline gap-2">
             <span className={`text-xs font-semibold ${labelColor}`}>
               {agentLabel}
             </span>
@@ -1472,20 +1952,23 @@ function ChatBubble({ message }: { message: ChatMessage }) {
               {formatTime(timestamp)}
             </span>
           </div>
-          <div className="rounded-2xl rounded-tl-md bg-white p-5 shadow-sm ring-1 ring-gray-100">
+
+          {/* Content card */}
+          <div className="mt-1.5 rounded-lg bg-white p-4 shadow-sm ring-1 ring-gray-100">
             <div className="prose prose-sm max-w-none text-gray-800 prose-headings:text-gray-900 prose-headings:mt-4 prose-headings:mb-2 prose-p:my-2 prose-p:leading-relaxed prose-li:my-0.5 prose-ul:my-2 prose-ol:my-2 prose-strong:text-gray-900 prose-blockquote:border-gray-300 prose-blockquote:text-gray-600 prose-h2:text-base prose-h3:text-sm first:prose-headings:mt-0">
               <ReactMarkdown>{content}</ReactMarkdown>
             </div>
 
+            {/* Metadata chips */}
             {metadata && (
-              <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-gray-100 pt-3">
+              <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-gray-100 pt-3">
                 {metadata.wordCount != null && (
                   <span
-                    className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium ${
+                    className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
                       metadata.wordLimit &&
                       metadata.wordCount > metadata.wordLimit
-                        ? "bg-amber-50 text-amber-700 ring-1 ring-amber-200"
-                        : "bg-gray-50 text-gray-600 ring-1 ring-gray-100"
+                        ? "bg-amber-50 text-amber-700"
+                        : "bg-gray-100 text-gray-600"
                     }`}
                   >
                     {metadata.wordCount}
@@ -1496,62 +1979,60 @@ function ChatBubble({ message }: { message: ChatMessage }) {
                 )}
                 {metadata.status && (
                   <span
-                    className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
                       metadata.status === "Approved"
-                        ? "bg-green-50 text-green-700 ring-1 ring-green-200"
+                        ? "bg-green-50 text-green-700"
                         : metadata.status === "In Review"
-                          ? "bg-amber-50 text-amber-700 ring-1 ring-amber-200"
-                          : "bg-gray-50 text-gray-600 ring-1 ring-gray-100"
+                          ? "bg-amber-50 text-amber-700"
+                          : "bg-gray-100 text-gray-600"
                     }`}
                   >
                     {metadata.status}
                   </span>
                 )}
                 {metadata.agentTemperature != null && (
-                  <span className="rounded-md bg-gray-50 px-2 py-0.5 text-[10px] font-medium text-gray-500 ring-1 ring-gray-100">
-                    temp: {metadata.agentTemperature}
+                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">
+                    temp {metadata.agentTemperature}
                   </span>
                 )}
-                {metadata.sourcesUsed && metadata.sourcesUsed.length > 0 && (
-                  <>
-                    {metadata.sourcesUsed.map((src) => {
-                      const srcStyles: Record<string, string> = {
-                        company_profile: "bg-violet-50 text-violet-700 ring-violet-200",
-                        knowledge_chunks: "bg-blue-50 text-blue-700 ring-blue-200",
-                        notion_live: "bg-green-50 text-green-700 ring-green-200",
-                        grant_deep_analysis: "bg-amber-50 text-amber-700 ring-amber-200",
-                      };
-                      const srcLabels: Record<string, string> = {
-                        company_profile: "Company Profile",
-                        knowledge_chunks: "Knowledge Base",
-                        notion_live: "Notion (Live)",
-                        grant_deep_analysis: "Grant Analysis",
-                      };
-                      return (
-                        <span
-                          key={src}
-                          className={`rounded-md px-2 py-0.5 text-[10px] font-medium ring-1 ${
-                            srcStyles[src] || "bg-gray-50 text-gray-600 ring-gray-100"
-                          }`}
-                        >
-                          {srcLabels[src] || src}
-                        </span>
-                      );
-                    })}
-                  </>
-                )}
+                {metadata.sourcesUsed && metadata.sourcesUsed.length > 0 &&
+                  metadata.sourcesUsed.map((src) => {
+                    const srcStyles: Record<string, string> = {
+                      company_profile: "bg-violet-50 text-violet-700",
+                      knowledge_chunks: "bg-blue-50 text-blue-700",
+                      notion_live: "bg-green-50 text-green-700",
+                      grant_deep_analysis: "bg-amber-50 text-amber-700",
+                    };
+                    const srcLabels: Record<string, string> = {
+                      company_profile: "Company Profile",
+                      knowledge_chunks: "Knowledge Base",
+                      notion_live: "Notion (Live)",
+                      grant_deep_analysis: "Grant Analysis",
+                    };
+                    return (
+                      <span
+                        key={src}
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                          srcStyles[src] || "bg-gray-100 text-gray-600"
+                        }`}
+                      >
+                        {srcLabels[src] || src}
+                      </span>
+                    );
+                  })}
               </div>
             )}
 
+            {/* Evidence gaps */}
             {metadata?.evidenceGaps && metadata.evidenceGaps.length > 0 && (
-              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-4">
-                <div className="mb-2 flex items-center gap-2">
+              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                <div className="mb-1.5 flex items-center gap-1.5">
                   <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
-                  <span className="text-xs font-semibold text-amber-700">
+                  <span className="text-[11px] font-semibold text-amber-700">
                     Evidence Gaps
                   </span>
                 </div>
-                <ul className="space-y-1.5">
+                <ul className="space-y-1">
                   {metadata.evidenceGaps.map((gap, j) => (
                     <li
                       key={j}
@@ -1564,27 +2045,119 @@ function ChatBubble({ message }: { message: ChatMessage }) {
               </div>
             )}
           </div>
+
+          {/* Agent action bar */}
+          <div className="mt-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            <button
+              onClick={() => onCopy(msgIdx)}
+              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+              title="Copy to clipboard"
+            >
+              {copiedIdx === msgIdx ? (
+                <><Check className="h-3 w-3 text-green-500" /> Copied</>
+              ) : (
+                <><Copy className="h-3 w-3" /> Copy</>
+              )}
+            </button>
+            {isLastAgent && !sending && (
+              <button
+                onClick={onRegenerate}
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+                title="Regenerate response"
+              >
+                <RotateCcw className="h-3 w-3" /> Regenerate
+              </button>
+            )}
+          </div>
         </div>
       </div>
     );
   }
 
-  // User message
+  // ── User message (left-aligned, same as collaboration) ──
+  const isEditingThis = editingMsgIdx === msgIdx;
+
   return (
-    <div className="flex gap-3 justify-end">
-      <div className="flex-1 min-w-0 max-w-[70%] ml-auto">
-        <div className="mb-1.5 flex items-center gap-2 justify-end">
+    <div className="group flex gap-2.5">
+      <div className="mt-0.5 shrink-0">
+        <DrafterAvatar name={userName} image={userImage} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-2">
+          <span className="text-xs font-semibold text-gray-800">
+            {userName}
+            <span className="ml-1 text-[10px] font-normal text-gray-400">
+              (you)
+            </span>
+          </span>
           <span className="text-[10px] text-gray-400">
             {formatTime(timestamp)}
           </span>
-          <span className="text-xs font-semibold text-gray-600">You</span>
         </div>
-        <div className="rounded-2xl rounded-tr-md bg-gradient-to-br from-blue-500 to-blue-600 px-5 py-3 text-sm leading-relaxed text-white shadow-sm whitespace-pre-wrap">
-          {content}
-        </div>
-      </div>
-      <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-blue-600 shadow-sm">
-        <User className="h-4 w-4 text-white" />
+
+        {isEditingThis ? (
+          <div className="mt-1.5">
+            <textarea
+              value={editingMsgContent}
+              onChange={(e) => onEditChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  onEditSave(msgIdx);
+                }
+                if (e.key === "Escape") onEditCancel();
+              }}
+              rows={3}
+              className="w-full resize-none rounded-lg border border-violet-300 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:ring-2 focus:ring-violet-200"
+              autoFocus
+            />
+            <div className="mt-1.5 flex items-center gap-2">
+              <button
+                onClick={() => onEditSave(msgIdx)}
+                className="flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1 text-xs font-medium text-white hover:bg-violet-700 transition-colors"
+              >
+                <Send className="h-3 w-3" /> Save & Resend
+              </button>
+              <button
+                onClick={onEditCancel}
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <span className="text-[10px] text-gray-400">
+                This will regenerate the agent response
+              </span>
+            </div>
+          </div>
+        ) : (
+          <>
+            <p className="mt-1 text-sm leading-relaxed text-gray-700 whitespace-pre-wrap">
+              {content}
+            </p>
+            {/* User action bar */}
+            <div className="mt-1.5 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+              <button
+                onClick={() => onEditStart(msgIdx)}
+                disabled={sending}
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors disabled:opacity-40"
+                title="Edit message"
+              >
+                <Pencil className="h-3 w-3" /> Edit
+              </button>
+              <button
+                onClick={() => onCopy(msgIdx)}
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+                title="Copy text"
+              >
+                {copiedIdx === msgIdx ? (
+                  <><Check className="h-3 w-3 text-green-500" /> Copied</>
+                ) : (
+                  <><Copy className="h-3 w-3" /> Copy</>
+                )}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

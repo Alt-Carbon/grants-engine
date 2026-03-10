@@ -435,7 +435,7 @@ export function CommentThread({ grantId }: CommentThreadProps) {
 
           {/* Action buttons — show on hover */}
           {!isEditing && (
-            <div className="absolute right-0 top-0 hidden items-center gap-0.5 rounded-md border border-gray-200 bg-white px-0.5 py-0.5 shadow-sm group-hover:flex">
+            <div className="absolute -right-1 -top-2 z-10 hidden items-center gap-0.5 rounded-md border border-gray-200 bg-white px-0.5 py-0.5 shadow-sm group-hover:flex">
               {/* Quick react */}
               <button
                 onClick={() =>
@@ -577,7 +577,7 @@ export function CommentThread({ grantId }: CommentThreadProps) {
   return (
     <div className="flex flex-col">
       {/* Comment list */}
-      <div className="max-h-80 overflow-y-auto px-5 py-3">
+      <div className="px-5 py-3">
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-6 text-sm text-gray-400">
             <Loader2 className="h-4 w-4 animate-spin" />

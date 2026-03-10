@@ -242,3 +242,56 @@ async def chat(
         f"All LLM models exhausted ({', '.join(models_tried)}). "
         f"Last error: {error_msg}"
     )
+
+
+async def chat_stream(
+    prompt: str,
+    model: str = SONNET,
+    max_tokens: int = 1024,
+    system: str = "",
+    temperature: Optional[float] = None,
+):
+    """Streaming chat completion — yields content chunks as they arrive.
+
+    Falls back through model chain if primary model is exhausted.
+    Yields strings (content deltas).
+    """
+    client = get_client()
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    chain = [model] + _FALLBACK_CHAINS.get(model, [])
+    models_tried: List[str] = []
+    last_error: Optional[Exception] = None
+
+    for candidate in chain:
+        if _is_exhausted(candidate):
+            models_tried.append(f"{candidate} (skipped-exhausted)")
+            continue
+
+        try:
+            kwargs: Dict = dict(
+                model=candidate, max_tokens=max_tokens, messages=messages, stream=True
+            )
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            stream = await client.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                delta = chunk.choices[0].delta.content if chunk.choices else None
+                if delta:
+                    yield delta
+            return  # success — exit after streaming completes
+
+        except Exception as exc:
+            models_tried.append(candidate)
+            last_error = exc
+            if _is_credit_error(exc):
+                _mark_exhausted(candidate)
+                continue
+            else:
+                raise
+
+    error_msg = str(last_error)[:300] if last_error else "Unknown error"
+    raise RuntimeError(f"All LLM models exhausted ({', '.join(models_tried)}). Last error: {error_msg}")

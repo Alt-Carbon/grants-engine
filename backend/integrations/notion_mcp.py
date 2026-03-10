@@ -163,23 +163,138 @@ class NotionMCPClient:
         return []
 
     async def fetch_page(self, page_id: str) -> Optional[str]:
-        """Fetch a Notion page. Returns markdown content string."""
+        """Fetch a Notion page with its content blocks. Returns text."""
+        # First get page metadata
         result = await self._call_tool("API-retrieve-a-page", {"page_id": page_id})
-        if isinstance(result, str):
+
+        # If the MCP server returns markdown/text directly, use it
+        if isinstance(result, str) and len(result) > 50:
             return result
+
+        # Extract title from metadata
+        title = ""
         if isinstance(result, dict):
-            return result.get("markdown") or result.get("text") or json.dumps(result)
+            # Check for markdown/text in response
+            md = result.get("markdown") or result.get("text")
+            if md and len(md) > 50:
+                return md
+            # Extract title
+            props = result.get("properties", {})
+            for p in props.values():
+                if isinstance(p, dict) and p.get("type") == "title":
+                    ta = p.get("title", [])
+                    title = "".join(
+                        t.get("plain_text", "") for t in ta if isinstance(t, dict)
+                    )
+                    break
+
+        # Fetch actual content via block children (with pagination)
+        try:
+            blocks = await self.get_block_children(page_id)
+            texts = []
+            if title:
+                texts.append(f"# {title}\n")
+            for block in blocks:
+                text = await self._extract_block_text_recursive(block, depth=0)
+                if text:
+                    texts.append(text)
+            if texts:
+                return "\n".join(texts)
+        except Exception as e:
+            logger.debug("Failed to fetch block children for %s: %s", page_id, e)
+
+        # Fallback: return metadata as JSON
+        if isinstance(result, dict):
+            return json.dumps(result)
         return None
 
+    async def _extract_block_text_recursive(self, block: Dict, depth: int = 0) -> str:
+        """Extract plain text from a Notion block, recursing into children (max depth 3)."""
+        btype = block.get("type", "")
+        bdata = block.get(btype, {})
+
+        # Most block types have rich_text array
+        rich_text = bdata.get("rich_text", [])
+        if not rich_text and isinstance(bdata, dict):
+            rich_text = bdata.get("text", [])
+
+        text = "".join(
+            t.get("plain_text", "") for t in rich_text if isinstance(t, dict)
+        )
+
+        if not text:
+            if btype == "child_page":
+                return f"[Subpage: {bdata.get('title', '')}]"
+            if btype == "child_database":
+                return f"[Database: {bdata.get('title', '')}]"
+            if btype == "image":
+                caption = bdata.get("caption", [])
+                cap_text = "".join(
+                    t.get("plain_text", "") for t in caption if isinstance(t, dict)
+                )
+                return f"[Image: {cap_text}]" if cap_text else ""
+
+        # Add formatting based on block type
+        if btype.startswith("heading_1"):
+            text = f"# {text}"
+        elif btype.startswith("heading_2"):
+            text = f"## {text}"
+        elif btype.startswith("heading_3"):
+            text = f"### {text}"
+        elif btype == "bulleted_list_item":
+            text = f"• {text}"
+        elif btype == "numbered_list_item":
+            text = f"- {text}"
+        elif btype == "to_do":
+            checked = bdata.get("checked", False)
+            text = f"[{'x' if checked else ' '}] {text}"
+        elif btype == "toggle":
+            text = f"▸ {text}"
+        elif btype == "quote":
+            text = f"> {text}"
+        elif btype == "callout":
+            icon = block.get("callout", {}).get("icon", {}).get("emoji", "")
+            text = f"{icon} {text}" if icon else text
+        elif btype == "code":
+            text = f"```\n{text}\n```"
+        elif btype == "divider":
+            text = "---"
+
+        # Recurse into children if present (depth limit 3)
+        if block.get("has_children") and depth < 3:
+            try:
+                children = await self.get_block_children(block["id"])
+                child_texts = []
+                for child in children:
+                    ct = await self._extract_block_text_recursive(child, depth=depth + 1)
+                    if ct:
+                        child_texts.append(ct)
+                if child_texts:
+                    text = f"{text}\n{chr(10).join(child_texts)}" if text else "\n".join(child_texts)
+            except Exception:
+                pass
+
+        return text or ""
+
     async def get_block_children(self, block_id: str) -> List[Dict]:
-        """Fetch child blocks of a page/block. Returns list of blocks."""
-        result = await self._call_tool("API-get-block-children", {
-            "block_id": block_id,
-            "page_size": 100,
-        })
-        if isinstance(result, dict):
-            return result.get("results", [])
-        return []
+        """Fetch child blocks of a page/block with pagination. Returns list of blocks."""
+        all_blocks: List[Dict] = []
+        cursor: Optional[str] = None
+
+        while True:
+            args: Dict[str, Any] = {"block_id": block_id, "page_size": 100}
+            if cursor:
+                args["start_cursor"] = cursor
+            result = await self._call_tool("API-get-block-children", args)
+            if isinstance(result, dict):
+                all_blocks.extend(result.get("results", []))
+                cursor = result.get("next_cursor")
+                if not cursor:
+                    break
+            else:
+                break
+
+        return all_blocks
 
     async def create_page(
         self,

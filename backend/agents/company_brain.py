@@ -450,9 +450,14 @@ class CompanyBrainAgent:
     # ── Full sync ──────────────────────────────────────────────────────────────
 
     async def sync(self) -> Dict:
-        """Sync Notion + Drive → chunk → tag → embed → upsert to MongoDB."""
+        """Sync Notion + Drive → chunk → tag → embed → upsert to MongoDB + Pinecone."""
+        from backend.db.pinecone_store import is_pinecone_configured, upsert_chunks as pc_upsert
+
         start = datetime.now(timezone.utc)
         logger.info("Company Brain: starting knowledge sync")
+        use_pinecone = is_pinecone_configured()
+        if use_pinecone:
+            logger.info("Pinecone configured — dual-writing vectors")
 
         notion_pages, drive_files = await asyncio.gather(
             self._fetch_notion_pages(),
@@ -463,6 +468,7 @@ class CompanyBrainAgent:
 
         col = knowledge_chunks()
         chunks_saved = 0
+        pinecone_vectors: List[Dict] = []
         sem = asyncio.Semaphore(5)
 
         async def process_doc(doc: Dict):
@@ -496,7 +502,34 @@ class CompanyBrainAgent:
                     )
                     chunks_saved += 1
 
+                    # Queue for Pinecone batch upsert
+                    if use_pinecone:
+                        pinecone_vectors.append({
+                            "id": f"{doc['id']}#{i}",
+                            "values": embedding,
+                            "metadata": {
+                                "content": chunk,
+                                "source": doc["source"],
+                                "source_id": doc["id"],
+                                "source_title": doc["title"],
+                                "doc_type": tag.get("doc_type", "misc"),
+                                "themes": tag.get("themes", []),
+                                "key_topics": tag.get("key_topics", []),
+                                "contains_data": tag.get("contains_data", False),
+                                "is_useful_for_grants": tag.get("is_useful_for_grants", True),
+                            },
+                        })
+
         await asyncio.gather(*(process_doc(d) for d in all_docs))
+
+        # Batch upsert to Pinecone
+        pinecone_count = 0
+        if use_pinecone and pinecone_vectors:
+            try:
+                pinecone_count = pc_upsert(pinecone_vectors)
+                logger.info("Pinecone: upserted %d vectors", pinecone_count)
+            except Exception as e:
+                logger.error("Pinecone upsert failed: %s", e)
 
         duration = (datetime.now(timezone.utc) - start).seconds
         await knowledge_sync_logs().insert_one({
@@ -504,6 +537,7 @@ class CompanyBrainAgent:
             "notion_pages": len(notion_pages),
             "drive_files": len(drive_files),
             "total_chunks": chunks_saved,
+            "pinecone_vectors": pinecone_count,
             "duration_seconds": duration,
         })
 
@@ -512,6 +546,7 @@ class CompanyBrainAgent:
             "total_chunks": chunks_saved,
             "notion_pages": len(notion_pages),
             "drive_files": len(drive_files),
+            "pinecone_vectors": pinecone_count,
         }
 
     # ── Query interface ────────────────────────────────────────────────────────
@@ -523,14 +558,33 @@ class CompanyBrainAgent:
         doc_types: Optional[List[str]] = None,
         top_k: int = 6,
     ) -> List[Dict]:
-        """Vector search for relevant knowledge chunks."""
+        """Vector search for relevant knowledge chunks.
+
+        Uses Pinecone when configured, falls back to MongoDB Atlas Vector Search.
+        """
+        from backend.db.pinecone_store import is_pinecone_configured, query_similar
+
         try:
             query_embedding = await self._embed(query_text)
         except Exception as e:
             logger.error("Embedding query failed: %s", e)
             return []
 
-        # Build filter: themes and/or doc_types
+        # ── Pinecone path (preferred) ──
+        if is_pinecone_configured():
+            pc_filter: Dict[str, Any] = {}
+            if themes:
+                pc_filter["themes"] = {"$in": themes}
+            if doc_types:
+                pc_filter["doc_type"] = {"$in": doc_types}
+            try:
+                results = query_similar(query_embedding, top_k=top_k, filter_dict=pc_filter or None)
+                if results:
+                    return results
+            except Exception as e:
+                logger.warning("Pinecone query failed, falling back to MongoDB: %s", e)
+
+        # ── MongoDB Atlas Vector Search (fallback) ──
         vs_filter: Dict[str, Any] = {}
         if themes or doc_types:
             parts = []
@@ -572,12 +626,12 @@ class CompanyBrainAgent:
 
         # Fallback: if vector search returns nothing, do text search
         if not results:
-            query = {"is_useful_for_grants": True}
+            text_query: Dict[str, Any] = {"is_useful_for_grants": True}
             if themes:
-                query["themes"] = {"$in": themes}
+                text_query["themes"] = {"$in": themes}
             if doc_types:
-                query["doc_type"] = {"$in": doc_types}
-            async for doc in col.find(query).limit(top_k):
+                text_query["doc_type"] = {"$in": doc_types}
+            async for doc in col.find(text_query).limit(top_k):
                 doc["_id"] = str(doc.get("_id", ""))
                 results.append(doc)
 

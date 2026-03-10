@@ -37,7 +37,7 @@ NOTION_PAGES: Dict[str, str] = {
 # Max chars to keep per section (keeps profile under ~20K total)
 SECTION_LIMITS: Dict[str, int] = {
     "vision_comms": 3000,
-    "introducing": 3000,
+    "introducing": 5000,
     "mrv_moat": 3000,
     "darjeeling_drp": 3000,
     "bengal_brp": 2000,

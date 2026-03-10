@@ -11,7 +11,6 @@ import {
   FileText,
   Settings,
   Database,
-  Leaf,
   Menu,
   X,
   Activity,
@@ -42,9 +41,10 @@ export function Sidebar() {
       {/* Logo */}
       <div className="flex h-14 items-center justify-between border-b border-gray-800 px-4">
         <div className="flex items-center gap-2">
-          <Leaf className="h-5 w-5 text-green-400" />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/AltLogoWhite-mnemonic.png" alt="Alt Carbon" className="h-5 w-5 object-contain" />
           <span className="text-sm font-semibold text-white">
-            AltCarbon Grants
+            Grants Engine
           </span>
         </div>
         {/* Close button — mobile only */}

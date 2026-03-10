@@ -5,8 +5,8 @@ import { SessionProvider } from "@/components/SessionProvider";
 import { auth } from "@/lib/auth";
 
 export const metadata: Metadata = {
-  title: "AltCarbon Grants Intelligence",
-  description: "Internal grant pipeline management",
+  title: "Grants Engine — Alt Carbon",
+  description: "AI-powered grant discovery, scoring, and drafting",
 };
 
 export default async function RootLayout({
