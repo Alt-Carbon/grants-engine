@@ -119,6 +119,244 @@ THEME_AGENTS = {
     },
 }
 
+# ── Full grant context builder ────────────────────────────────────────────────
+
+def _build_grant_context(grant: dict) -> str:
+    """Build a comprehensive text block from ALL grant fields for the drafter.
+
+    Includes: basic info, deep analysis (eligibility, funding terms, evaluation
+    criteria, application sections, key dates, past winners, strategic angle,
+    contact, resources, red flags, application tips), scoring, and evidence.
+    """
+    parts: list[str] = []
+
+    # ── Basic info ──
+    title = grant.get("grant_name") or grant.get("title") or "Unknown"
+    funder = grant.get("funder") or "Unknown"
+    basics = [f"Grant: {title}", f"Funder: {funder}"]
+    if grant.get("grant_type"):
+        basics.append(f"Type: {grant['grant_type']}")
+    if grant.get("amount"):
+        basics.append(f"Funding amount: {grant['amount']}")
+    if grant.get("max_funding_usd"):
+        basics.append(f"Max funding (USD): ${grant['max_funding_usd']:,.0f}")
+    if grant.get("currency"):
+        basics.append(f"Currency: {grant['currency']}")
+    if grant.get("deadline"):
+        basics.append(f"Deadline: {grant['deadline']}")
+    if grant.get("days_to_deadline") is not None:
+        basics.append(f"Days to deadline: {grant['days_to_deadline']}")
+    if grant.get("geography"):
+        basics.append(f"Geography: {grant['geography']}")
+    if grant.get("url"):
+        basics.append(f"URL: {grant['url']}")
+    if grant.get("application_url"):
+        basics.append(f"Application URL: {grant['application_url']}")
+    parts.append("GRANT OVERVIEW:\n" + "\n".join(basics))
+
+    # ── Eligibility ──
+    elig_parts = []
+    if grant.get("eligibility"):
+        elig_parts.append(f"Summary: {grant['eligibility']}")
+    if grant.get("eligibility_details"):
+        elig_parts.append(f"Details: {grant['eligibility_details']}")
+    if elig_parts:
+        parts.append("ELIGIBILITY:\n" + "\n".join(elig_parts))
+
+    # ── About ──
+    if grant.get("about_opportunity"):
+        parts.append(f"ABOUT THE OPPORTUNITY:\n{grant['about_opportunity']}")
+    if grant.get("application_process"):
+        parts.append(f"APPLICATION PROCESS:\n{grant['application_process']}")
+
+    # ── Scoring & analysis ──
+    scores = grant.get("scores") or {}
+    if scores:
+        score_lines = [f"  {k}: {v}/10" for k, v in scores.items()]
+        wt = grant.get("weighted_total")
+        if wt is not None:
+            score_lines.insert(0, f"  Overall score: {wt:.1f}/10")
+        parts.append("AI SCORING:\n" + "\n".join(score_lines))
+    if grant.get("rationale"):
+        parts.append(f"SCORING RATIONALE:\n{grant['rationale']}")
+    if grant.get("reasoning"):
+        parts.append(f"STRATEGIC REASONING:\n{grant['reasoning']}")
+    if grant.get("evidence_found"):
+        parts.append("EVIDENCE FOUND (AltCarbon fit):\n" + "\n".join(f"  • {e}" for e in grant["evidence_found"]))
+    if grant.get("evidence_gaps"):
+        parts.append("EVIDENCE GAPS:\n" + "\n".join(f"  • {e}" for e in grant["evidence_gaps"]))
+    if grant.get("red_flags"):
+        parts.append("RED FLAGS:\n" + "\n".join(f"  ⚠ {r}" for r in grant["red_flags"]))
+    if grant.get("funder_context"):
+        parts.append(f"FUNDER BACKGROUND:\n{grant['funder_context']}")
+
+    # ── Deep analysis ──
+    da = grant.get("deep_analysis") or {}
+    if not da:
+        return "\n\n".join(parts)
+
+    if da.get("opportunity_summary"):
+        parts.append(f"OPPORTUNITY SUMMARY:\n{da['opportunity_summary']}")
+
+    if da.get("strategic_angle"):
+        parts.append(f"STRATEGIC ANGLE FOR ALTCARBON:\n{da['strategic_angle']}")
+
+    # Key dates
+    kd = da.get("key_dates") or {}
+    if kd:
+        date_lines = [f"  {k.replace('_', ' ').title()}: {v}" for k, v in kd.items() if v]
+        if date_lines:
+            parts.append("KEY DATES & TIMELINES:\n" + "\n".join(date_lines))
+
+    # Requirements
+    reqs = da.get("requirements") or {}
+    if reqs:
+        req_lines = []
+        for doc in reqs.get("documents_needed") or []:
+            req_lines.append(f"  • Document: {doc}")
+        for att in reqs.get("attachments") or []:
+            req_lines.append(f"  • Attachment: {att}")
+        if reqs.get("submission_format"):
+            req_lines.append(f"  Submission format: {reqs['submission_format']}")
+        if reqs.get("submission_portal"):
+            req_lines.append(f"  Submission portal: {reqs['submission_portal']}")
+        if reqs.get("word_page_limits"):
+            req_lines.append(f"  Word/page limits: {reqs['word_page_limits']}")
+        if reqs.get("language"):
+            req_lines.append(f"  Language: {reqs['language']}")
+        if reqs.get("co_funding_required"):
+            req_lines.append(f"  Co-funding: {reqs['co_funding_required']}")
+        if req_lines:
+            parts.append("APPLICATION REQUIREMENTS:\n" + "\n".join(req_lines))
+
+    # Eligibility checklist
+    ec = da.get("eligibility_checklist") or []
+    if ec:
+        ec_lines = []
+        for item in ec:
+            status = item.get("altcarbon_status", "?")
+            icon = {"met": "✅", "likely_met": "🟡", "verify": "❓", "not_met": "❌"}.get(status, "•")
+            ec_lines.append(f"  {icon} {item.get('criterion', '')} — {status} — {item.get('note', '')}")
+        parts.append("ELIGIBILITY CHECKLIST (AltCarbon fit):\n" + "\n".join(ec_lines))
+
+    # Evaluation criteria
+    evc = da.get("evaluation_criteria") or []
+    if evc:
+        evc_lines = []
+        for item in evc:
+            w = f" ({item['weight']})" if item.get("weight") else ""
+            evc_lines.append(f"  • {item.get('criterion', '')}{w}: {item.get('what_they_look_for', '')}")
+        parts.append("EVALUATION CRITERIA (what reviewers look for):\n" + "\n".join(evc_lines))
+
+    # Application sections
+    asec = da.get("application_sections") or []
+    if asec:
+        asec_lines = []
+        for item in asec:
+            lim = f" [{item['limit']}]" if item.get("limit") else ""
+            asec_lines.append(f"  • {item.get('section', '')}{lim}: {item.get('what_to_cover', '')}")
+        parts.append("APPLICATION SECTIONS (expected structure):\n" + "\n".join(asec_lines))
+
+    # Funding terms
+    ft = da.get("funding_terms") or {}
+    if ft:
+        ft_lines = []
+        if ft.get("disbursement_schedule"):
+            ft_lines.append(f"  Disbursement: {ft['disbursement_schedule']}")
+        if ft.get("reporting_requirements"):
+            ft_lines.append(f"  Reporting: {ft['reporting_requirements']}")
+        if ft.get("ip_ownership"):
+            ft_lines.append(f"  IP ownership: {ft['ip_ownership']}")
+        for cost in ft.get("permitted_costs") or []:
+            ft_lines.append(f"  ✓ Permitted: {cost}")
+        for cost in ft.get("excluded_costs") or []:
+            ft_lines.append(f"  ✗ Excluded: {cost}")
+        if ft.get("audit_requirement"):
+            ft_lines.append(f"  Audit: {ft['audit_requirement']}")
+        if ft_lines:
+            parts.append("FUNDING TERMS:\n" + "\n".join(ft_lines))
+
+    # Deep analysis red flags (may differ from top-level)
+    da_rf = da.get("red_flags") or []
+    if da_rf:
+        parts.append("DEEP ANALYSIS RED FLAGS:\n" + "\n".join(f"  ⚠ {r}" for r in da_rf))
+
+    # Application tips
+    tips = da.get("application_tips") or []
+    if tips:
+        parts.append("APPLICATION TIPS:\n" + "\n".join(f"  💡 {t}" for t in tips))
+
+    # Detailed application process
+    if da.get("application_process_detailed"):
+        parts.append(f"DETAILED APPLICATION PROCESS:\n{da['application_process_detailed']}")
+
+    # Contact info
+    contact = da.get("contact") or {}
+    if any(contact.values()):
+        c_lines = []
+        if contact.get("name"):
+            c_lines.append(f"  Name: {contact['name']}")
+        if contact.get("email"):
+            c_lines.append(f"  Email: {contact['email']}")
+        for em in contact.get("emails_all") or []:
+            if em != contact.get("email"):
+                c_lines.append(f"  Also: {em}")
+        if contact.get("phone"):
+            c_lines.append(f"  Phone: {contact['phone']}")
+        if contact.get("office"):
+            c_lines.append(f"  Office: {contact['office']}")
+        if c_lines:
+            parts.append("CONTACT INFO:\n" + "\n".join(c_lines))
+
+    # Resources
+    res = da.get("resources") or {}
+    if any(res.values()):
+        res_lines = []
+        for url in res.get("brochure_urls") or []:
+            res_lines.append(f"  📄 Brochure/guideline: {url}")
+        for url in res.get("info_session_urls") or []:
+            res_lines.append(f"  🎥 Info session: {url}")
+        for url in res.get("template_urls") or []:
+            res_lines.append(f"  📋 Template: {url}")
+        if res.get("faq_url"):
+            res_lines.append(f"  ❓ FAQ: {res['faq_url']}")
+        if res.get("guidelines_url"):
+            res_lines.append(f"  📖 Guidelines: {res['guidelines_url']}")
+        if res_lines:
+            parts.append("RESOURCES & LINKS:\n" + "\n".join(res_lines))
+
+    # Similar grants
+    sg = da.get("similar_grants") or []
+    if sg:
+        parts.append("SIMILAR GRANTS / PREVIOUS ROUNDS:\n" + "\n".join(f"  • {g}" for g in sg))
+
+    # Past winners analysis
+    winners = da.get("winners") or []
+    if winners:
+        w_lines = []
+        for w in winners:
+            yr = f" ({w['year']})" if w.get("year") else ""
+            sim = w.get("altcarbon_similarity", "")
+            w_lines.append(
+                f"  • {w.get('name', '?')}{yr}"
+                f"{f' — {w.get(\"country\", \"\")}' if w.get('country') else ''}"
+                f" [{sim} similarity]: {w.get('project_brief', '')}"
+            )
+        parts.append("PAST WINNERS:\n" + "\n".join(w_lines))
+    if da.get("total_winners_found"):
+        parts.append(f"Total past winners found: {da['total_winners_found']}")
+    if da.get("altcarbon_comparable_count"):
+        parts.append(f"AltCarbon-comparable winners: {da['altcarbon_comparable_count']}")
+    if da.get("funder_pattern"):
+        parts.append(f"FUNDER PATTERN (who gets funded):\n{da['funder_pattern']}")
+    if da.get("altcarbon_fit_verdict"):
+        parts.append(f"AltCarbon fit verdict: {da['altcarbon_fit_verdict']}")
+    if da.get("strategic_note"):
+        parts.append(f"STRATEGIC NOTE:\n{da['strategic_note']}")
+
+    return "\n\n".join(parts)
+
+
 # ── Scout job state (in-process flag) ─────────────────────────────────────────
 _scout_running: bool = False
 _scout_started_at: Optional[str] = None
@@ -745,15 +983,8 @@ async def drafter_chat(
     grant_title = grant.get("grant_name") or grant.get("title") or "Unknown Grant"
     funder = grant.get("funder") or "Unknown"
 
-    # Extract grant deep_analysis for context
-    grant_deep = ""
-    da = grant.get("deep_analysis") or {}
-    grant_context_parts = []
-    for field in ["opportunity_summary", "key_dates", "requirements", "eligibility_checklist"]:
-        val = da.get(field)
-        if val:
-            grant_context_parts.append(f"{field}: {json.dumps(val) if isinstance(val, (dict, list)) else val}")
-    grant_deep = "\n".join(grant_context_parts)
+    # Build comprehensive grant context from ALL available fields
+    grant_deep = _build_grant_context(grant)
 
     # Resolve theme-specific sub-agent
     themes_detected = grant.get("themes_detected") or []
@@ -781,7 +1012,7 @@ async def drafter_chat(
         chunks = await db["knowledge_chunks"].find(theme_filter).limit(10).to_list(length=10)
         if not chunks and themes_detected:
             chunks = await db["knowledge_chunks"].find({}).limit(10).to_list(length=10)
-        chunks_text = "\n".join(c.get("text", "") for c in chunks if c.get("text"))[:3000]
+        chunks_text = "\n".join(c.get("content", "") for c in chunks if c.get("content"))[:3000]
     except Exception:
         pass
 
@@ -790,15 +1021,61 @@ async def drafter_chat(
     try:
         from backend.integrations.notion_mcp import notion_mcp
         if notion_mcp.connected:
-            # Search using the user message + grant title for better relevance
+            # Build smart search queries from the user message
+            # Start with the raw message, then extract key terms
             search_queries = [body.message[:80]]
+
+            # Extract individual meaningful words (3+ chars) for broader search
+            import re
+            stop_words = {
+                "the", "and", "for", "are", "but", "not", "you", "all",
+                "can", "had", "her", "was", "one", "our", "out", "has",
+                "what", "when", "who", "how", "list", "show", "tell",
+                "give", "find", "get", "about", "from", "with", "this",
+                "that", "have", "will", "been", "they", "them", "their",
+                "does", "which", "would", "could", "should", "into",
+                "also", "just", "than", "then", "some", "each", "make",
+            }
+            words = re.findall(r"[a-zA-Z]{3,}", body.message.lower())
+            key_words = [w for w in words if w not in stop_words]
+            # Search for individual key terms too
+            for kw in key_words[:3]:
+                search_queries.append(kw)
+
+            # Add broader company-related searches for org questions
+            org_keywords = {"team", "teams", "people", "staff", "member",
+                           "founder", "leadership", "organization", "structure"}
+            if org_keywords & set(words):
+                search_queries.extend(["introducing", "about", "team", "Alt Carbon"])
+
             if grant_title and grant_title != "Unknown Grant":
                 search_queries.append(grant_title[:80])
             if body.section_name:
                 search_queries.append(body.section_name[:60])
 
-            seen_page_ids: set = set()
+            # Deduplicate queries while preserving order
+            seen_queries: set = set()
+            unique_queries = []
             for sq in search_queries:
+                sq_lower = sq.lower().strip()
+                if sq_lower and sq_lower not in seen_queries:
+                    seen_queries.add(sq_lower)
+                    unique_queries.append(sq)
+
+            seen_page_ids: set = set()
+
+            # For org/team questions, directly fetch the "Introducing Alt Carbon" page
+            if org_keywords & set(words):
+                intro_page_id = "24750d0e-c20e-806c-b3a4-c7eae131c6e2"
+                try:
+                    intro_content = await notion_mcp.fetch_page(intro_page_id)
+                    if intro_content:
+                        seen_page_ids.add(intro_page_id)
+                        notion_context += f"\n---\n[Introducing Alt Carbon]\n{intro_content[:5000]}"
+                except Exception:
+                    pass
+
+            for sq in unique_queries:
                 try:
                     results = await notion_mcp.search(sq)
                     for r in results[:5]:
@@ -820,12 +1097,12 @@ async def drafter_chat(
                                         if isinstance(t, dict)
                                     )
                                     break
-                            notion_context += f"\n---\n[{ptitle or 'Notion Page'}]\n{page[:2000]}"
-                            if len(notion_context) > 8000:
+                            notion_context += f"\n---\n[{ptitle or 'Notion Page'}]\n{page[:3000]}"
+                            if len(notion_context) > 16000:
                                 break
                 except Exception:
                     continue
-                if len(notion_context) > 8000:
+                if len(notion_context) > 16000:
                     break
     except Exception:
         pass
@@ -833,11 +1110,11 @@ async def drafter_chat(
     # Combine context in priority order
     context_parts = []
     if static_profile:
-        context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:4000]}")
+        context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:6000]}")
     if chunks_text:
         context_parts.append(f"[KNOWLEDGE CHUNKS]\n{chunks_text}")
     if notion_context:
-        context_parts.append(f"[LIVE NOTION]\n{notion_context[:4000]}")
+        context_parts.append(f"[LIVE NOTION]\n{notion_context[:12000]}")
     company_context = "\n\n".join(context_parts)
 
     # Build chat history for context
@@ -934,6 +1211,460 @@ Write a well-structured response in markdown format:"""
     except Exception as e:
         logger.error("Drafter chat failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Drafter Chat — Streaming SSE endpoint
+# ---------------------------------------------------------------------------
+
+@app.post("/drafter/chat/stream")
+async def drafter_chat_stream(
+    body: DrafterChatRequest,
+    _: None = Depends(verify_internal),
+):
+    """Streaming version of /drafter/chat — sends Server-Sent Events.
+
+    Events:
+      event: status   data: {"step": "...", "detail": "..."}
+      event: token    data: {"content": "..."}
+      event: metadata data: {"word_count": N, "sources_used": [...], ...}
+      event: done     data: {}
+      event: error    data: {"message": "..."}
+    """
+    from starlette.responses import StreamingResponse
+    from backend.db.mongo import grants_scored, agent_config as agent_config_col
+    from backend.utils.llm import chat_stream, SONNET
+    from bson import ObjectId
+
+    async def generate():
+        try:
+            # ── Step 1: Load grant context ──
+            yield _sse("status", {"step": "Loading grant context", "detail": body.grant_id})
+
+            grant = {}
+            try:
+                grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)}) or {}
+            except Exception:
+                pass
+
+            grant_title = grant.get("grant_name") or grant.get("title") or "Unknown Grant"
+            funder = grant.get("funder") or "Unknown"
+
+            # Build comprehensive grant context from ALL available fields
+            grant_deep = _build_grant_context(grant)
+
+            themes_detected = grant.get("themes_detected") or []
+            primary_theme = themes_detected[0] if themes_detected else "climatetech"
+            agent_info = THEME_AGENTS.get(primary_theme, THEME_AGENTS["climatetech"])
+            agent_name = agent_info["name"]
+            agent_theme = primary_theme
+
+            # ── Step 2: Load all knowledge sources in parallel ──
+            yield _sse("status", {"step": "Searching knowledge base", "detail": "company profile + knowledge chunks + Notion"})
+
+            import asyncio as aio
+
+            async def _load_profile():
+                try:
+                    from backend.agents.company_brain import _load_static_profile
+                    return _load_static_profile() or ""
+                except Exception:
+                    return ""
+
+            async def _load_chunks():
+                try:
+                    from backend.db.mongo import get_db
+                    db = get_db()
+                    theme_filter = {"themes": {"$in": themes_detected}} if themes_detected else {}
+                    chunks = await db["knowledge_chunks"].find(theme_filter).limit(10).to_list(length=10)
+                    if not chunks and themes_detected:
+                        chunks = await db["knowledge_chunks"].find({}).limit(10).to_list(length=10)
+                    return "\n".join(c.get("content", "") for c in chunks if c.get("content"))[:3000]
+                except Exception:
+                    return ""
+
+            async def _load_notion():
+                try:
+                    from backend.integrations.notion_mcp import notion_mcp
+                    if not notion_mcp.connected:
+                        return ""
+                    import re
+                    notion_ctx = ""
+                    search_queries = [body.message[:80]]
+                    stop_words = {
+                        "the", "and", "for", "are", "but", "not", "you", "all",
+                        "can", "had", "her", "was", "one", "our", "out", "has",
+                        "what", "when", "who", "how", "list", "show", "tell",
+                        "give", "find", "get", "about", "from", "with", "this",
+                        "that", "have", "will", "been", "they", "them", "their",
+                        "does", "which", "would", "could", "should", "into",
+                        "also", "just", "than", "then", "some", "each", "make",
+                    }
+                    words = re.findall(r"[a-zA-Z]{3,}", body.message.lower())
+                    key_words = [w for w in words if w not in stop_words]
+                    for kw in key_words[:3]:
+                        search_queries.append(kw)
+                    if grant_title and grant_title != "Unknown Grant":
+                        search_queries.append(grant_title[:80])
+                    if body.section_name:
+                        search_queries.append(body.section_name[:60])
+
+                    seen_queries, unique_queries = set(), []
+                    for sq in search_queries:
+                        sq_lower = sq.lower().strip()
+                        if sq_lower and sq_lower not in seen_queries:
+                            seen_queries.add(sq_lower)
+                            unique_queries.append(sq)
+
+                    seen_page_ids = set()
+                    org_keywords = {"team", "teams", "people", "staff", "member",
+                                   "founder", "leadership", "organization", "structure"}
+                    if org_keywords & set(words):
+                        intro_page_id = "24750d0e-c20e-806c-b3a4-c7eae131c6e2"
+                        try:
+                            intro_content = await notion_mcp.fetch_page(intro_page_id)
+                            if intro_content:
+                                seen_page_ids.add(intro_page_id)
+                                notion_ctx += f"\n---\n[Introducing Alt Carbon]\n{intro_content[:5000]}"
+                        except Exception:
+                            pass
+
+                    for sq in unique_queries:
+                        try:
+                            results = await notion_mcp.search(sq)
+                            for r in results[:5]:
+                                pid = r.get("id", "")
+                                if pid in seen_page_ids:
+                                    continue
+                                seen_page_ids.add(pid)
+                                page = await notion_mcp.fetch_page(pid)
+                                if page:
+                                    ptitle = ""
+                                    props = r.get("properties", {})
+                                    for p in props.values():
+                                        if isinstance(p, dict) and p.get("type") == "title":
+                                            ta = p.get("title", [])
+                                            ptitle = "".join(t.get("plain_text", "") for t in ta if isinstance(t, dict))
+                                            break
+                                    notion_ctx += f"\n---\n[{ptitle or 'Notion Page'}]\n{page[:3000]}"
+                                    if len(notion_ctx) > 16000:
+                                        break
+                        except Exception:
+                            continue
+                        if len(notion_ctx) > 16000:
+                            break
+                    return notion_ctx
+                except Exception:
+                    return ""
+
+            static_profile, chunks_text, notion_context = await aio.gather(
+                _load_profile(), _load_chunks(), _load_notion()
+            )
+
+            # Report sources loaded
+            sources_used = []
+            if static_profile:
+                sources_used.append("company_profile")
+            if chunks_text:
+                sources_used.append("knowledge_chunks")
+            if notion_context:
+                sources_used.append("notion_live")
+            if grant_deep:
+                sources_used.append("grant_deep_analysis")
+
+            yield _sse("status", {"step": "Context ready", "detail": f"{len(sources_used)} sources loaded"})
+
+            # Combine context
+            context_parts = []
+            if static_profile:
+                context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:6000]}")
+            if chunks_text:
+                context_parts.append(f"[KNOWLEDGE CHUNKS]\n{chunks_text}")
+            if notion_context:
+                context_parts.append(f"[LIVE NOTION]\n{notion_context[:12000]}")
+            company_context = "\n\n".join(context_parts)
+
+            # Build chat history
+            history_block = ""
+            if body.chat_history:
+                history_lines = []
+                for msg in body.chat_history[-6:]:
+                    role = msg.get("role", "user").upper()
+                    content = msg.get("content", "")[:500]
+                    history_lines.append(f"[{role}]: {content}")
+                if history_lines:
+                    history_block = "CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n\n"
+
+            # Load drafter config overrides
+            drafter_cfg = await agent_config_col().find_one({"agent": "drafter"}) or {}
+            theme_overrides = (drafter_cfg.get("theme_settings") or {}).get(primary_theme) or {}
+            agent_tone = theme_overrides.get("tone") or agent_info.get("tone", "")
+            agent_voice = theme_overrides.get("voice") or agent_info.get("voice", "")
+            agent_temp = theme_overrides.get("temperature") or agent_info.get("temperature", 0.4)
+            custom_instructions = drafter_cfg.get("custom_instructions") or ""
+
+            system_prompt = f"""You are {agent_name}, a grant writing assistant for AltCarbon, a climate technology company.
+You help draft responses to grant application questions and requirements.
+
+TONE: {agent_tone}
+VOICE: {agent_voice}
+
+GRANT: {grant_title}
+FUNDER: {funder}
+
+{agent_info["expertise"]}
+
+{f"GRANT DETAILS:{chr(10)}{grant_deep}" if grant_deep else ""}
+
+{f"COMPANY KNOWLEDGE:{chr(10)}{company_context}" if company_context else ""}
+
+The COMPANY PROFILE section contains verified facts about AltCarbon — always use these for founding details, team, address, buyers, and technology specs. Never use placeholders like [YEAR] or [ADDRESS] when this data is available. The LIVE NOTION section has the latest information from the company workspace.
+
+{f"CUSTOM INSTRUCTIONS:{chr(10)}{custom_instructions}{chr(10)}" if custom_instructions else ""}INSTRUCTIONS:
+- Answer the user's question or draft the requested section
+- Adopt the TONE and VOICE described above consistently throughout your response
+- Be specific and concrete — use the company knowledge when available
+- Only flag [EVIDENCE NEEDED: brief description] for information truly absent from all provided knowledge sources
+- Do NOT invent statistics, team names, or technical claims
+- Format your response in clear markdown with headings, bold, and lists where appropriate
+- Stay focused on what the user asked
+
+SOURCE ATTRIBUTION:
+At the end of your response, add a "---" divider followed by a small "Sources" section listing which knowledge sources you drew from. Use these labels:
+- "Company Profile" — if you used facts from the [COMPANY PROFILE] section
+- "Knowledge Base" — if you used facts from the [KNOWLEDGE CHUNKS] section
+- "Notion (Live)" — if you used facts from the [LIVE NOTION] section
+- "Grant Analysis" — if you used facts from the GRANT DETAILS section
+Only list sources you actually referenced. Format as a compact comma-separated line, e.g.: **Sources:** Company Profile, Grant Analysis"""
+
+            user_prompt = f"""{history_block}USER MESSAGE:
+{body.message}
+
+Write a well-structured response in markdown format:"""
+
+            # ── Step 3: Stream LLM response ──
+            yield _sse("status", {"step": "Drafting response", "detail": agent_name})
+
+            full_content = ""
+            async for chunk in chat_stream(
+                user_prompt, model=SONNET, max_tokens=2048,
+                system=system_prompt, temperature=agent_temp,
+            ):
+                full_content += chunk
+                yield _sse("token", {"content": chunk})
+
+            # ── Step 4: Send metadata ──
+            import re
+            word_count = len(full_content.split())
+            evidence_gaps = re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", full_content)
+
+            yield _sse("metadata", {
+                "word_count": word_count,
+                "evidence_gaps": evidence_gaps,
+                "section_name": body.section_name,
+                "agent_name": agent_name,
+                "agent_theme": agent_theme,
+                "sources_used": sources_used,
+                "agent_temperature": agent_temp,
+            })
+
+            yield _sse("done", {})
+
+        except Exception as e:
+            logger.error("Drafter stream failed: %s", e, exc_info=True)
+            yield _sse("error", {"message": str(e)})
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+def _sse(event: str, data: dict) -> str:
+    """Format a Server-Sent Event."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Intelligence Brief — full grant dossier as structured JSON
+# ---------------------------------------------------------------------------
+
+class IntelligenceBriefRequest(BaseModel):
+    grant_id: str
+
+
+@app.post("/drafter/intelligence-brief")
+async def intelligence_brief(
+    body: IntelligenceBriefRequest,
+    _: None = Depends(verify_internal),
+):
+    """Return a comprehensive grant intelligence brief as structured JSON.
+
+    The frontend renders this into a downloadable .docx.
+    Contains: overview, eligibility, funding terms, evaluation criteria,
+    application structure, key dates, past winners, strategic analysis,
+    contact info, resources, and AI scoring.
+    """
+    from backend.db.mongo import grants_scored
+    from bson import ObjectId
+
+    grant = {}
+    try:
+        grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)}) or {}
+    except Exception:
+        raise HTTPException(status_code=404, detail="Grant not found")
+
+    if not grant:
+        raise HTTPException(status_code=404, detail="Grant not found")
+
+    da = grant.get("deep_analysis") or {}
+    contact = da.get("contact") or {}
+    resources = da.get("resources") or {}
+    ft = da.get("funding_terms") or {}
+    kd = da.get("key_dates") or {}
+    reqs = da.get("requirements") or {}
+
+    return {
+        "overview": {
+            "grant_name": grant.get("grant_name") or grant.get("title") or "",
+            "funder": grant.get("funder") or "",
+            "grant_type": grant.get("grant_type") or "",
+            "amount": grant.get("amount") or "",
+            "max_funding_usd": grant.get("max_funding_usd"),
+            "currency": grant.get("currency") or "",
+            "deadline": str(grant.get("deadline") or ""),
+            "days_to_deadline": grant.get("days_to_deadline"),
+            "deadline_urgent": grant.get("deadline_urgent", False),
+            "geography": grant.get("geography") or "",
+            "url": grant.get("url") or "",
+            "application_url": grant.get("application_url") or "",
+            "about_opportunity": grant.get("about_opportunity") or da.get("opportunity_summary") or "",
+            "themes_detected": grant.get("themes_detected") or [],
+        },
+        "eligibility": {
+            "summary": grant.get("eligibility") or "",
+            "details": grant.get("eligibility_details") or "",
+            "checklist": da.get("eligibility_checklist") or [],
+        },
+        "scoring": {
+            "weighted_total": grant.get("weighted_total"),
+            "scores": grant.get("scores") or {},
+            "recommended_action": grant.get("recommended_action") or "",
+            "rationale": grant.get("rationale") or "",
+            "reasoning": grant.get("reasoning") or "",
+            "evidence_found": grant.get("evidence_found") or [],
+            "evidence_gaps": grant.get("evidence_gaps") or [],
+            "red_flags": (grant.get("red_flags") or []) + (da.get("red_flags") or []),
+        },
+        "key_dates": kd,
+        "requirements": {
+            "documents_needed": reqs.get("documents_needed") or [],
+            "attachments": reqs.get("attachments") or [],
+            "submission_format": reqs.get("submission_format") or "",
+            "submission_portal": reqs.get("submission_portal") or "",
+            "word_page_limits": reqs.get("word_page_limits") or "",
+            "language": reqs.get("language") or "",
+            "co_funding_required": reqs.get("co_funding_required") or "",
+        },
+        "evaluation_criteria": da.get("evaluation_criteria") or [],
+        "application_sections": da.get("application_sections") or [],
+        "application_process": grant.get("application_process") or da.get("application_process_detailed") or "",
+        "funding_terms": {
+            "disbursement_schedule": ft.get("disbursement_schedule") or "",
+            "reporting_requirements": ft.get("reporting_requirements") or "",
+            "ip_ownership": ft.get("ip_ownership") or "",
+            "permitted_costs": ft.get("permitted_costs") or [],
+            "excluded_costs": ft.get("excluded_costs") or [],
+            "audit_requirement": ft.get("audit_requirement") or "",
+        },
+        "strategy": {
+            "strategic_angle": da.get("strategic_angle") or "",
+            "application_tips": da.get("application_tips") or [],
+            "funder_context": grant.get("funder_context") or "",
+            "funder_pattern": da.get("funder_pattern") or "",
+            "altcarbon_fit_verdict": da.get("altcarbon_fit_verdict") or "",
+            "strategic_note": da.get("strategic_note") or "",
+        },
+        "past_winners": {
+            "winners": da.get("winners") or [],
+            "total_winners_found": da.get("total_winners_found") or 0,
+            "altcarbon_comparable_count": da.get("altcarbon_comparable_count") or 0,
+        },
+        "contact": {
+            "name": contact.get("name") or "",
+            "email": contact.get("email") or "",
+            "emails_all": contact.get("emails_all") or [],
+            "phone": contact.get("phone") or "",
+            "office": contact.get("office") or "",
+        },
+        "resources": {
+            "brochure_urls": resources.get("brochure_urls") or [],
+            "info_session_urls": resources.get("info_session_urls") or [],
+            "template_urls": resources.get("template_urls") or [],
+            "faq_url": resources.get("faq_url") or "",
+            "guidelines_url": resources.get("guidelines_url") or "",
+        },
+        "similar_grants": da.get("similar_grants") or [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Drafter Chat History — persist & load chat per pipeline
+# ---------------------------------------------------------------------------
+
+class ChatHistorySaveRequest(BaseModel):
+    pipeline_id: str
+    grant_id: str
+    sections: dict  # { section_name: [ {role, content, timestamp, metadata?} ] }
+
+
+@app.get("/drafter/chat-history/{pipeline_id}")
+async def get_chat_history(
+    pipeline_id: str,
+    _: None = Depends(verify_internal),
+):
+    """Load persisted chat history for a pipeline."""
+    from backend.db.mongo import drafter_chat_history
+
+    doc = await drafter_chat_history().find_one({"pipeline_id": pipeline_id})
+    if not doc:
+        return {"pipeline_id": pipeline_id, "sections": {}}
+    doc.pop("_id", None)
+    return doc
+
+
+@app.put("/drafter/chat-history")
+async def save_chat_history(
+    body: ChatHistorySaveRequest,
+    _: None = Depends(verify_internal),
+):
+    """Save/upsert chat history for a pipeline (all sections at once)."""
+    from backend.db.mongo import drafter_chat_history
+
+    await drafter_chat_history().update_one(
+        {"pipeline_id": body.pipeline_id},
+        {"$set": {
+            "pipeline_id": body.pipeline_id,
+            "grant_id": body.grant_id,
+            "sections": body.sections,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True,
+    )
+    return {"status": "saved", "pipeline_id": body.pipeline_id}
+
+
+@app.delete("/drafter/chat-history/{pipeline_id}/{section_name}")
+async def clear_section_history(
+    pipeline_id: str,
+    section_name: str,
+    _: None = Depends(verify_internal),
+):
+    """Clear chat history for a single section within a pipeline."""
+    from backend.db.mongo import drafter_chat_history
+
+    await drafter_chat_history().update_one(
+        {"pipeline_id": pipeline_id},
+        {"$unset": {f"sections.{section_name}": ""}},
+    )
+    return {"status": "cleared", "pipeline_id": pipeline_id, "section_name": section_name}
 
 
 @app.post("/resume/start-draft")

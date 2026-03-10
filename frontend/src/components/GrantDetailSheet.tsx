@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback } from "react";
 import { ScoreRadar } from "./ScoreRadar";
 import { DeadlineChip } from "./DeadlineChip";
 import { StatusBadge } from "./StatusBadge";
+import { CommentThread } from "./CommentThread";
+import { GrantActivity } from "./GrantActivity";
 import {
   X,
   ExternalLink,
@@ -17,6 +19,8 @@ import {
   ChevronDown,
   ChevronUp,
   Loader2,
+  MessageSquare,
+  History,
 } from "lucide-react";
 
 interface GrantDetailSheetProps {
@@ -110,12 +114,12 @@ function Section({ title, children, defaultOpen = true }: {
     <div className="border-b border-gray-100 last:border-0">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between px-5 py-3 text-left hover:bg-gray-50"
+        className="flex w-full items-center justify-between px-6 py-3.5 text-left transition-colors hover:bg-gray-50/80"
       >
-        <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">{title}</span>
+        <span className="text-[11px] font-bold uppercase tracking-wider text-gray-500">{title}</span>
         {open ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
       </button>
-      {open && <div className="px-5 pb-4">{children}</div>}
+      {open && <div className="px-6 pb-5">{children}</div>}
     </div>
   );
 }
@@ -173,7 +177,7 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
         }`}
       >
         {/* Header */}
-        <div className="flex shrink-0 items-start justify-between border-b border-gray-200 bg-gray-50 px-5 py-4">
+        <div className="flex shrink-0 items-start justify-between border-b border-gray-200 bg-gradient-to-r from-gray-50 to-white px-6 py-5">
           {loading ? (
             <div className="flex items-center gap-2 text-gray-500">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -183,9 +187,9 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
             <p className="text-sm text-red-600">{error}</p>
           ) : grant ? (
             <div className="flex-1 min-w-0 pr-4">
-              <h2 className="font-semibold text-gray-900 leading-tight">{name}</h2>
-              {grant.funder && <p className="mt-0.5 text-sm text-gray-500">{grant.funder}</p>}
-              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <h2 className="text-lg font-bold text-gray-900 leading-tight">{name}</h2>
+              {grant.funder && <p className="mt-1 text-sm text-gray-500">{grant.funder}</p>}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
                 <StatusBadge status={grant.status} />
                 <span
                   className={`rounded-full px-2.5 py-0.5 text-sm font-bold ${
@@ -204,18 +208,19 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
           ) : null}
           <button
             onClick={onClose}
-            className="shrink-0 rounded-lg p-1.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600"
+            className="shrink-0 rounded-lg p-1.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600 transition-colors"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Scrollable body */}
+        {/* Scrollable body + collaboration */}
         {grant && (
+          <div className="flex flex-1 flex-col overflow-hidden">
           <div className="flex-1 overflow-y-auto">
 
             {/* Quick-facts row */}
-            <div className="grid grid-cols-3 gap-px border-b border-gray-100 bg-gray-100">
+            <div className="grid grid-cols-3 gap-px border-b border-gray-100 bg-gray-200/60">
               {[
                 { icon: Globe,     label: "Geography", value: grant.geography || "—" },
                 {
@@ -224,12 +229,12 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                 },
                 { icon: Clock,     label: "Deadline",  value: grant.deadline || "—" },
               ].map(({ icon: Icon, label, value }) => (
-                <div key={label} className="flex flex-col gap-0.5 bg-white px-4 py-3">
-                  <div className="flex items-center gap-1 text-xs text-gray-400">
-                    <Icon className="h-3 w-3" />
+                <div key={label} className="flex flex-col gap-1 bg-white px-4 py-3.5">
+                  <div className="flex items-center gap-1.5 text-[11px] font-medium text-gray-400">
+                    <Icon className="h-3.5 w-3.5" />
                     {label}
                   </div>
-                  <p className="text-sm font-medium text-gray-900 truncate">{value}</p>
+                  <p className="text-sm font-semibold text-gray-900 truncate">{value}</p>
                 </div>
               ))}
             </div>
@@ -465,9 +470,65 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
               </Section>
             )}
 
+            {/* ── Collaboration (inside scroll) ─────────────────── */}
+            <CollaborationPanel grantId={grant._id} grant={grant} />
+
+          </div>
           </div>
         )}
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Collaboration Panel — Discussion + Activity tabs
+// ---------------------------------------------------------------------------
+
+function CollaborationPanel({
+  grantId,
+  grant,
+}: {
+  grantId: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  grant: any;
+}) {
+  const [tab, setTab] = useState<"discussion" | "activity">("discussion");
+
+  return (
+    <div className="border-t border-gray-200 bg-white">
+      {/* Tab bar */}
+      <div className="sticky top-0 z-10 flex border-b border-gray-100 bg-white">
+        <button
+          onClick={() => setTab("discussion")}
+          className={`flex flex-1 items-center justify-center gap-1.5 px-4 py-3 text-xs font-semibold transition-colors ${
+            tab === "discussion"
+              ? "border-b-2 border-blue-600 text-blue-600"
+              : "text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          <MessageSquare className="h-3.5 w-3.5" />
+          Discussion
+        </button>
+        <button
+          onClick={() => setTab("activity")}
+          className={`flex flex-1 items-center justify-center gap-1.5 px-4 py-3 text-xs font-semibold transition-colors ${
+            tab === "activity"
+              ? "border-b-2 border-blue-600 text-blue-600"
+              : "text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          <History className="h-3.5 w-3.5" />
+          Activity
+        </button>
+      </div>
+
+      {/* Tab content */}
+      {tab === "discussion" ? (
+        <CommentThread grantId={grantId} />
+      ) : (
+        <GrantActivity grantId={grantId} grant={grant} />
+      )}
+    </div>
   );
 }

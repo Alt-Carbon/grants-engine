@@ -57,6 +57,9 @@ def scout_runs():
 def funder_context_cache():
     return get_db()["funder_context_cache"]
 
+def drafter_chat_history():
+    return get_db()["drafter_chat_history"]
+
 
 async def ensure_indexes():
     """Create all MongoDB indexes. Call once at startup. Skips indexes that already exist."""
@@ -119,3 +122,6 @@ async def ensure_indexes():
     # deep research cache (7-day TTL)
     await _idx("deep_research_cache", "url_hash", unique=True)
     await _idx("deep_research_cache", "cached_at", expireAfterSeconds=7 * 24 * 3600)
+
+    # drafter chat history
+    await _idx("drafter_chat_history", "pipeline_id", unique=True)

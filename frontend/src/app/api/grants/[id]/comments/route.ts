@@ -1,9 +1,10 @@
 import { getDb } from "@/lib/mongodb";
+import { triggerEvent } from "@/lib/pusher";
 import { NextRequest, NextResponse } from "next/server";
 
 /**
  * GET /api/grants/[id]/comments
- * Fetch all comments for a grant, sorted oldest-first.
+ * Fetch all comments for a grant. Pinned first, then oldest-first.
  */
 export async function GET(
   _req: NextRequest,
@@ -16,10 +17,20 @@ export async function GET(
     const comments = await db
       .collection("grant_comments")
       .find({ grant_id: id })
-      .sort({ created_at: 1 })
+      .sort({ pinned: -1, created_at: 1 })
       .toArray();
 
-    return NextResponse.json(comments);
+    // Serialize _id and parent_id
+    const result = comments.map((c) => ({
+      ...c,
+      _id: String(c._id),
+      parent_id: c.parent_id ? String(c.parent_id) : null,
+      pinned: c.pinned ?? false,
+      reactions: c.reactions ?? {},
+      edited_at: c.edited_at ?? null,
+    }));
+
+    return NextResponse.json(result);
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "Unknown error" },
@@ -30,8 +41,8 @@ export async function GET(
 
 /**
  * POST /api/grants/[id]/comments
- * Add a new comment to a grant.
- * Body: { user_name: string, message: string }
+ * Add a new comment or reply.
+ * Body: { user_name, user_email?, user_image?, message, parent_id? }
  */
 export async function POST(
   req: NextRequest,
@@ -39,7 +50,8 @@ export async function POST(
 ) {
   try {
     const { id } = await props.params;
-    const { user_name, message } = await req.json();
+    const body = await req.json();
+    const { user_name, user_email, user_image, message, parent_id } = body;
 
     if (!message || typeof message !== "string" || !message.trim()) {
       return NextResponse.json(
@@ -48,22 +60,32 @@ export async function POST(
       );
     }
 
-    const doc = {
+    const doc: Record<string, unknown> = {
       grant_id: id,
-      user_name: typeof user_name === "string" && user_name.trim()
-        ? user_name.trim()
-        : "Team Member",
+      user_name:
+        typeof user_name === "string" && user_name.trim()
+          ? user_name.trim()
+          : "Team Member",
       message: message.trim(),
       created_at: new Date().toISOString(),
+      parent_id: parent_id || null,
+      pinned: false,
+      pinned_at: null,
+      pinned_by: null,
+      reactions: {},
+      edited_at: null,
     };
+    if (user_email) doc.user_email = user_email;
+    if (user_image) doc.user_image = user_image;
 
     const db = await getDb();
     const result = await db.collection("grant_comments").insertOne(doc);
+    const comment = { ...doc, _id: String(result.insertedId) };
 
-    return NextResponse.json(
-      { ...doc, _id: result.insertedId },
-      { status: 201 }
-    );
+    // Real-time push
+    await triggerEvent(`grant-${id}`, "comment:new", { comment });
+
+    return NextResponse.json(comment, { status: 201 });
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "Unknown error" },

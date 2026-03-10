@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     google_refresh_token: str = ""
 
+    # Pinecone (vector DB — optional, falls back to MongoDB)
+    pinecone_api_key: str = ""
+    pinecone_index_name: str = "grants-engine"
+
     # Search tools
     tavily_api_key: str = ""
     exa_api_key: str = ""
