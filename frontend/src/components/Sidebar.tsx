@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
+import { useSession, signOut } from "next-auth/react";
 import {
   BarChart3,
   Kanban,
@@ -15,6 +16,7 @@ import {
   X,
   Activity,
   ScrollText,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AgentControls } from "./AgentControls";
@@ -33,6 +35,7 @@ const NAV = [
 export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { data: session } = useSession();
 
   const navContent = (
     <>
@@ -82,9 +85,41 @@ export function Sidebar() {
         <AgentControls />
       </div>
 
-      {/* Footer */}
+      {/* User & Sign out */}
       <div className="border-t border-gray-800 px-4 py-3">
-        <p className="text-xs text-gray-600">Internal tool &middot; v0.1</p>
+        {session?.user ? (
+          <div className="flex items-center gap-2">
+            {session.user.image ? (
+              <img
+                src={session.user.image}
+                alt=""
+                className="h-7 w-7 rounded-full ring-1 ring-gray-700"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gray-700 text-xs font-bold text-gray-300">
+                {(session.user.name ?? session.user.email ?? "?")[0].toUpperCase()}
+              </div>
+            )}
+            <div className="flex-1 min-w-0">
+              <p className="truncate text-xs font-medium text-gray-300">
+                {session.user.name ?? "User"}
+              </p>
+              <p className="truncate text-[10px] text-gray-600">
+                {session.user.email}
+              </p>
+            </div>
+            <button
+              onClick={() => signOut({ callbackUrl: "/login" })}
+              className="shrink-0 rounded p-1 text-gray-600 hover:bg-gray-800 hover:text-gray-400 transition-colors"
+              title="Sign out"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ) : (
+          <p className="text-xs text-gray-600">Internal tool &middot; v0.1</p>
+        )}
       </div>
     </>
   );

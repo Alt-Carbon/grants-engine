@@ -25,6 +25,9 @@ import {
   History,
   Settings,
   X,
+  Trash2,
+  Cloud,
+  CloudOff,
 } from "lucide-react";
 import { DrafterSettings } from "@/components/DrafterSettings";
 
@@ -348,6 +351,112 @@ function buildTimeline(
 let tileCounter = 100;
 
 // ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
+
+/** Convert in-memory chatHistories (keyed by pipelineId::tileId) to section-name-keyed format for DB */
+function serializeHistories(
+  tiles: Tile[],
+  pipelineId: string,
+  chatHistories: Record<string, ChatMessage[]>
+): Record<string, ChatMessage[]> {
+  const out: Record<string, ChatMessage[]> = {};
+  for (const tile of tiles) {
+    const key = buildKey(pipelineId, tile.id);
+    const msgs = chatHistories[key];
+    if (msgs && msgs.length > 0) {
+      out[tile.label] = msgs;
+    }
+  }
+  return out;
+}
+
+/** Save chat histories to backend */
+async function saveChatHistories(
+  pipelineId: string,
+  grantId: string,
+  tiles: Tile[],
+  chatHistories: Record<string, ChatMessage[]>
+): Promise<boolean> {
+  try {
+    const sections = serializeHistories(tiles, pipelineId, chatHistories);
+    await fetch("/api/drafter/chat-history", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pipeline_id: pipelineId,
+        grant_id: grantId,
+        sections,
+      }),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Load chat histories from backend */
+async function loadChatHistories(
+  pipelineId: string
+): Promise<Record<string, ChatMessage[]> | null> {
+  try {
+    const res = await fetch(
+      `/api/drafter/chat-history?pipeline_id=${encodeURIComponent(pipelineId)}`
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.sections ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Clear a single section's chat history */
+async function clearSectionHistory(
+  pipelineId: string,
+  sectionName: string
+): Promise<boolean> {
+  try {
+    const res = await fetch(
+      `/api/drafter/chat-history?pipeline_id=${encodeURIComponent(pipelineId)}&section_name=${encodeURIComponent(sectionName)}`,
+      { method: "DELETE" }
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Format date for date separators */
+function formatDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    if (d.toDateString() === today.toDateString()) return "Today";
+    if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
+    return d.toLocaleDateString(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return "";
+  }
+}
+
+/** Check if two timestamps are on different calendar days */
+function isDifferentDay(a: string, b: string): boolean {
+  try {
+    return new Date(a).toDateString() !== new Date(b).toDateString();
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main Component
 // ---------------------------------------------------------------------------
 
@@ -372,15 +481,23 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const [agentInfo, setAgentInfo] = useState<
     Record<string, { name: string; theme: string }>
   >({});
+  const [historyLoaded, setHistoryLoaded] = useState<Set<string>>(new Set());
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [clearingSection, setClearingSection] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chatHistoriesRef = useRef(chatHistories);
+  chatHistoriesRef.current = chatHistories;
+  const tilesRef = useRef<Tile[]>([]);
 
   // -- Derived ---------------------------------------------------------------
   const selectedPipeline = pipelines.find((p) => p._id === selectedId);
   const sections: Record<string, DraftSection> =
     selectedPipeline?.latest_draft?.sections ?? {};
   const tiles = tilesMap[selectedId] ?? [];
+  tilesRef.current = tiles;
   const activeTile = tiles.find((t) => t.id === activeTileId) ?? null;
   const activeKey = activeTile ? buildKey(selectedId, activeTile.id) : null;
   const activeMessages = activeKey ? chatHistories[activeKey] ?? [] : [];
@@ -452,6 +569,61 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       setActiveTileId(tiles[0].id);
     }
   }, [tiles, activeTileId]);
+
+  // -- Load persisted chat history from DB -----------------------------------
+  useEffect(() => {
+    if (!selectedId || !selectedPipeline || historyLoaded.has(selectedId)) return;
+    if (tiles.length === 0) return; // wait for tiles to be initialized
+
+    let cancelled = false;
+    (async () => {
+      const savedSections = await loadChatHistories(selectedId);
+      if (cancelled || !savedSections) {
+        setHistoryLoaded((prev) => new Set(prev).add(selectedId));
+        return;
+      }
+
+      setChatHistories((prev) => {
+        const next = { ...prev };
+        for (const tile of tiles) {
+          const key = buildKey(selectedId, tile.id);
+          const savedMsgs = savedSections[tile.label];
+          if (savedMsgs && savedMsgs.length > 0) {
+            // Persisted history takes priority over init-from-draft
+            next[key] = savedMsgs;
+            // Restore approved state
+            if (savedMsgs.some((m) => m.role === "system" && m.metadata?.status === "Approved")) {
+              setApprovedSections((s) => new Set(s).add(key));
+            }
+          }
+        }
+        return next;
+      });
+
+      setHistoryLoaded((prev) => new Set(prev).add(selectedId));
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, tiles.length]);
+
+  // -- Debounced auto-save (uses refs for latest state) ----------------------
+  const triggerSave = useCallback(() => {
+    if (!selectedPipeline) return;
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+
+    setSaveStatus("saving");
+    saveTimeoutRef.current = setTimeout(async () => {
+      const ok = await saveChatHistories(
+        selectedId,
+        selectedPipeline.grant_id,
+        tilesRef.current,
+        chatHistoriesRef.current
+      );
+      setSaveStatus(ok ? "saved" : "error");
+      setTimeout(() => setSaveStatus("idle"), 2000);
+    }, 800);
+  }, [selectedId, selectedPipeline]);
 
   // -- Auto-scroll -----------------------------------------------------------
   useEffect(() => {
@@ -580,13 +752,15 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         ...prev,
         [activeKey]: [...(prev[activeKey] ?? []), agentMsg],
       }));
+      // Auto-save after agent response (next tick so state is updated)
+      setTimeout(() => triggerSave(), 50);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to get revision");
     } finally {
       setSending(false);
       textareaRef.current?.focus();
     }
-  }, [activeKey, activeTile, selectedPipeline, inputValue, selectedId, chatHistories]);
+  }, [activeKey, activeTile, selectedPipeline, inputValue, selectedId, chatHistories, triggerSave]);
 
   // -- Approve section -------------------------------------------------------
   const approveSection = useCallback(async () => {
@@ -626,12 +800,13 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           },
         ],
       }));
+      setTimeout(() => triggerSave(), 50);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Approval failed");
     } finally {
       setApproving(false);
     }
-  }, [activeKey, activeTile, selectedPipeline, activeMessages]);
+  }, [activeKey, activeTile, selectedPipeline, activeMessages, triggerSave]);
 
   // -- Export ----------------------------------------------------------------
   const exportDraft = useCallback(() => {
@@ -659,6 +834,28 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     a.click();
     URL.revokeObjectURL(url);
   }, [selectedPipeline, tiles, chatHistories, selectedId]);
+
+  // -- Clear section chat ----------------------------------------------------
+  const clearChat = useCallback(async () => {
+    if (!activeKey || !activeTile || !selectedPipeline) return;
+    setClearingSection(true);
+    try {
+      await clearSectionHistory(selectedId, activeTile.label);
+      const pipelineTheme = getThemeForPipeline(selectedPipeline as { grant_themes?: string[] });
+      setChatHistories((prev) => ({
+        ...prev,
+        [activeKey]: [initSystemMessage(activeTile.label, pipelineTheme)],
+      }));
+      setApprovedSections((prev) => {
+        const next = new Set(prev);
+        next.delete(activeKey);
+        return next;
+      });
+      triggerSave();
+    } finally {
+      setClearingSection(false);
+    }
+  }, [activeKey, activeTile, selectedPipeline, selectedId, triggerSave]);
 
   // -- Enter key handler -----------------------------------------------------
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -871,6 +1068,16 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                               {msgCount} msg{msgCount !== 1 ? "s" : ""}
                             </span>
                           )}
+                          {(() => {
+                            const msgs = chatHistories[key] ?? [];
+                            const lastMsg = msgs.filter((m) => m.role !== "system").pop();
+                            if (!lastMsg) return null;
+                            return (
+                              <span className="text-[10px] text-gray-300" title={lastMsg.timestamp}>
+                                {formatDate(lastMsg.timestamp)}
+                              </span>
+                            );
+                          })()}
                         </div>
                       </>
                     )}
@@ -954,6 +1161,25 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
+                {/* Save status indicator */}
+                {saveStatus === "saving" && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-gray-400">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Saving...
+                  </span>
+                )}
+                {saveStatus === "saved" && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-green-500">
+                    <Cloud className="h-3 w-3" />
+                    Saved
+                  </span>
+                )}
+                {saveStatus === "error" && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-red-400">
+                    <CloudOff className="h-3 w-3" />
+                    Save failed
+                  </span>
+                )}
                 <span
                   className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${themeConfig.bg} ${themeConfig.color}`}
                 >
@@ -965,14 +1191,44 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                     Approved
                   </span>
                 )}
+                {/* Clear chat button */}
+                {activeMessages.length > 1 && (
+                  <button
+                    onClick={clearChat}
+                    disabled={clearingSection}
+                    className="flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 hover:bg-red-50 hover:text-red-500 transition-colors disabled:opacity-40"
+                    title="Clear chat history"
+                  >
+                    {clearingSection ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                )}
               </div>
             </div>
 
             {/* Chat messages */}
             <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
-              {activeMessages.map((msg, i) => (
-                <ChatBubble key={i} message={msg} />
-              ))}
+              {activeMessages.map((msg, i) => {
+                const showDateSep =
+                  i > 0 && isDifferentDay(activeMessages[i - 1].timestamp, msg.timestamp);
+                return (
+                  <div key={i}>
+                    {showDateSep && (
+                      <div className="flex items-center gap-3 py-2">
+                        <div className="flex-1 border-t border-gray-200" />
+                        <span className="text-[10px] font-medium text-gray-400 bg-gray-50 px-2 py-0.5 rounded-full">
+                          {formatDate(msg.timestamp)}
+                        </span>
+                        <div className="flex-1 border-t border-gray-200" />
+                      </div>
+                    )}
+                    <ChatBubble message={msg} />
+                  </div>
+                );
+              })}
 
               {/* Typing indicator */}
               {sending && (

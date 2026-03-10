@@ -781,7 +781,7 @@ async def drafter_chat(
         chunks = await db["knowledge_chunks"].find(theme_filter).limit(10).to_list(length=10)
         if not chunks and themes_detected:
             chunks = await db["knowledge_chunks"].find({}).limit(10).to_list(length=10)
-        chunks_text = "\n".join(c.get("text", "") for c in chunks if c.get("text"))[:3000]
+        chunks_text = "\n".join(c.get("content", "") for c in chunks if c.get("content"))[:3000]
     except Exception:
         pass
 
@@ -790,15 +790,61 @@ async def drafter_chat(
     try:
         from backend.integrations.notion_mcp import notion_mcp
         if notion_mcp.connected:
-            # Search using the user message + grant title for better relevance
+            # Build smart search queries from the user message
+            # Start with the raw message, then extract key terms
             search_queries = [body.message[:80]]
+
+            # Extract individual meaningful words (3+ chars) for broader search
+            import re
+            stop_words = {
+                "the", "and", "for", "are", "but", "not", "you", "all",
+                "can", "had", "her", "was", "one", "our", "out", "has",
+                "what", "when", "who", "how", "list", "show", "tell",
+                "give", "find", "get", "about", "from", "with", "this",
+                "that", "have", "will", "been", "they", "them", "their",
+                "does", "which", "would", "could", "should", "into",
+                "also", "just", "than", "then", "some", "each", "make",
+            }
+            words = re.findall(r"[a-zA-Z]{3,}", body.message.lower())
+            key_words = [w for w in words if w not in stop_words]
+            # Search for individual key terms too
+            for kw in key_words[:3]:
+                search_queries.append(kw)
+
+            # Add broader company-related searches for org questions
+            org_keywords = {"team", "teams", "people", "staff", "member",
+                           "founder", "leadership", "organization", "structure"}
+            if org_keywords & set(words):
+                search_queries.extend(["introducing", "about", "team", "Alt Carbon"])
+
             if grant_title and grant_title != "Unknown Grant":
                 search_queries.append(grant_title[:80])
             if body.section_name:
                 search_queries.append(body.section_name[:60])
 
-            seen_page_ids: set = set()
+            # Deduplicate queries while preserving order
+            seen_queries: set = set()
+            unique_queries = []
             for sq in search_queries:
+                sq_lower = sq.lower().strip()
+                if sq_lower and sq_lower not in seen_queries:
+                    seen_queries.add(sq_lower)
+                    unique_queries.append(sq)
+
+            seen_page_ids: set = set()
+
+            # For org/team questions, directly fetch the "Introducing Alt Carbon" page
+            if org_keywords & set(words):
+                intro_page_id = "24750d0e-c20e-806c-b3a4-c7eae131c6e2"
+                try:
+                    intro_content = await notion_mcp.fetch_page(intro_page_id)
+                    if intro_content:
+                        seen_page_ids.add(intro_page_id)
+                        notion_context += f"\n---\n[Introducing Alt Carbon]\n{intro_content[:5000]}"
+                except Exception:
+                    pass
+
+            for sq in unique_queries:
                 try:
                     results = await notion_mcp.search(sq)
                     for r in results[:5]:
@@ -820,12 +866,12 @@ async def drafter_chat(
                                         if isinstance(t, dict)
                                     )
                                     break
-                            notion_context += f"\n---\n[{ptitle or 'Notion Page'}]\n{page[:2000]}"
-                            if len(notion_context) > 8000:
+                            notion_context += f"\n---\n[{ptitle or 'Notion Page'}]\n{page[:3000]}"
+                            if len(notion_context) > 16000:
                                 break
                 except Exception:
                     continue
-                if len(notion_context) > 8000:
+                if len(notion_context) > 16000:
                     break
     except Exception:
         pass
@@ -833,11 +879,11 @@ async def drafter_chat(
     # Combine context in priority order
     context_parts = []
     if static_profile:
-        context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:4000]}")
+        context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:6000]}")
     if chunks_text:
         context_parts.append(f"[KNOWLEDGE CHUNKS]\n{chunks_text}")
     if notion_context:
-        context_parts.append(f"[LIVE NOTION]\n{notion_context[:4000]}")
+        context_parts.append(f"[LIVE NOTION]\n{notion_context[:12000]}")
     company_context = "\n\n".join(context_parts)
 
     # Build chat history for context
@@ -934,6 +980,68 @@ Write a well-structured response in markdown format:"""
     except Exception as e:
         logger.error("Drafter chat failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Drafter Chat History — persist & load chat per pipeline
+# ---------------------------------------------------------------------------
+
+class ChatHistorySaveRequest(BaseModel):
+    pipeline_id: str
+    grant_id: str
+    sections: dict  # { section_name: [ {role, content, timestamp, metadata?} ] }
+
+
+@app.get("/drafter/chat-history/{pipeline_id}")
+async def get_chat_history(
+    pipeline_id: str,
+    _: None = Depends(verify_internal),
+):
+    """Load persisted chat history for a pipeline."""
+    from backend.db.mongo import drafter_chat_history
+
+    doc = await drafter_chat_history().find_one({"pipeline_id": pipeline_id})
+    if not doc:
+        return {"pipeline_id": pipeline_id, "sections": {}}
+    doc.pop("_id", None)
+    return doc
+
+
+@app.put("/drafter/chat-history")
+async def save_chat_history(
+    body: ChatHistorySaveRequest,
+    _: None = Depends(verify_internal),
+):
+    """Save/upsert chat history for a pipeline (all sections at once)."""
+    from backend.db.mongo import drafter_chat_history
+
+    await drafter_chat_history().update_one(
+        {"pipeline_id": body.pipeline_id},
+        {"$set": {
+            "pipeline_id": body.pipeline_id,
+            "grant_id": body.grant_id,
+            "sections": body.sections,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True,
+    )
+    return {"status": "saved", "pipeline_id": body.pipeline_id}
+
+
+@app.delete("/drafter/chat-history/{pipeline_id}/{section_name}")
+async def clear_section_history(
+    pipeline_id: str,
+    section_name: str,
+    _: None = Depends(verify_internal),
+):
+    """Clear chat history for a single section within a pipeline."""
+    from backend.db.mongo import drafter_chat_history
+
+    await drafter_chat_history().update_one(
+        {"pipeline_id": pipeline_id},
+        {"$unset": {f"sections.{section_name}": ""}},
+    )
+    return {"status": "cleared", "pipeline_id": pipeline_id, "section_name": section_name}
 
 
 @app.post("/resume/start-draft")
