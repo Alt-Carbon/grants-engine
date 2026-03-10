@@ -12,6 +12,7 @@ import {
 import { GrantCard } from "./GrantCard";
 import { GrantDetailSheet } from "./GrantDetailSheet";
 import { useLastSeen, isNewSince } from "@/hooks/useLastSeen";
+import { useGrantUrl } from "@/hooks/useGrantUrl";
 import type { Grant } from "@/lib/queries";
 
 const COLUMNS = [
@@ -115,7 +116,7 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
   const [grants, setGrants] = useState<Record<string, Grant[]>>(initialGrants);
   const [updatingIds, setUpdatingIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
-  const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null);
+  const [selectedGrantId, setSelectedGrantId] = useGrantUrl();
   const [isDragging, setIsDragging] = useState(false);
   const [dragSourceCol, setDragSourceCol] = useState<ColumnId | null>(null);
   const { lastSeenAt } = useLastSeen();

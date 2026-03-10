@@ -6,6 +6,7 @@ import { DeadlineChip } from "./DeadlineChip";
 import { GrantDetailSheet } from "./GrantDetailSheet";
 import { getPriority, getThemeLabel } from "@/lib/utils";
 import { useLastSeen, isNewSince } from "@/hooks/useLastSeen";
+import { useGrantUrl } from "@/hooks/useGrantUrl";
 import type { Grant } from "@/lib/queries";
 import {
   ChevronUp,
@@ -98,7 +99,7 @@ export function PipelineTable({
   const [statusFilter, setStatusFilter] = useState<string>(defaultFilter);
   const [sortField, setSortField] = useState<SortField>("weighted_total");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null);
+  const [selectedGrantId, setSelectedGrantId] = useGrantUrl();
   const { lastSeenAt } = useLastSeen();
 
   // Mutable grant list — flattened from initial prop, updated optimistically

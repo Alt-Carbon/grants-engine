@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback } from "react";
 import { ScoreRadar } from "./ScoreRadar";
 import { DeadlineChip } from "./DeadlineChip";
 import { StatusBadge } from "./StatusBadge";
+import { CommentThread } from "./CommentThread";
+import { GrantActivity } from "./GrantActivity";
 import {
   X,
   ExternalLink,
@@ -17,6 +19,8 @@ import {
   ChevronDown,
   ChevronUp,
   Loader2,
+  MessageSquare,
+  History,
 } from "lucide-react";
 
 interface GrantDetailSheetProps {
@@ -467,7 +471,64 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
 
           </div>
         )}
+
+        {/* ── Collaboration panel (sticky bottom) ─────────────────── */}
+        {grant && (
+          <CollaborationPanel grantId={grant._id} grant={grant} />
+        )}
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Collaboration Panel — Discussion + Activity tabs
+// ---------------------------------------------------------------------------
+
+function CollaborationPanel({
+  grantId,
+  grant,
+}: {
+  grantId: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  grant: any;
+}) {
+  const [tab, setTab] = useState<"discussion" | "activity">("discussion");
+
+  return (
+    <div className="shrink-0 border-t border-gray-200 bg-white">
+      {/* Tab bar */}
+      <div className="flex border-b border-gray-100">
+        <button
+          onClick={() => setTab("discussion")}
+          className={`flex flex-1 items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-semibold transition-colors ${
+            tab === "discussion"
+              ? "border-b-2 border-blue-600 text-blue-600"
+              : "text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          <MessageSquare className="h-3.5 w-3.5" />
+          Discussion
+        </button>
+        <button
+          onClick={() => setTab("activity")}
+          className={`flex flex-1 items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-semibold transition-colors ${
+            tab === "activity"
+              ? "border-b-2 border-blue-600 text-blue-600"
+              : "text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          <History className="h-3.5 w-3.5" />
+          Activity
+        </button>
+      </div>
+
+      {/* Tab content */}
+      {tab === "discussion" ? (
+        <CommentThread grantId={grantId} />
+      ) : (
+        <GrantActivity grantId={grantId} grant={grant} />
+      )}
+    </div>
   );
 }
