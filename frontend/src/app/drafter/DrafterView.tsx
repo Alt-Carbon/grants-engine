@@ -533,6 +533,8 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   chatHistoriesRef.current = chatHistories;
   const tilesRef = useRef<Tile[]>([]);
   const abortRef = useRef<Record<string, AbortController>>({});
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const grantDataRef = useRef<Record<string, any>>({});
 
   // -- Derived ---------------------------------------------------------------
   const selectedPipeline = pipelines.find((p) => p._id === selectedId);
@@ -616,6 +618,21 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       setActiveTileId(tiles[0].id);
     }
   }, [tiles, activeTileId]);
+
+  // -- Preload full grant data for intelligence brief -------------------------
+  useEffect(() => {
+    if (!selectedPipeline?.grant_id) return;
+    const gid = selectedPipeline.grant_id;
+    if (grantDataRef.current[gid]) return; // already loaded
+    let cancelled = false;
+    fetch(`/api/grants/${encodeURIComponent(gid)}`, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled && data) grantDataRef.current[gid] = data;
+      })
+      .catch(() => {}); // silent — brief will retry on click
+    return () => { cancelled = true; };
+  }, [selectedPipeline?.grant_id]);
 
   // -- Load persisted chat history from DB -----------------------------------
   useEffect(() => {
@@ -1085,22 +1102,38 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   }, [activeKey, activeTile, selectedPipeline, selectedId, triggerSave]);
 
   // -- Download Intelligence Brief ------------------------------------------
-  const downloadIntelBrief = useCallback(async () => {
+  const downloadIntelBrief = useCallback(async (format: "md" | "pdf" = "md") => {
     if (!selectedPipeline || generatingBrief) return;
+    const grantId = selectedPipeline.grant_id;
+    if (!grantId) {
+      setError("No grant linked to this pipeline entry");
+      return;
+    }
     setGeneratingBrief(true);
     setError(null);
     try {
-      const res = await fetch("/api/drafter/intelligence-brief", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ grant_id: selectedPipeline.grant_id }),
-      });
-      if (!res.ok) throw new Error((await res.text()) || `Error ${res.status}`);
-      const data = await res.json();
-      const { generateIntelBrief } = await import("@/lib/generateIntelBrief");
-      await generateIntelBrief(data, selectedPipeline.grant_title);
+      // Use preloaded grant data if available, otherwise fetch
+      let grant = grantDataRef.current[grantId];
+      if (!grant) {
+        const res = await fetch(`/api/grants/${encodeURIComponent(grantId)}`, {
+          credentials: "same-origin",
+        });
+        if (!res.ok) throw new Error(`Could not load grant (${res.status})`);
+        grant = await res.json();
+        grantDataRef.current[grantId] = grant;
+      }
+      const { grantToBriefData, generateIntelBriefMd, generateIntelBriefPdf } =
+        await import("@/lib/generateIntelBrief");
+      const data = grantToBriefData(grant);
+      if (format === "pdf") {
+        await generateIntelBriefPdf(data, selectedPipeline.grant_title);
+      } else {
+        await generateIntelBriefMd(data, selectedPipeline.grant_title);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to generate brief");
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      console.error("[IntelBrief]", msg);
+      setError(`Brief failed: ${msg}`);
     } finally {
       setGeneratingBrief(false);
     }
@@ -1420,21 +1453,37 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
 
         {/* Export & Intelligence Brief */}
         <div className="border-t border-gray-100 p-3 space-y-2">
-          {/* Intelligence Brief — always available */}
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full gap-1.5 border-violet-200 text-violet-700 hover:bg-violet-50"
-            onClick={downloadIntelBrief}
-            disabled={generatingBrief}
-          >
-            {generatingBrief ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <FileText className="h-3.5 w-3.5" />
-            )}
-            {generatingBrief ? "Generating..." : "Intelligence Brief (.docx)"}
-          </Button>
+          {/* Intelligence Brief — .md and .pdf options */}
+          <div className="flex gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className="flex-1 gap-1.5 border-violet-200 text-violet-700 hover:bg-violet-50"
+              onClick={() => downloadIntelBrief("md")}
+              disabled={generatingBrief}
+            >
+              {generatingBrief ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <FileText className="h-3.5 w-3.5" />
+              )}
+              Brief .md
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="flex-1 gap-1.5 border-violet-200 text-violet-700 hover:bg-violet-50"
+              onClick={() => downloadIntelBrief("pdf")}
+              disabled={generatingBrief}
+            >
+              {generatingBrief ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <FileText className="h-3.5 w-3.5" />
+              )}
+              Brief .pdf
+            </Button>
+          </div>
 
           {/* Export Draft — only when all sections approved */}
           {allApproved && tiles.length > 0 && (
