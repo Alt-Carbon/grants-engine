@@ -2,7 +2,7 @@ import { getAgentConfig } from "@/lib/queries";
 import { ConfigEditor } from "./ConfigEditor";
 import type { AgentConfig } from "@/lib/queries";
 
-export const revalidate = 0;
+export const revalidate = 60; // ISR: refresh every 60s (config changes rarely)
 
 export default async function ConfigPage() {
   const configs = (await getAgentConfig()) as Record<string, AgentConfig>;

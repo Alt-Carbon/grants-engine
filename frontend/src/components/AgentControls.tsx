@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Telescope, Brain, Loader2, CheckCircle, AlertCircle } from "lucide-react";
+import { usePusherEvent } from "@/hooks/usePusher";
 
 interface ScoutStatus {
   running: boolean;
@@ -119,8 +120,18 @@ export function AgentControls() {
   const [scoutStatus, setScoutStatus] = useState<ScoutStatus | null>(null);
   const [analystStatus, setAnalystStatus] = useState<AnalystStatus | null>(null);
 
-  // Poll status every 5s while a job is running, else every 30s
-  const pollInterval = scoutState === "running" || analystState === "running" ? 5_000 : 30_000;
+  // Poll status every 5s while running, else every 60s (Pusher handles real-time)
+  const pollInterval = scoutState === "running" || analystState === "running" ? 5_000 : 60_000;
+
+  // Listen for Pusher agent-status events to reduce polling
+  usePusherEvent("agent-status", "scout_complete", () => {
+    setScoutState("done");
+    fetchStatus();
+  });
+  usePusherEvent("agent-status", "analyst_complete", () => {
+    setAnalystState("done");
+    fetchStatus();
+  });
 
   const fetchStatus = useCallback(async () => {
     try {

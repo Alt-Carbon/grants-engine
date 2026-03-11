@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -32,6 +32,7 @@ from backend.graph.graph import get_graph
 from backend.jobs.backfill_job import run_field_backfill, run_deduplication
 from backend.jobs.knowledge_job import run_knowledge_sync
 from backend.jobs.scout_job import run_scout_pipeline
+from backend.jobs.scheduler import setup_scheduler, teardown_scheduler, get_scheduler_status
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -339,7 +340,7 @@ def _build_grant_context(grant: dict) -> str:
             sim = w.get("altcarbon_similarity", "")
             w_lines.append(
                 f"  • {w.get('name', '?')}{yr}"
-                f"{f' — {w.get(\"country\", \"\")}' if w.get('country') else ''}"
+                f"{(' — ' + w.get('country', '')) if w.get('country') else ''}"
                 f" [{sim} similarity]: {w.get('project_brief', '')}"
             )
         parts.append("PAST WINNERS:\n" + "\n".join(w_lines))
@@ -384,7 +385,19 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Notion MCP startup failed (non-fatal): %s", exc)
 
+    # Start APScheduler (non-fatal)
+    try:
+        setup_scheduler()
+    except Exception as exc:
+        logger.warning("APScheduler startup failed (non-fatal): %s", exc)
+
     yield
+
+    # Shutdown scheduler
+    try:
+        teardown_scheduler()
+    except Exception:
+        pass
 
     # Shutdown MCP
     try:
@@ -449,6 +462,7 @@ class DrafterChatRequest(BaseModel):
     section_name: str
     message: str
     chat_history: Optional[list] = None  # [{role, content}, ...]
+    model: Optional[str] = None  # "gpt-5.4" | "opus-4.6" — user-selectable
 
 
 class UpdateGrantStatusRequest(BaseModel):
@@ -663,6 +677,250 @@ async def knowledge_sources_status():
     }
 
 
+@app.get("/status/documents-list")
+async def documents_list_status():
+    """Return articulation documents from the Documents List database with sync status."""
+    import re
+    from backend.integrations.notion_mcp import notion_mcp
+    from backend.integrations.notion_config import DOCUMENTS_LIST_DS
+    from backend.db.mongo import knowledge_chunks
+
+    if not notion_mcp.connected:
+        return {"documents": [], "error": "MCP not connected"}
+
+    try:
+        rows = await notion_mcp.query_data_source(DOCUMENTS_LIST_DS, limit=100)
+    except Exception as e:
+        logger.warning("Failed to query Documents List: %s", e)
+        return {"documents": [], "error": str(e)}
+
+    # Fetch sync status from MongoDB knowledge_chunks collection
+    col = knowledge_chunks()
+    sync_stats: dict = {}
+    try:
+        pipeline = [
+            {"$match": {"source": "documents_list"}},
+            {"$group": {
+                "_id": "$source_id",
+                "chunks": {"$sum": 1},
+                "total_chars": {"$sum": {"$strLenCP": "$content"}},
+                "last_synced": {"$max": "$last_synced"},
+            }},
+        ]
+        async for row in col.aggregate(pipeline):
+            sync_stats[row["_id"]] = {
+                "chunks": row["chunks"],
+                "total_chars": row["total_chars"],
+                "last_synced": row["last_synced"],
+            }
+    except Exception as e:
+        logger.debug("Failed to fetch sync stats: %s", e)
+
+    documents = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        doc_name = row.get("Document Name", "")
+        # Extract Google Drive URL from markdown link: [Title](url)
+        drive_url = None
+        display_name = doc_name
+        link_match = re.search(r'\[([^\]]+)\]\((https://docs\.google\.com/[^)]+)\)', doc_name)
+        if link_match:
+            display_name = link_match.group(1)
+            drive_url = link_match.group(2)
+        elif "docs.google.com" in doc_name:
+            url_match = re.search(r'(https://docs\.google\.com/\S+)', doc_name)
+            if url_match:
+                drive_url = url_match.group(1)
+
+        # Parse focus areas
+        focus_raw = row.get("Focus Area", "")
+        focus_areas = []
+        if isinstance(focus_raw, str) and focus_raw:
+            focus_areas = [f.strip() for f in focus_raw.split(",") if f.strip()]
+        elif isinstance(focus_raw, list):
+            focus_areas = focus_raw
+
+        page_id = row.get("url", "").rstrip("/").split("/")[-1]
+        stats = sync_stats.get(page_id, {})
+
+        documents.append({
+            "page_id": page_id,
+            "name": display_name.strip() if display_name else "Untitled",
+            "status": row.get("Status", "Not started"),
+            "focus_areas": focus_areas,
+            "drive_url": drive_url,
+            "support_from": row.get("Need support from", ""),
+            "notion_url": row.get("url", ""),
+            "sync_chunks": stats.get("chunks", 0),
+            "sync_chars": stats.get("total_chars", 0),
+            "last_synced": stats.get("last_synced"),
+        })
+
+    # Sort: In progress / Review first, then Not started
+    status_order = {"In progress": 0, "Review Pending": 1, "Review Completed": 2, "Done": 3, "Not started": 4}
+    documents.sort(key=lambda d: status_order.get(d["status"], 5))
+
+    synced_count = sum(1 for d in documents if d["sync_chunks"] > 0)
+
+    return {
+        "documents": documents,
+        "total": len(documents),
+        "synced": synced_count,
+        "articulation_structure": [
+            "Problem Statement",
+            "Existing Literature",
+            "Solution (Overview, Done so far, Needs to be done)",
+            "Why we are best suited",
+            "Academic & Industry Collaborators",
+            "Outputs",
+            "Outcomes",
+            "Project Plan & Timelines",
+            "Cobenefits",
+            "Unit Economics",
+            "Pricing",
+            "Budget Breakdown",
+        ],
+    }
+
+
+@app.get("/status/table-of-content")
+async def table_of_content_status():
+    """Return knowledge sources from the Table of Content (Grants DB) with sync status."""
+    import re
+    import httpx
+    from backend.config.settings import get_settings
+    from backend.integrations.notion_config import TABLE_OF_CONTENT_DS, TOC_THEME_MAP
+    from backend.db.mongo import knowledge_chunks
+
+    s = get_settings()
+    if not s.notion_token:
+        return {"sources": [], "error": "NOTION_TOKEN not set"}
+
+    # Query the Table of Content database via Notion REST API
+    headers = {
+        "Authorization": f"Bearer {s.notion_token}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+    rows = []
+    try:
+        cursor = None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                body: dict = {"page_size": 100}
+                if cursor:
+                    body["start_cursor"] = cursor
+                r = await client.post(
+                    f"https://api.notion.com/v1/databases/{TABLE_OF_CONTENT_DS}/query",
+                    headers=headers,
+                    json=body,
+                )
+                if r.status_code != 200:
+                    return {"sources": [], "error": f"Notion API {r.status_code}"}
+                data = r.json()
+                rows.extend(data.get("results", []))
+                cursor = data.get("next_cursor")
+                if not cursor:
+                    break
+    except Exception as e:
+        logger.warning("Failed to query Table of Content: %s", e)
+        return {"sources": [], "error": str(e)}
+
+    # Fetch sync stats from MongoDB
+    col = knowledge_chunks()
+    sync_stats: dict = {}
+    try:
+        pipeline = [
+            {"$match": {"source_registry": "table_of_content"}},
+            {"$group": {
+                "_id": "$source_id",
+                "chunks": {"$sum": 1},
+                "total_chars": {"$sum": {"$strLenCP": "$content"}},
+                "last_synced": {"$max": "$last_synced"},
+            }},
+        ]
+        async for row in col.aggregate(pipeline):
+            sync_stats[row["_id"]] = {
+                "chunks": row["chunks"],
+                "total_chars": row["total_chars"],
+                "last_synced": row["last_synced"],
+            }
+    except Exception as e:
+        logger.debug("Failed to fetch ToC sync stats: %s", e)
+
+    sources = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        props = row.get("properties", {})
+
+        # Title
+        doc_name = "".join(
+            t.get("plain_text", "")
+            for t in props.get("Document Name", {}).get("title", [])
+        ).strip()
+        display_name = re.sub(r'\*\*|<[^>]+>', '', doc_name).strip() or "Untitled"
+
+        # Content type (select)
+        content_type = (props.get("Content type", {}).get("select") or {}).get("name", "")
+
+        # URL
+        url_field = props.get("URL", {}).get("url") or ""
+
+        # Notion Page ID (rich_text)
+        notion_page_id_raw = "".join(
+            t.get("plain_text", "")
+            for t in props.get("Notion Page ID", {}).get("rich_text", [])
+        ).strip()
+
+        # Extra page url
+        extra_url = props.get("Extra page url", {}).get("url") or ""
+
+        # Content info (multi_select)
+        content_info = [
+            opt.get("name", "")
+            for opt in props.get("Content info", {}).get("multi_select", [])
+        ]
+        is_main = "Main-source" in content_info
+        themes = [TOC_THEME_MAP[t] for t in content_info if t in TOC_THEME_MAP]
+
+        # Parse Notion Page ID
+        notion_page_id = ""
+        if notion_page_id_raw:
+            id_match = re.search(r'([a-f0-9]{32})', notion_page_id_raw.replace("-", ""))
+            if id_match:
+                notion_page_id = id_match.group(1)
+
+        doc_id = notion_page_id or row.get("id", "").replace("-", "")
+        stats = sync_stats.get(doc_id, {})
+
+        sources.append({
+            "id": doc_id,
+            "name": display_name,
+            "content_type": content_type,
+            "is_main_source": is_main,
+            "themes": themes,
+            "url": url_field,
+            "notion_page_id": notion_page_id,
+            "extra_url": extra_url,
+            "sync_chunks": stats.get("chunks", 0),
+            "sync_chars": stats.get("total_chars", 0),
+            "last_synced": stats.get("last_synced"),
+        })
+
+    # Sort: main sources first, then by name
+    sources.sort(key=lambda s: (0 if s["is_main_source"] else 1, s["name"]))
+
+    return {
+        "sources": sources,
+        "total": len(sources),
+        "main_sources": sum(1 for s in sources if s["is_main_source"]),
+        "synced": sum(1 for s in sources if s["sync_chunks"] > 0),
+    }
+
+
 @app.get("/status/api-health")
 async def api_health_status():
     """Check credit/quota health of external APIs (Tavily, Exa, Perplexity, Jina)."""
@@ -688,7 +946,279 @@ async def scout_status():
     }
 
 
-# ── Cron endpoints (called by Vercel) ─────────────────────────────────────────
+# ── Scheduler endpoints ───────────────────────────────────────────────────────
+
+@app.get("/status/scheduler")
+async def scheduler_status():
+    """Return APScheduler jobs and next run times."""
+    return get_scheduler_status()
+
+
+@app.post("/scheduler/pause")
+async def pause_scheduler(_: None = Depends(verify_internal)):
+    """Pause all scheduled jobs."""
+    from backend.jobs.scheduler import scheduler
+    scheduler.pause()
+    return {"status": "paused"}
+
+
+@app.post("/scheduler/resume")
+async def resume_scheduler(_: None = Depends(verify_internal)):
+    """Resume all scheduled jobs."""
+    from backend.jobs.scheduler import scheduler
+    scheduler.resume()
+    return {"status": "resumed"}
+
+
+# ── Notification endpoints ────────────────────────────────────────────────────
+
+@app.get("/notifications")
+async def list_notifications(
+    limit: int = 30,
+    unread_only: bool = False,
+):
+    """List recent notifications (newest first)."""
+    db = get_db()
+    query: dict = {}
+    if unread_only:
+        query["read"] = False
+    docs = await db["notifications"].find(query).sort("created_at", -1).limit(limit).to_list(length=limit)
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return {"notifications": docs}
+
+
+@app.get("/notifications/count")
+async def notification_count():
+    """Return unread notification count (for bell badge)."""
+    db = get_db()
+    count = await db["notifications"].count_documents({"read": False})
+    return {"unread": count}
+
+
+@app.post("/notifications/read")
+async def mark_notifications_read(body: dict):
+    """Mark specific notifications as read. Body: { ids: [str] }"""
+    from bson import ObjectId
+    db = get_db()
+    ids = body.get("ids", [])
+    if ids:
+        obj_ids = [ObjectId(i) for i in ids]
+        await db["notifications"].update_many(
+            {"_id": {"$in": obj_ids}},
+            {"$set": {"read": True, "read_at": datetime.now(timezone.utc).isoformat()}},
+        )
+    return {"status": "ok", "marked": len(ids)}
+
+
+@app.post("/notifications/read-all")
+async def mark_all_notifications_read():
+    """Mark all notifications as read."""
+    db = get_db()
+    result = await db["notifications"].update_many(
+        {"read": False},
+        {"$set": {"read": True, "read_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"status": "ok", "marked": result.modified_count}
+
+
+# ── Notion Webhook ──────────────────────────────────────────────────────────
+
+@app.post("/webhooks/notion")
+async def notion_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """Receive Notion webhook events for real-time knowledge sync.
+
+    Handles:
+      - Verification handshake (returns verification_token)
+      - page.content_updated events → selective single-document re-sync
+    """
+    from backend.config.settings import get_settings
+    from backend.integrations.notion_webhooks import (
+        validate_signature, parse_event, get_known_source_ids,
+    )
+
+    body = await request.body()
+    payload = json.loads(body) if body else {}
+
+    # ── Verification handshake ──
+    if payload.get("type") == "url_verification":
+        token = payload.get("verification_token", "")
+        logger.info("Notion webhook verification handshake received")
+        return {"verification_token": token}
+
+    # ── Signature validation ──
+    s = get_settings()
+    if s.notion_webhook_secret:
+        signature = request.headers.get("x-notion-signature", "")
+        if not validate_signature(body, signature, s.notion_webhook_secret):
+            logger.warning("Notion webhook: invalid signature")
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+    # ── Event handling ──
+    event_type, page_id = parse_event(payload)
+    logger.info("Notion webhook: type=%s page_id=%s", event_type, page_id)
+
+    if event_type == "page.content_updated" and page_id:
+        # Check if this page is in our known knowledge sources
+        known_ids = await get_known_source_ids()
+        if page_id in known_ids:
+            logger.info("Notion webhook: queuing re-sync for known page %s", page_id)
+
+            async def _resync():
+                try:
+                    agent = _get_brain_agent()
+                    result = await agent.sync_single_document(page_id)
+                    logger.info("Webhook re-sync result: %s", result)
+                    # Notify on successful sync
+                    if result.get("status") == "synced":
+                        try:
+                            from backend.notifications.hub import notify
+                            await notify(
+                                event_type="knowledge_webhook_sync",
+                                title="Knowledge updated (webhook)",
+                                body=f"{result.get('source_title', page_id)}: {result.get('chunks_updated', 0)} chunks",
+                                action_url="/knowledge",
+                                metadata=result,
+                            )
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.error("Webhook re-sync failed for %s: %s", page_id, e)
+
+            background_tasks.add_task(_resync)
+        else:
+            logger.debug("Notion webhook: ignoring unknown page %s", page_id)
+
+    return {"status": "ok"}
+
+
+def _get_brain_agent():
+    """Helper to instantiate CompanyBrainAgent with current settings."""
+    from backend.agents.company_brain import CompanyBrainAgent
+    from backend.config.settings import get_settings
+    s = get_settings()
+    return CompanyBrainAgent(
+        notion_token=s.notion_token,
+        google_refresh_token=s.google_refresh_token,
+        google_client_id=s.google_client_id,
+        google_client_secret=s.google_client_secret,
+    )
+
+
+# ── Knowledge Pending Changes ────────────────────────────────────────────────
+
+@app.get("/status/knowledge-pending")
+async def knowledge_pending():
+    """Return pages where Notion last_edited_time > last_synced in MongoDB."""
+    import httpx
+    from backend.config.settings import get_settings
+    from backend.integrations.notion_config import TABLE_OF_CONTENT_DS
+    from backend.db.mongo import knowledge_chunks
+
+    s = get_settings()
+    if not s.notion_token:
+        return {"pending": [], "count": 0, "error": "NOTION_TOKEN not set"}
+
+    col = knowledge_chunks()
+
+    # Get all known sources with their last_synced times
+    sync_times: dict = {}
+    try:
+        pipeline = [
+            {"$match": {"source_id": {"$exists": True}}},
+            {"$group": {
+                "_id": "$source_id",
+                "last_synced": {"$max": "$last_synced"},
+                "source_title": {"$first": "$source_title"},
+            }},
+        ]
+        async for row in col.aggregate(pipeline):
+            sync_times[str(row["_id"])] = {
+                "last_synced": row.get("last_synced"),
+                "source_title": row.get("source_title", ""),
+            }
+    except Exception as e:
+        logger.warning("Failed to fetch sync times: %s", e)
+        return {"pending": [], "count": 0, "error": str(e)}
+
+    # Query Table of Content for page metadata (last_edited_time)
+    headers = {
+        "Authorization": f"Bearer {s.notion_token}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+    pending = []
+    try:
+        rows = []
+        cursor = None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                body: dict = {"page_size": 100}
+                if cursor:
+                    body["start_cursor"] = cursor
+                r = await client.post(
+                    f"https://api.notion.com/v1/databases/{TABLE_OF_CONTENT_DS}/query",
+                    headers=headers,
+                    json=body,
+                )
+                if r.status_code != 200:
+                    break
+                data = r.json()
+                rows.extend(data.get("results", []))
+                cursor = data.get("next_cursor")
+                if not cursor:
+                    break
+
+        import re
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            page_edited = row.get("last_edited_time", "")
+            props = row.get("properties", {})
+
+            # Extract Notion Page ID
+            notion_page_id_raw = "".join(
+                t.get("plain_text", "")
+                for t in props.get("Notion Page ID", {}).get("rich_text", [])
+            ).strip()
+            notion_page_id = ""
+            if notion_page_id_raw:
+                id_match = re.search(r'([a-f0-9]{32})', notion_page_id_raw.replace("-", ""))
+                if id_match:
+                    notion_page_id = id_match.group(1)
+
+            if not notion_page_id:
+                continue
+
+            # Title
+            doc_name = "".join(
+                t.get("plain_text", "")
+                for t in props.get("Document Name", {}).get("title", [])
+            ).strip()
+            display_name = re.sub(r'\*\*|<[^>]+>', '', doc_name).strip() or "Untitled"
+
+            # Compare times
+            sync_info = sync_times.get(notion_page_id, {})
+            last_synced = sync_info.get("last_synced", "")
+
+            if page_edited and last_synced and page_edited > last_synced:
+                pending.append({
+                    "page_id": notion_page_id,
+                    "title": display_name,
+                    "edited_at": page_edited,
+                    "last_synced": last_synced,
+                })
+
+    except Exception as e:
+        logger.warning("Failed to check pending changes: %s", e)
+
+    return {"pending": pending, "count": len(pending)}
+
+
+# ── Cron endpoints (kept for external triggers / backward compat) ─────────────
 
 @app.post("/cron/scout")
 async def cron_scout(
@@ -725,7 +1255,22 @@ async def manual_scout(
     async def _run():
         global _scout_running, _scout_started_at
         try:
-            await run_scout_pipeline()
+            result = await run_scout_pipeline()
+            # Emit scout completion notification
+            try:
+                from backend.notifications.hub import notify_scout_complete
+                await notify_scout_complete(
+                    new_grants=result.get("new_grants", 0) if isinstance(result, dict) else 0,
+                    total_found=result.get("total_found", 0) if isinstance(result, dict) else 0,
+                )
+            except Exception:
+                logger.debug("Scout notification failed", exc_info=True)
+        except Exception as e:
+            try:
+                from backend.notifications.hub import notify_agent_error
+                await notify_agent_error("scout", str(e))
+            except Exception:
+                pass
         finally:
             _scout_running = False
             _scout_started_at = None
@@ -831,6 +1376,30 @@ async def manual_analyst(
                 "input_count": len(raw_docs),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             })
+
+            # Emit analyst completion notification
+            try:
+                from backend.notifications.hub import notify_analyst_complete
+                triage_count = sum(1 for g in scored if g.get("status") == "triage")
+                pursue_count = sum(1 for g in scored if g.get("recommended_action") == "pursue")
+                await notify_analyst_complete(
+                    scored_count=scored_count,
+                    triage_count=triage_count,
+                    pursue_count=pursue_count,
+                )
+                # Notify for individual high-score grants
+                from backend.notifications.hub import notify_high_score_grant
+                for g in scored:
+                    wt = g.get("weighted_total", 0)
+                    if wt >= 7.0:
+                        await notify_high_score_grant(
+                            grant_name=g.get("grant_name") or g.get("title") or "Unknown",
+                            grant_id=str(g.get("_id", "")),
+                            score=wt,
+                            funder=g.get("funder", ""),
+                        )
+            except Exception:
+                logger.debug("Analyst notification failed", exc_info=True)
         except Exception as e:
             logger.error("Analyst run failed: %s", e)
             try:
@@ -844,6 +1413,11 @@ async def manual_analyst(
                 )
             except Exception:
                 logger.debug("Notion error sync skipped (analyst job)", exc_info=True)
+            try:
+                from backend.notifications.hub import notify_agent_error
+                await notify_agent_error("analyst", str(e))
+            except Exception:
+                pass
         finally:
             _analyst_running = False
             _analyst_started_at = None
@@ -970,8 +1544,11 @@ async def drafter_chat(
     This bypasses LangGraph for a synchronous chat experience.
     """
     from backend.db.mongo import grants_scored
-    from backend.utils.llm import chat as llm_chat, SONNET
+    from backend.utils.llm import chat as llm_chat, DRAFTER_DEFAULT, resolve_drafter_model
     from bson import ObjectId
+
+    # Resolve user-selected model (gpt-5.4 / opus-4.6)
+    drafter_model = resolve_drafter_model(body.model) if body.model else DRAFTER_DEFAULT
 
     # Load grant context
     grant = {}
@@ -1189,7 +1766,7 @@ Write a well-structured response in markdown format:"""
 
     try:
         content = await llm_chat(
-            prompt, model=SONNET, max_tokens=2048, system=system_prompt,
+            prompt, model=drafter_model, max_tokens=2048, system=system_prompt,
             temperature=agent_temp,
         )
         content = content.strip()
@@ -1207,6 +1784,7 @@ Write a well-structured response in markdown format:"""
             "agent_theme": agent_theme,
             "sources_used": sources_used,
             "agent_temperature": agent_temp,
+            "model": drafter_model,
         }
     except Exception as e:
         logger.error("Drafter chat failed: %s", e, exc_info=True)
@@ -1233,8 +1811,11 @@ async def drafter_chat_stream(
     """
     from starlette.responses import StreamingResponse
     from backend.db.mongo import grants_scored, agent_config as agent_config_col
-    from backend.utils.llm import chat_stream, SONNET
+    from backend.utils.llm import chat_stream, DRAFTER_DEFAULT, resolve_drafter_model
     from bson import ObjectId
+
+    # Resolve user-selected model
+    drafter_model = resolve_drafter_model(body.model) if body.model else DRAFTER_DEFAULT
 
     async def generate():
         try:
@@ -1447,7 +2028,7 @@ Write a well-structured response in markdown format:"""
 
             full_content = ""
             async for chunk in chat_stream(
-                user_prompt, model=SONNET, max_tokens=2048,
+                user_prompt, model=drafter_model, max_tokens=2048,
                 system=system_prompt, temperature=agent_temp,
             ):
                 full_content += chunk
@@ -1466,6 +2047,7 @@ Write a well-structured response in markdown format:"""
                 "agent_theme": agent_theme,
                 "sources_used": sources_used,
                 "agent_temperature": agent_temp,
+                "model": drafter_model,
             })
 
             yield _sse("done", {})

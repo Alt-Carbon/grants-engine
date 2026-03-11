@@ -514,6 +514,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [drafterModel, setDrafterModel] = useState<"gpt-5.4" | "opus-4.6">("gpt-5.4");
   const [agentInfo, setAgentInfo] = useState<
     Record<string, { name: string; theme: string }>
   >(cached?.agentInfo ?? {});
@@ -737,6 +738,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           message: userMessage,
           grant_id: pipeline.grant_id,
           chat_history: chatHistory,
+          model: drafterModel,
         }),
       });
 
@@ -809,6 +811,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
               message: userMessage,
               grant_id: pipeline.grant_id,
               chat_history: chatHistory,
+              model: drafterModel,
             }),
             signal: controller.signal,
           });
@@ -1748,9 +1751,33 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                     </button>
                   </div>
                   <div className="flex items-center justify-between px-1">
-                    <p className="text-[11px] text-gray-400">
-                      Enter to send &middot; Shift+Enter for new line
-                    </p>
+                    <div className="flex items-center gap-3">
+                      <p className="text-[11px] text-gray-400">
+                        Enter to send &middot; Shift+Enter for new line
+                      </p>
+                      <div className="flex items-center gap-1 rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+                        <button
+                          onClick={() => setDrafterModel("gpt-5.4")}
+                          className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-all ${
+                            drafterModel === "gpt-5.4"
+                              ? "bg-white text-gray-800 shadow-sm ring-1 ring-gray-200"
+                              : "text-gray-400 hover:text-gray-600"
+                          }`}
+                        >
+                          GPT-5.4
+                        </button>
+                        <button
+                          onClick={() => setDrafterModel("opus-4.6")}
+                          className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-all ${
+                            drafterModel === "opus-4.6"
+                              ? "bg-white text-violet-700 shadow-sm ring-1 ring-violet-200"
+                              : "text-gray-400 hover:text-gray-600"
+                          }`}
+                        >
+                          Opus 4.6
+                        </button>
+                      </div>
+                    </div>
                     {activeMessages.some((m) => m.role === "agent") && (
                       <Button
                         variant="outline"

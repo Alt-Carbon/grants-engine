@@ -105,9 +105,13 @@ async def ensure_indexes():
 
     # knowledge_chunks
     await _idx("knowledge_chunks", "source_id")
+    await _idx("knowledge_chunks", [("source_id", 1), ("chunk_index", 1)], unique=True)
     await _idx("knowledge_chunks", "doc_type")
     await _idx("knowledge_chunks", "themes")
+    await _idx("knowledge_chunks", "content_hash", sparse=True)
     await _idx("knowledge_chunks", "last_synced")
+    # NOTE: Vector search is handled by Pinecone Integrated Inference.
+    # MongoDB stores chunks as metadata/fallback only (no embeddings stored).
 
     # graph_checkpoints / audit_logs / config
     await _idx("graph_checkpoints", [("thread_id", 1), ("checkpoint_id", -1)])
@@ -125,3 +129,12 @@ async def ensure_indexes():
 
     # drafter chat history
     await _idx("drafter_chat_history", "pipeline_id", unique=True)
+
+    # notifications (30-day TTL auto-delete)
+    await _idx("notifications", [("user_email", 1), ("read", 1), ("created_at", -1)])
+    await _idx("notifications", "created_at", expireAfterSeconds=30 * 24 * 3600)
+    await _idx("notifications", [("type", 1), ("created_at", -1)])
+
+    # grant_comments (if not already covered)
+    await _idx("grant_comments", "grant_id")
+    await _idx("grant_comments", [("created_at", -1)])
