@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Dict, List, Optional
 
-from backend.utils.llm import chat, SONNET
+from backend.utils.llm import chat, DRAFTER_DEFAULT, resolve_drafter_model
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,7 @@ async def write_section(
     previous_content: Optional[str] = None,
     critique: Optional[str] = None,
     revision_instructions: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Dict:
     """Write or rewrite a single section. Returns section dict with content + metadata."""
 
@@ -114,7 +115,7 @@ async def write_section(
     )
 
     try:
-        content = await chat(prompt, model=SONNET, max_tokens=2048)
+        content = await chat(prompt, model=model or DRAFTER_DEFAULT, max_tokens=2048)
         content = content.strip()
     except Exception as e:
         logger.error("Section writer failed for %s: %s", section_name, e)

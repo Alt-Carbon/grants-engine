@@ -1,10 +1,13 @@
 import { getKnowledgeStatus, getSyncLogs } from "@/lib/queries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SyncButton } from "./SyncButton";
+import { PendingChangesBanner } from "./PendingChangesBanner";
+import { TableOfContent } from "./TableOfContent";
+import { DocumentsList } from "./DocumentsList";
 import { NotionSources } from "./NotionSources";
 import { Database, FileText, Cloud, CheckCircle, AlertTriangle, XCircle } from "lucide-react";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 60; // ISR: refresh every 60s (sync runs daily)
 
 function StatusChip({ status }: { status: "healthy" | "thin" | "critical" }) {
   const map = {
@@ -37,6 +40,9 @@ export default async function KnowledgePage() {
         <SyncButton />
       </div>
 
+      {/* Pending changes banner */}
+      <PendingChangesBanner />
+
       {/* Status card */}
       <Card>
         <CardHeader>
@@ -63,6 +69,12 @@ export default async function KnowledgePage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Knowledge Registry (Table of Content) */}
+      <TableOfContent />
+
+      {/* Grant Articulation Documents */}
+      <DocumentsList />
 
       {/* Notion Sources */}
       <NotionSources />
@@ -107,11 +119,11 @@ export default async function KnowledgePage() {
                     <p className="text-sm font-medium text-gray-900">
                       {String(log.source || "knowledge")} sync
                     </p>
-                    {log.chunks_added !== undefined && (
-                      <p className="text-xs text-gray-500">
-                        +{String(log.chunks_added)} chunks added
-                      </p>
-                    )}
+                    <p className="text-xs text-gray-500">
+                      {log.total_chunks !== undefined && `${String(log.total_chunks)} chunks saved`}
+                      {log.chunks_skipped ? ` · ${String(log.chunks_skipped)} skipped` : ""}
+                      {log.stale_deleted ? ` · ${String(log.stale_deleted)} stale cleaned` : ""}
+                    </p>
                   </div>
                   <span className="text-xs text-gray-400">
                     {log.synced_at ? new Date(String(log.synced_at)).toLocaleString() : "—"}

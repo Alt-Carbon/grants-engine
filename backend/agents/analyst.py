@@ -49,7 +49,7 @@ import httpx
 
 from backend.db.mongo import grants_raw, grants_scored, agent_config, audit_logs
 from backend.graph.state import GrantState
-from backend.utils.llm import chat, SONNET, HAIKU
+from backend.utils.llm import chat, ANALYST_HEAVY, ANALYST_LIGHT, ANALYST_FUNDER, SONNET, HAIKU
 from backend.utils.parsing import parse_json_safe, retry_async, api_health, CreditExhaustedError
 
 logger = logging.getLogger(__name__)
@@ -449,7 +449,7 @@ async def _resolve_unknown_currency(grant: Dict) -> Optional[Dict]:
     try:
         raw = await chat(
             prompt,
-            model=HAIKU,
+            model=ANALYST_LIGHT,
             max_tokens=256,
             system=_CURRENCY_RESOLUTION_SYSTEM,
         )
@@ -858,7 +858,7 @@ async def _perplexity_funder_research(
 
         async def _do_gw() -> str:
             response = await client.chat.completions.create(
-                model="perplexity/sonar",
+                model=ANALYST_FUNDER,
                 max_tokens=512,
                 messages=[{"role": "user", "content": user_msg}],
             )
@@ -957,7 +957,7 @@ async def _scrape_past_winners(grant: Dict) -> Dict:
             title=title, funder=funder, source_url=src, content=c
         )
         raw = await chat(
-            prompt, model=HAIKU, max_tokens=2048, system=WINNERS_EXTRACTION_SYSTEM
+            prompt, model=ANALYST_LIGHT, max_tokens=2048, system=WINNERS_EXTRACTION_SYSTEM
         )
         result = parse_json_safe(raw)
         return result if isinstance(result, dict) else {}
@@ -1074,7 +1074,7 @@ async def _deep_research_grant(
     try:
         # Run deep analysis (Sonnet) and past-winners scraping (Haiku) concurrently.
         # _scrape_past_winners never raises, so gather is safe without return_exceptions.
-        deep_task    = chat(prompt, model=SONNET, max_tokens=4096, system=DEEP_ANALYSIS_SYSTEM)
+        deep_task    = chat(prompt, model=ANALYST_HEAVY, max_tokens=4096, system=DEEP_ANALYSIS_SYSTEM)
         winners_task = _scrape_past_winners(grant)
 
         raw_text, winners_data = await asyncio.gather(deep_task, winners_task)
@@ -1194,7 +1194,7 @@ async def _extract_missing_mandatory(
     )
 
     try:
-        raw = await chat(prompt, model=HAIKU, max_tokens=512)
+        raw = await chat(prompt, model=ANALYST_LIGHT, max_tokens=512)
         result = parse_json_safe(raw)
         if not result:
             return None
@@ -1337,7 +1337,7 @@ async def _score_grant(
         try:
             raw_text = await chat(
                 prompt,
-                model=SONNET,
+                model=ANALYST_HEAVY,
                 max_tokens=2048,   # was 1024 — raised to prevent JSON truncation
                 system=SCORING_SYSTEM,
             )
@@ -1542,6 +1542,8 @@ def _build_scored_doc(
         "resources":       (deep_analysis or {}).get("resources") or {},
         "last_verified_date": grant.get("last_verified_date", ""),
         "past_winners_url":  grant.get("past_winners_url"),    # hint for analyst scraper
+        # ── Past winners (top-level for frontend — also nested in deep_analysis) ─
+        "past_winners":    (deep_analysis or {}).get("past_winners") or {},
         # ── Scoring ───────────────────────────────────────────────────────────
         "scores":          scores,
         "weighted_total":  weighted_total,
@@ -1686,25 +1688,60 @@ class AnalystAgent:
         )
 
         # ── Company knowledge (Notion/Drive) for Analyst prompts ───────────────
-        company_context = ""
+        # Base context: static profile (always available, cheap)
+        from backend.agents.company_brain import _load_static_profile
+        base_company_context = ""
+        _brain_agent = None
         try:
             from backend.agents.company_brain import CompanyBrainAgent
             from backend.config.settings import get_settings
-            s = get_settings()
-            if s.openai_api_key:
-                agent = CompanyBrainAgent(openai_api_key=s.openai_api_key)
-                company_context = await agent.get_company_overview(max_chars=4000)
-                if company_context:
-                    logger.info("Analyst: loaded %d chars of company knowledge", len(company_context))
+            _s = get_settings()
+            _brain_agent = CompanyBrainAgent(
+                notion_token=_s.notion_token,
+                google_refresh_token=_s.google_refresh_token,
+                google_client_id=_s.google_client_id,
+                google_client_secret=_s.google_client_secret,
+            )
+            base_company_context = await _brain_agent.get_company_overview(max_chars=3000)
+            if base_company_context:
+                logger.info("Analyst: loaded %d chars base company knowledge", len(base_company_context))
         except Exception as e:
             logger.debug("Company knowledge load skipped: %s", e)
+        if not base_company_context:
+            base_company_context = _load_static_profile()[:3000]
+            if base_company_context:
+                logger.info("Analyst: using static AltCarbon profile (%d chars)", len(base_company_context))
 
-        # Fallback: always ensure we have the static Notion-sourced profile
-        if not company_context:
-            from backend.agents.company_brain import _load_static_profile
-            company_context = _load_static_profile()[:4000]
-            if company_context:
-                logger.info("Analyst: using static AltCarbon profile (%d chars)", len(company_context))
+        async def _get_grant_knowledge(grant: Dict) -> str:
+            """Get grant-specific company knowledge via vector search.
+
+            Combines the base company profile with vector-retrieved chunks
+            that are relevant to this specific grant's themes and title.
+            """
+            if not _brain_agent:
+                return base_company_context
+
+            try:
+                title = grant.get("title") or grant.get("grant_name", "")
+                funder = grant.get("funder", "")
+                themes = grant.get("themes_detected") or []
+                eligibility = grant.get("eligibility", "")
+                query_text = f"{title} {funder} {eligibility} {' '.join(themes)}"
+                chunks = await _brain_agent.query(
+                    query_text, themes=themes or None, top_k=6,
+                )
+                if chunks:
+                    chunk_texts = [
+                        f"[{c.get('doc_type', 'misc')} | {c.get('source_title', '')}]\n"
+                        f"{c.get('content', '')}"
+                        for c in chunks
+                    ]
+                    vector_context = "\n---\n".join(chunk_texts)[:3000]
+                    return f"{base_company_context}\n\n--- Relevant knowledge for this grant ---\n{vector_context}"
+            except Exception as e:
+                logger.debug("Vector search for grant '%s' failed: %s",
+                             grant.get("title", ""), e)
+            return base_company_context
 
         # ── Perplexity funder enrichment (only for passing grants) ────────────
         unique_funders = list({g.get("funder", "") for g in passing_grants})
@@ -1721,7 +1758,7 @@ class AnalystAgent:
                 return funder, ctx
 
         funder_contexts: Dict[str, str] = {}
-        if unique_funders and self.perplexity_key:
+        if unique_funders and (self.perplexity_key or self.gateway_key):
             results = await asyncio.gather(*(enrich_funder(f) for f in unique_funders))
             funder_contexts = dict(results)
 
@@ -1732,6 +1769,8 @@ class AnalystAgent:
             async with score_sem:
                 funder = grant.get("funder", "")
                 ctx = funder_contexts.get(funder, "No funder research available.")
+                # Per-grant vector knowledge retrieval
+                company_context = await _get_grant_knowledge(grant)
                 return await _score_grant(
                     grant, ctx, self.weights, self.min_funding,
                     company_context=company_context,

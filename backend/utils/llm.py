@@ -24,34 +24,54 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-# ── Model constants ──────────────────────────────────────────────────────────
-# Testing with cheaper models; swap back to Anthropic for production:
-#   SONNET = "anthropic/claude-sonnet-4-6"
-#   HAIKU  = "anthropic/claude-haiku-4-5-20251001"
-SONNET = "google/gemini-2.5-flash-lite"
-HAIKU  = "openai/gpt-5-nano"
+# ── Per-agent model assignments ──────────────────────────────────────────────
+# Scout: GPT-5.4 for grant extraction/scraping
+SCOUT_MODEL = "openai/gpt-5.4"
+
+# Analyst: Opus for heavy scoring & deep research, GPT-5.4 for light tasks
+ANALYST_HEAVY = "anthropic/claude-opus-4-6"     # scoring, deep research
+ANALYST_LIGHT = "openai/gpt-5.4"               # currency resolution, winners, extraction
+ANALYST_FUNDER = "perplexity/sonar-deep-research"  # funder enrichment
+
+# Company Brain: GPT-5.4 for chunk tagging
+BRAIN_MODEL = "openai/gpt-5.4"
+
+# Drafter: user-selectable (default GPT-5.4, option for Opus)
+DRAFTER_DEFAULT = "openai/gpt-5.4"
+DRAFTER_MODELS = {
+    "gpt-5.4": "openai/gpt-5.4",
+    "opus-4.6": "anthropic/claude-opus-4-6",
+}
+
+# Backward-compatible aliases (used by agents that haven't migrated yet)
+SONNET = ANALYST_HEAVY
+HAIKU = ANALYST_LIGHT
 
 # ── Fallback chains ──────────────────────────────────────────────────────────
 # When a model's credits/quota are exhausted, try the next in chain.
-# Each chain is ordered: primary → cheaper alternative → Anthropic backstop.
 _FALLBACK_CHAINS: Dict[str, List[str]] = {
-    # SONNET-tier (heavy: scoring, deep research, drafter)
-    "google/gemini-2.5-flash-lite": [
-        "openai/gpt-5-nano",
+    # Opus-tier (heavy: scoring, deep research)
+    "anthropic/claude-opus-4-6": [
+        "openai/gpt-5.4",
         "anthropic/claude-sonnet-4-6",
     ],
+    # GPT-5.4-tier (medium: extraction, drafter, brain)
+    "openai/gpt-5.4": [
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-sonnet-4-6",
+    ],
+    # Legacy fallbacks (if any old code references these)
     "anthropic/claude-sonnet-4-6": [
-        "google/gemini-2.5-flash-lite",
-        "openai/gpt-5-nano",
+        "openai/gpt-5.4",
+        "anthropic/claude-opus-4-6",
     ],
-    # HAIKU-tier (light: extraction, currency, winners)
+    "google/gemini-2.5-flash-lite": [
+        "openai/gpt-5.4",
+        "anthropic/claude-opus-4-6",
+    ],
     "openai/gpt-5-nano": [
-        "google/gemini-2.5-flash-lite",
-        "anthropic/claude-haiku-4-5-20251001",
-    ],
-    "anthropic/claude-haiku-4-5-20251001": [
-        "openai/gpt-5-nano",
-        "google/gemini-2.5-flash-lite",
+        "openai/gpt-5.4",
+        "anthropic/claude-opus-4-6",
     ],
 }
 
@@ -295,3 +315,12 @@ async def chat_stream(
 
     error_msg = str(last_error)[:300] if last_error else "Unknown error"
     raise RuntimeError(f"All LLM models exhausted ({', '.join(models_tried)}). Last error: {error_msg}")
+
+
+def resolve_drafter_model(model_key: str) -> str:
+    """Resolve a user-facing drafter model key to the gateway model ID.
+
+    Accepts: "gpt-5.4", "opus-4.6", or a raw gateway model ID.
+    Returns: the full gateway model string.
+    """
+    return DRAFTER_MODELS.get(model_key, model_key)

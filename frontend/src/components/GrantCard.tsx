@@ -161,6 +161,19 @@ export function GrantCard({
             View
           </a>
         )}
+        {!compact && grant.notion_page_url && (
+          <a
+            href={grant.notion_page_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`inline-flex items-center gap-0.5 text-xs text-gray-500 hover:text-gray-800 hover:underline ${!grant.url ? "ml-auto" : ""}`}
+            onClick={(e) => e.stopPropagation()}
+            title="Open in Notion"
+          >
+            <svg className="h-3 w-3" viewBox="0 0 100 100" fill="currentColor"><path d="M6.6 12.4c4.1 3.3 5.6 3 13.3 2.5L81 8.1c1.6-.2 .2-1.6-.6-1.8L67.3.3C64.5-1.4 60.7.3 58.2 2.3L17.5 5.5c-2.4.2-2.9 1.4-1.2 2.5zm4.6 12.6v64.8c0 3.5 1.8 4.8 5.8 4.6l67-3.9c3.9-.2 4.4-2.6 4.4-5.5V21c0-2.9-1.2-4.4-3.7-4.2L16.9 20.7c-2.7.2-3.7 1.4-3.7 4.3zm65.7 1.6c.4 1.8 0 3.6-1.8 3.8l-3.2.6v47.8c-2.8 1.5-5.4 2.3-7.5 2.3-3.5 0-4.4-1.1-7-4L35.8 43v32.6l6.6 1.5s0 3.6-5.1 3.6l-14 .8c-.4-.8 0-2.9 1.5-3.2l3.9-1.1V36.4l-5.4-.4c-.4-1.8.6-4.4 3.5-4.6l15-.9L64 65V35l-5.6-.6c-.4-2.2 1.2-3.7 3.3-3.9z"/></svg>
+            Notion
+          </a>
+        )}
       </div>
 
       {grant.human_override && !compact && (

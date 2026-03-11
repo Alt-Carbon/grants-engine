@@ -85,6 +85,7 @@ async def _store_notion_url(mongo_id: str, notion_page_id: str) -> None:
 async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
     """Upsert a scored grant into the Notion Grant Pipeline database.
 
+    Syncs ALL grant fields as properties + full intelligence brief as page body.
     Returns the Notion page ID on success, None on failure.
     """
     try:
@@ -93,8 +94,9 @@ async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
         score = grant.get("weighted_total", 0) or 0
         status_raw = grant.get("status", "triage")
         themes_raw: list[str] = grant.get("themes_detected", []) or []
+        da = grant.get("deep_analysis") or {}
 
-        # Build properties dict
+        # Build properties dict — ALL important fields
         props: dict[str, Any] = {
             "Grant Name": {"title": [{"text": {"content": grant.get("grant_name") or grant.get("title") or "Unnamed"}}]},
             "Funder": {"rich_text": [{"text": {"content": grant.get("funder", "") or ""}}]},
@@ -102,14 +104,14 @@ async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
             "Priority": {"select": {"name": get_priority_label(score)}},
             "Status": {"select": {"name": STATUS_MAP.get(status_raw, "Triage")}},
             "Themes": {"multi_select": [{"name": THEME_DISPLAY.get(t, t)} for t in themes_raw if THEME_DISPLAY.get(t, t)]},
-            "Geography": {"rich_text": [{"text": {"content": grant.get("geography", "") or ""}}]},
+            "Geography": {"rich_text": [{"text": {"content": (grant.get("geography", "") or "")[:2000]}}]},
             "Grant Type": {"rich_text": [{"text": {"content": grant.get("grant_type", "") or ""}}]},
-            "Eligibility": {"rich_text": [{"text": {"content": (grant.get("eligibility", "") or "")[:2000]}}]},
+            "Eligibility": {"rich_text": [{"text": {"content": (grant.get("eligibility_details") or grant.get("eligibility") or "")[:2000]}}]},
             "AI Rationale": {"rich_text": [{"text": {"content": (grant.get("rationale", "") or "")[:2000]}}]},
             "MongoDB ID": {"rich_text": [{"text": {"content": mongo_id}}]},
         }
 
-        # Optional fields
+        # Optional core fields
         rec = grant.get("recommended_action")
         if rec:
             props["AI Recommendation"] = {"select": {"name": rec}}
@@ -118,33 +120,91 @@ async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
         if url:
             props["Grant URL"] = {"url": url}
 
+        app_url = grant.get("application_url")
+        if app_url:
+            props["Application URL"] = {"url": app_url}
+
         funding = grant.get("max_funding_usd") or grant.get("max_funding")
         if funding:
             props["Funding USD"] = {"number": funding}
+
+        amount_str = grant.get("amount")
+        if amount_str:
+            props["Ticket Size"] = {"rich_text": [{"text": {"content": str(amount_str)[:200]}}]}
+
+        currency = grant.get("currency")
+        if currency:
+            props["Currency"] = {"rich_text": [{"text": {"content": currency}}]}
 
         deadline = grant.get("deadline")
         if deadline:
             dl = deadline[:10] if isinstance(deadline, str) else deadline.strftime("%Y-%m-%d")
             props["Deadline"] = {"date": {"start": dl}}
 
+        if grant.get("deadline_urgent") is True:
+            props["Urgent"] = {"checkbox": True}
+
+        dtd = grant.get("days_to_deadline")
+        if dtd is not None:
+            props["Days Left"] = {"number": dtd}
+
         scored_at = grant.get("scored_at")
         if scored_at:
             sa = scored_at.isoformat() if hasattr(scored_at, "isoformat") else str(scored_at)[:10]
             props["Scored At"] = {"date": {"start": sa}}
+
+        # Deep analysis fields as properties (for filtering/sorting)
+        fit_verdict = da.get("altcarbon_fit_verdict")
+        if fit_verdict:
+            props["AltCarbon Fit"] = {"select": {"name": fit_verdict.title()}}
+
+        contact = da.get("contact") or {}
+        contact_email = contact.get("email") or ""
+        if contact_email:
+            props["Contact Email"] = {"email": contact_email}
+
+        winners = da.get("winners") or []
+        if winners:
+            props["Past Winners"] = {"number": len(winners)}
+
+        # Score breakdown as rich_text
+        scores = grant.get("scores") or {}
+        if scores:
+            score_lines = [f"{k.replace('_', ' ').title()}: {v}/10" for k, v in scores.items()]
+            props["Score Breakdown"] = {"rich_text": [{"text": {"content": "\n".join(score_lines)[:2000]}}]}
+
+        # Strategic angle summary
+        if da.get("strategic_angle"):
+            props["Strategic Angle"] = {"rich_text": [{"text": {"content": da["strategic_angle"][:2000]}}]}
+
+        # ── Page body: full intelligence brief ──
+        children = _build_grant_page_body(grant, da)
 
         # Upsert: check if page exists
         existing_id = await _find_page_by_mongo_id(GRANT_PIPELINE_DS, mongo_id)
 
         if existing_id:
             await client.pages.update(page_id=existing_id, properties=props)
+            # Replace page body: archive old blocks, add new ones
+            try:
+                old_blocks = await client.blocks.children.list(block_id=existing_id)
+                for block in old_blocks.get("results", []):
+                    try:
+                        await client.blocks.delete(block_id=block["id"])
+                    except Exception:
+                        pass
+                if children:
+                    await client.blocks.children.append(block_id=existing_id, children=children)
+            except Exception:
+                log.debug("Failed to update page body for %s", existing_id, exc_info=True)
             log.info("Notion: updated grant %s (%s)", mongo_id, existing_id)
-            # Store Notion page URL back in MongoDB for cross-linking
             await _store_notion_url(mongo_id, existing_id)
             return existing_id
         else:
             page = await client.pages.create(
                 parent={"database_id": GRANT_PIPELINE_DS},
                 properties=props,
+                children=children if children else None,
             )
             log.info("Notion: created grant %s (%s)", mongo_id, page["id"])
             await _store_notion_url(mongo_id, page["id"])
@@ -153,6 +213,229 @@ async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
     except Exception:
         log.warning("Notion sync_scored_grant failed", exc_info=True)
         return None
+
+
+def _build_grant_page_body(grant: dict, da: dict) -> list[dict]:
+    """Build rich Notion page body blocks with full grant intelligence."""
+    blocks: list[dict] = []
+
+    def _h2(text: str):
+        blocks.append({"object": "block", "type": "heading_2", "heading_2": {
+            "rich_text": [{"text": {"content": text}}]}})
+
+    def _h3(text: str):
+        blocks.append({"object": "block", "type": "heading_3", "heading_3": {
+            "rich_text": [{"text": {"content": text}}]}})
+
+    def _para(text: str):
+        if not text:
+            return
+        for chunk in [text[i:i + 1900] for i in range(0, len(text), 1900)]:
+            blocks.append({"object": "block", "type": "paragraph", "paragraph": {
+                "rich_text": [{"text": {"content": chunk}}]}})
+
+    def _bullet(text: str):
+        blocks.append({"object": "block", "type": "bulleted_list_item",
+                        "bulleted_list_item": {"rich_text": [{"text": {"content": text[:2000]}}]}})
+
+    def _callout(text: str, emoji: str = "💡"):
+        blocks.append({"object": "block", "type": "callout", "callout": {
+            "icon": {"type": "emoji", "emoji": emoji},
+            "rich_text": [{"text": {"content": text[:2000]}}]}})
+
+    def _divider():
+        blocks.append({"object": "block", "type": "divider", "divider": {}})
+
+    # ── Overview ──
+    _h2("Grant Overview")
+    overview_parts = []
+    if grant.get("amount"):
+        overview_parts.append(f"Funding: {grant['amount']}")
+    if grant.get("max_funding_usd"):
+        overview_parts.append(f"Max (USD): ${grant['max_funding_usd']:,.0f}")
+    if grant.get("deadline"):
+        overview_parts.append(f"Deadline: {grant['deadline']}")
+    dtd = grant.get("days_to_deadline")
+    if dtd is not None:
+        overview_parts.append(f"Days left: {dtd}")
+    if grant.get("geography"):
+        overview_parts.append(f"Geography: {grant['geography']}")
+    if grant.get("grant_type"):
+        overview_parts.append(f"Type: {grant['grant_type']}")
+    for p in overview_parts:
+        _bullet(p)
+
+    if grant.get("about_opportunity") or da.get("opportunity_summary"):
+        _h3("About")
+        _para(grant.get("about_opportunity") or da.get("opportunity_summary", ""))
+
+    # ── Eligibility ──
+    _divider()
+    _h2("Eligibility")
+    _para(grant.get("eligibility_details") or grant.get("eligibility") or "")
+
+    ec = da.get("eligibility_checklist") or []
+    if ec:
+        _h3("AltCarbon Eligibility Checklist")
+        status_icons = {"met": "✅", "likely_met": "🟡", "verify": "❓", "not_met": "❌"}
+        for item in ec:
+            s = item.get("altcarbon_status", "verify")
+            _bullet(f"{status_icons.get(s, '•')} {item.get('criterion', '')} — {s} — {item.get('note', '')}")
+
+    # ── Scoring ──
+    _divider()
+    _h2("AI Scoring")
+    scores = grant.get("scores") or {}
+    wt = grant.get("weighted_total")
+    if wt is not None:
+        _callout(f"Overall Score: {wt:.1f} / 10 — Recommendation: {grant.get('recommended_action', '').upper()}", "🎯")
+    for k, v in scores.items():
+        _bullet(f"{k.replace('_', ' ').title()}: {v}/10")
+    if grant.get("rationale"):
+        _h3("Rationale")
+        _para(grant["rationale"])
+    if grant.get("reasoning"):
+        _h3("Strategic Reasoning")
+        _para(grant["reasoning"])
+
+    # Evidence
+    ef = grant.get("evidence_found") or []
+    if ef:
+        _h3("Evidence Found")
+        for e in ef:
+            _bullet(f"✅ {e}")
+    eg = grant.get("evidence_gaps") or []
+    if eg:
+        _h3("Evidence Gaps")
+        for e in eg:
+            _bullet(f"⚠️ {e}")
+    rf = (grant.get("red_flags") or []) + (da.get("red_flags") or [])
+    if rf:
+        _h3("Red Flags")
+        for r in rf:
+            _bullet(f"🚩 {r}")
+
+    # ── Key Dates ──
+    kd = da.get("key_dates") or {}
+    if any(kd.values()):
+        _divider()
+        _h2("Key Dates & Timelines")
+        for k, v in kd.items():
+            if v:
+                _bullet(f"{k.replace('_', ' ').title()}: {v}")
+
+    # ── Requirements ──
+    reqs = da.get("requirements") or {}
+    if reqs:
+        _divider()
+        _h2("Application Requirements")
+        for doc in reqs.get("documents_needed") or []:
+            _bullet(f"📄 {doc}")
+        for att in reqs.get("attachments") or []:
+            _bullet(f"📎 {att}")
+        if reqs.get("submission_format"):
+            _bullet(f"Format: {reqs['submission_format']}")
+        if reqs.get("word_page_limits"):
+            _bullet(f"Limits: {reqs['word_page_limits']}")
+        if reqs.get("co_funding_required"):
+            _bullet(f"Co-funding: {reqs['co_funding_required']}")
+
+    if grant.get("application_process") or da.get("application_process_detailed"):
+        _h3("Application Process")
+        _para(grant.get("application_process") or da.get("application_process_detailed", ""))
+
+    # ── Evaluation Criteria ──
+    evc = da.get("evaluation_criteria") or []
+    if evc:
+        _divider()
+        _h2("Evaluation Criteria")
+        for item in evc:
+            w = f" ({item['weight']})" if item.get("weight") else ""
+            _bullet(f"{item.get('criterion', '')}{w}: {item.get('what_they_look_for', '')}")
+
+    # ── Funding Terms ──
+    ft = da.get("funding_terms") or {}
+    if any(ft.values()):
+        _divider()
+        _h2("Funding Terms")
+        if ft.get("disbursement_schedule"):
+            _bullet(f"Disbursement: {ft['disbursement_schedule']}")
+        if ft.get("reporting_requirements"):
+            _bullet(f"Reporting: {ft['reporting_requirements']}")
+        if ft.get("ip_ownership"):
+            _bullet(f"IP: {ft['ip_ownership']}")
+        for c in ft.get("permitted_costs") or []:
+            _bullet(f"✓ Permitted: {c}")
+        for c in ft.get("excluded_costs") or []:
+            _bullet(f"✗ Excluded: {c}")
+
+    # ── Strategy ──
+    _divider()
+    _h2("Strategy")
+    if da.get("strategic_angle"):
+        _callout(da["strategic_angle"], "🎯")
+    if da.get("altcarbon_fit_verdict"):
+        _bullet(f"AltCarbon fit: {da['altcarbon_fit_verdict'].upper()}")
+    if da.get("strategic_note"):
+        _para(da["strategic_note"])
+    if grant.get("funder_context"):
+        _h3("Funder Background")
+        _para(grant["funder_context"])
+    if da.get("funder_pattern"):
+        _h3("Funder Pattern")
+        _para(da["funder_pattern"])
+
+    tips = da.get("application_tips") or []
+    if tips:
+        _h3("Application Tips")
+        for t in tips:
+            _bullet(f"💡 {t}")
+
+    # ── Past Winners ──
+    winners = da.get("winners") or []
+    if winners:
+        _divider()
+        _h2("Past Winners")
+        if da.get("total_winners_found"):
+            _bullet(f"Total found: {da['total_winners_found']}")
+        if da.get("altcarbon_comparable_count"):
+            _bullet(f"AltCarbon-comparable: {da['altcarbon_comparable_count']}")
+        for w in winners:
+            yr = f" ({w['year']})" if w.get("year") else ""
+            sim = f" [{w.get('altcarbon_similarity', '')}]" if w.get("altcarbon_similarity") else ""
+            _bullet(f"{w.get('name', '?')}{yr}{sim}: {w.get('project_brief', '')}")
+
+    # ── Contact ──
+    contact = da.get("contact") or {}
+    if any(contact.values()):
+        _divider()
+        _h2("Contact")
+        if contact.get("name"):
+            _bullet(f"Name: {contact['name']}")
+        if contact.get("email"):
+            _bullet(f"Email: {contact['email']}")
+        if contact.get("phone"):
+            _bullet(f"Phone: {contact['phone']}")
+        if contact.get("office"):
+            _bullet(f"Office: {contact['office']}")
+
+    # ── Resources ──
+    resources = da.get("resources") or {}
+    if any(resources.values()):
+        _divider()
+        _h2("Resources & Links")
+        for u in resources.get("brochure_urls") or []:
+            _bullet(f"📄 {u}")
+        for u in resources.get("info_session_urls") or []:
+            _bullet(f"🎥 {u}")
+        for u in resources.get("template_urls") or []:
+            _bullet(f"📋 {u}")
+        if resources.get("faq_url"):
+            _bullet(f"❓ FAQ: {resources['faq_url']}")
+        if resources.get("guidelines_url"):
+            _bullet(f"📖 Guidelines: {resources['guidelines_url']}")
+
+    return blocks
 
 
 async def update_grant_status(mongo_id: str, new_status: str) -> bool:

@@ -33,6 +33,7 @@ export interface Grant {
   application_url?: string;
   scored_at?: string;
   scraped_at?: string;
+  notion_page_url?: string;
 }
 
 export interface PipelineRecord {
@@ -212,42 +213,72 @@ export async function getTriageQueue(): Promise<Grant[]> {
 
 export async function getDraftGrants(): Promise<PipelineRecord[]> {
   const db = await getDb();
+
+  // Use $lookup to avoid N+1 queries (was: sequential findOne per pipeline)
   const pipelines = await db
     .collection("grants_pipeline")
-    .find({ status: { $in: ["drafting", "draft_complete"] } })
-    .sort({ started_at: -1 })
+    .aggregate([
+      { $match: { status: { $in: ["drafting", "draft_complete"] } } },
+      { $sort: { started_at: -1 } },
+      {
+        $addFields: {
+          _grant_oid: {
+            $cond: {
+              if: { $ne: ["$grant_id", null] },
+              then: { $toObjectId: "$grant_id" },
+              else: null,
+            },
+          },
+        },
+      },
+      {
+        $lookup: {
+          from: "grants_scored",
+          localField: "_grant_oid",
+          foreignField: "_id",
+          as: "_grant",
+        },
+      },
+      {
+        $lookup: {
+          from: "grant_drafts",
+          let: { pid: { $toString: "$_id" } },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$pipeline_id", "$$pid"] } } },
+            { $sort: { version: -1 } },
+            { $limit: 1 },
+          ],
+          as: "_drafts",
+        },
+      },
+      {
+        $addFields: {
+          grant_title: {
+            $ifNull: [
+              { $arrayElemAt: ["$_grant.grant_name", 0] },
+              { $ifNull: [{ $arrayElemAt: ["$_grant.title", 0] }, "Unknown Grant"] },
+            ],
+          },
+          grant_funder: { $ifNull: [{ $arrayElemAt: ["$_grant.funder", 0] }, ""] },
+          grant_themes: { $ifNull: [{ $arrayElemAt: ["$_grant.themes_detected", 0] }, []] },
+          latest_draft: { $arrayElemAt: ["$_drafts", 0] },
+        },
+      },
+      {
+        $project: { _grant: 0, _drafts: 0, _grant_oid: 0 },
+      },
+    ])
     .toArray();
 
-  const result: PipelineRecord[] = [];
-
-  for (const p of pipelines) {
-    const pid = serializeId(p as Record<string, unknown>) as unknown as PipelineRecord;
-
-    // Enrich with grant title/funder
-    if (p.grant_id) {
-      const { ObjectId } = await import("mongodb");
-      const grant = await db
-        .collection("grants_scored")
-        .findOne({ _id: new ObjectId(p.grant_id as string) });
-      if (grant) {
-        pid.grant_title = (grant.grant_name as string) || (grant.title as string) || "Unknown Grant";
-        pid.grant_funder = (grant.funder as string) || "";
-        pid.grant_themes = (grant.themes_detected as string[]) || [];
-      }
+  return pipelines.map((p) => {
+    const rec = serializeId(p as Record<string, unknown>) as unknown as PipelineRecord;
+    if (rec.latest_draft) {
+      rec.latest_draft = serializeId(
+        rec.latest_draft as unknown as Record<string, unknown>
+      ) as unknown as DraftDoc;
     }
-
-    // Attach latest draft
-    const draft = await db
-      .collection("grant_drafts")
-      .findOne({ pipeline_id: pid._id }, { sort: { version: -1 } });
-    if (draft) {
-      pid.latest_draft = serializeId(draft as Record<string, unknown>) as unknown as DraftDoc;
-    }
-
-    result.push(pid);
-  }
-
-  return result;
+    return rec;
+  });
 }
 
 export async function getSections(pipelineId: string): Promise<Record<string, DraftSection>> {
@@ -817,4 +848,60 @@ export async function getWhatsNewDigest(since: string): Promise<WhatsNewDigest> 
     topNewGrants,
     recentAgentRuns,
   };
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+export interface Notification {
+  _id: string;
+  type: string;
+  title: string;
+  body: string;
+  action_url: string;
+  priority: string;
+  read: boolean;
+  read_at: string | null;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+export async function getNotifications(
+  limit = 30,
+  unreadOnly = false,
+): Promise<Notification[]> {
+  const db = await getDb();
+  const query: Record<string, unknown> = {};
+  if (unreadOnly) query.read = false;
+
+  const docs = await db
+    .collection("notifications")
+    .find(query)
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray();
+
+  return docs.map((d) => serializeId(d as Record<string, unknown>) as unknown as Notification);
+}
+
+export async function getUnreadNotificationCount(): Promise<number> {
+  const db = await getDb();
+  return db.collection("notifications").countDocuments({ read: false });
+}
+
+export async function markNotificationsRead(ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const { ObjectId } = await import("mongodb");
+  const db = await getDb();
+  await db.collection("notifications").updateMany(
+    { _id: { $in: ids.map((id) => new ObjectId(id)) } },
+    { $set: { read: true, read_at: new Date().toISOString() } },
+  );
+}
+
+export async function markAllNotificationsRead(): Promise<void> {
+  const db = await getDb();
+  await db.collection("notifications").updateMany(
+    { read: false },
+    { $set: { read: true, read_at: new Date().toISOString() } },
+  );
 }

@@ -11,13 +11,13 @@ NOTION_KNOWLEDGE_BASE_PAGE_ID = os.getenv("NOTION_KNOWLEDGE_BASE_PAGE_ID", "").s
 # ── Parent page ──────────────────────────────────────────────────────────────
 MISSION_CONTROL_PAGE_ID = os.getenv(
     "NOTION_MISSION_CONTROL_PAGE_ID",
-    "31679a8e-f08b-815a-9575-c79db12a67f9",
+    "30b50d0e-c20e-8057-aee5-f775b9902c95",
 )
 
 # ── Data-source (collection) IDs ─────────────────────────────────────────────
 GRANT_PIPELINE_DS = os.getenv(
     "NOTION_GRANT_PIPELINE_DS",
-    "70548113-9b80-4210-8659-a90a0745b2ec",
+    "8e9cd5d9-0239-4072-8233-6006aa184e48",
 )
 AGENT_RUNS_DS = os.getenv(
     "NOTION_AGENT_RUNS_DS",
@@ -39,6 +39,25 @@ KNOWLEDGE_CONNECTIONS_DS = os.getenv(
     "NOTION_KNOWLEDGE_CONNECTIONS_DS",
     "1ce5cd69-d174-40bc-9c6a-8277e7a692a4",
 )
+DOCUMENTS_LIST_DS = os.getenv(
+    "NOTION_DOCUMENTS_LIST_DS",
+    "30d50d0e-c20e-8062-bdb6-000b82620d34",
+)
+# ── Table of Content (Grants DB — primary knowledge registry) ────────────
+TABLE_OF_CONTENT_DS = os.getenv(
+    "NOTION_TABLE_OF_CONTENT_DS",
+    "31f50d0e-c20e-80d1-b22a-e7124bd9103e",
+)
+
+# ── Theme mapping: Table of Content "Content info" → internal theme keys ──
+TOC_THEME_MAP = {
+    "theme - Climate tech": "climatetech",
+    "theme - Agritech": "agritech",
+    "theme - AI for sciences": "ai_for_sciences",
+    "theme - Advanced earth sciences": "applied_earth_sciences",
+    "theme - Deeptech": "deeptech",
+    "theme - general": "general",
+}
 
 # ── Theme key → Notion multi-select display name ─────────────────────────────
 THEME_DISPLAY = {
