@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Dict, List
 
 from backend.graph.state import GrantState
-from backend.utils.llm import chat, SONNET
+from backend.utils.llm import chat, DRAFTER_DEFAULT
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ async def reviewer_node(state: GrantState) -> Dict:
     )
 
     try:
-        raw = await chat(prompt, model=SONNET, max_tokens=2048)
+        raw = await chat(prompt, model=DRAFTER_DEFAULT, max_tokens=2048)
         raw = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]

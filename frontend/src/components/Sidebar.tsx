@@ -26,6 +26,7 @@ import {
   NOTION_WORKSPACE_URL,
 } from "@/lib/deployment";
 import { AgentControls } from "./AgentControls";
+import { NotificationBell } from "./NotificationBell";
 
 interface NavItem {
   href: string;
@@ -69,7 +70,7 @@ export function Sidebar() {
 
   const navContent = (
     <>
-      {/* Logo */}
+      {/* Logo + Notifications */}
       <div className="flex h-14 items-center justify-between border-b border-gray-800 px-4">
         <div className="flex items-center gap-2">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -78,13 +79,16 @@ export function Sidebar() {
             Grants Engine
           </span>
         </div>
-        {/* Close button — mobile only */}
-        <button
-          onClick={() => setMobileOpen(false)}
-          className="rounded p-1 text-gray-400 hover:text-white lg:hidden"
-        >
-          <X className="h-5 w-5" />
-        </button>
+        <div className="flex items-center gap-1">
+          <NotificationBell />
+          {/* Close button — mobile only */}
+          <button
+            onClick={() => setMobileOpen(false)}
+            className="rounded p-1 text-gray-400 hover:text-white lg:hidden"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
       </div>
 
       {/* Nav */}

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from backend.utils.llm import chat, SONNET
+from backend.utils.llm import chat, DRAFTER_DEFAULT
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,7 @@ async def parse_grant_document(raw_content: str) -> Dict:
 
     prompt = PARSE_PROMPT.format(content=raw_content[:8000])
     try:
-        raw = await chat(prompt, model=SONNET, max_tokens=2048)
+        raw = await chat(prompt, model=DRAFTER_DEFAULT, max_tokens=2048)
         raw = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]

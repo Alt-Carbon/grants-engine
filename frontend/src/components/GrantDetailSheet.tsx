@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { ScoreRadar } from "./ScoreRadar";
 import { DeadlineChip } from "./DeadlineChip";
 import { StatusBadge } from "./StatusBadge";
@@ -21,6 +22,7 @@ import {
   Loader2,
   MessageSquare,
   History,
+  Maximize2,
 } from "lucide-react";
 
 interface GrantDetailSheetProps {
@@ -46,6 +48,14 @@ interface Requirements {
   word_page_limits?: string;
   co_funding_required?: string;
 }
+interface FundingTerms {
+  disbursement_schedule?: string;
+  reporting_requirements?: string;
+  ip_ownership?: string;
+  permitted_costs?: string[];
+  excluded_costs?: string[];
+  audit_requirement?: string;
+}
 interface DeepAnalysis {
   eligibility_checklist?: EligibilityCheck[];
   key_dates?: KeyDates;
@@ -54,7 +64,13 @@ interface DeepAnalysis {
   red_flags?: string[];
   strategic_angle?: string;
   application_tips?: string[];
-  contact?: { name?: string; email?: string; office?: string };
+  contact?: { name?: string; email?: string; emails_all?: string[]; phone?: string; office?: string };
+  funding_terms?: FundingTerms;
+  past_winners?: PastWinners;
+  application_sections?: { section: string; limit?: string; what_to_cover: string }[];
+  similar_grants?: string[];
+  opportunity_summary?: string;
+  application_process_detailed?: string;
 }
 interface PastWinners {
   funder_pattern?: string;
@@ -125,6 +141,7 @@ function Section({ title, children, defaultOpen = true }: {
 }
 
 export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
+  const router = useRouter();
   const [grant, setGrant] = useState<GrantFull | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -206,12 +223,26 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
               </div>
             </div>
           ) : null}
-          <button
-            onClick={onClose}
-            className="shrink-0 rounded-lg p-1.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600 transition-colors"
-          >
-            <X className="h-5 w-5" />
-          </button>
+          <div className="flex shrink-0 items-center gap-1">
+            {grant && (
+              <button
+                onClick={() => {
+                  onClose();
+                  router.push(`/grants/${grant._id}`);
+                }}
+                className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600 transition-colors"
+                title="Open full page"
+              >
+                <Maximize2 className="h-4 w-4" />
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600 transition-colors"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
         </div>
 
         {/* Scrollable body + collaboration */}
@@ -240,7 +271,7 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
             </div>
 
             {/* Links */}
-            {(grant.url || grant.application_url) && (
+            {(grant.url || grant.application_url || grant.notion_page_url) && (
               <div className="flex gap-3 border-b border-gray-100 px-5 py-3">
                 {grant.url && (
                   <a href={grant.url} target="_blank" rel="noopener noreferrer"
@@ -252,6 +283,13 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                   <a href={grant.application_url} target="_blank" rel="noopener noreferrer"
                     className="flex items-center gap-1.5 text-sm font-medium text-green-700 hover:underline">
                     <FileText className="h-3.5 w-3.5" />Apply now
+                  </a>
+                )}
+                {grant.notion_page_url && (
+                  <a href={grant.notion_page_url} target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 hover:underline">
+                    <svg className="h-3.5 w-3.5" viewBox="0 0 100 100" fill="currentColor"><path d="M6.6 12.4c4.1 3.3 5.6 3 13.3 2.5L81 8.1c1.6-.2 .2-1.6-.6-1.8L67.3.3C64.5-1.4 60.7.3 58.2 2.3L17.5 5.5c-2.4.2-2.9 1.4-1.2 2.5zm4.6 12.6v64.8c0 3.5 1.8 4.8 5.8 4.6l67-3.9c3.9-.2 4.4-2.6 4.4-5.5V21c0-2.9-1.2-4.4-3.7-4.2L16.9 20.7c-2.7.2-3.7 1.4-3.7 4.3zm65.7 1.6c.4 1.8 0 3.6-1.8 3.8l-3.2.6v47.8c-2.8 1.5-5.4 2.3-7.5 2.3-3.5 0-4.4-1.1-7-4L35.8 43v32.6l6.6 1.5s0 3.6-5.1 3.6l-14 .8c-.4-.8 0-2.9 1.5-3.2l3.9-1.1V36.4l-5.4-.4c-.4-1.8.6-4.4 3.5-4.6l15-.9L64 65V35l-5.6-.6c-.4-2.2 1.2-3.7 3.3-3.9z"/></svg>
+                    Open in Notion
                   </a>
                 )}
               </div>
@@ -324,6 +362,15 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                     </li>
                   ))}
                 </ul>
+              </Section>
+            )}
+
+            {/* Opportunity Summary */}
+            {grant.about_opportunity && (
+              <Section title="About This Opportunity">
+                <p className="text-sm leading-relaxed text-gray-700 whitespace-pre-line">
+                  {grant.about_opportunity}
+                </p>
               </Section>
             )}
 
@@ -411,18 +458,56 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
               </Section>
             )}
 
+            {/* Application Process */}
+            {grant.application_process && (
+              <Section title="Application Process" defaultOpen={false}>
+                <p className="text-sm leading-relaxed text-gray-700 whitespace-pre-line">
+                  {grant.application_process}
+                </p>
+              </Section>
+            )}
+
+            {/* Funding Terms */}
+            {grant.deep_analysis?.funding_terms && Object.values(grant.deep_analysis.funding_terms).some(Boolean) && (
+              <Section title="Funding Terms" defaultOpen={false}>
+                <dl className="space-y-3 text-sm">
+                  {grant.deep_analysis.funding_terms.disbursement_schedule && grant.deep_analysis.funding_terms.disbursement_schedule !== "null" && (
+                    <div>
+                      <dt className="font-medium text-gray-700">Disbursement</dt>
+                      <dd className="text-gray-600">{grant.deep_analysis.funding_terms.disbursement_schedule}</dd>
+                    </div>
+                  )}
+                  {grant.deep_analysis.funding_terms.reporting_requirements && grant.deep_analysis.funding_terms.reporting_requirements !== "null" && (
+                    <div>
+                      <dt className="font-medium text-gray-700">Reporting</dt>
+                      <dd className="text-gray-600">{grant.deep_analysis.funding_terms.reporting_requirements}</dd>
+                    </div>
+                  )}
+                  {grant.deep_analysis.funding_terms.ip_ownership && grant.deep_analysis.funding_terms.ip_ownership !== "null" && (
+                    <div>
+                      <dt className="font-medium text-gray-700">IP Ownership</dt>
+                      <dd className="text-gray-600">{grant.deep_analysis.funding_terms.ip_ownership}</dd>
+                    </div>
+                  )}
+                </dl>
+              </Section>
+            )}
+
             {/* Past winners */}
-            {grant.past_winners && (
+            {(() => {
+              const pw = grant.past_winners?.winners?.length ? grant.past_winners : grant.deep_analysis?.past_winners;
+              if (!pw) return null;
+              return (
               <Section title="Past Winners Analysis" defaultOpen={false}>
-                {grant.past_winners.funder_pattern && (
-                  <p className="mb-2 text-sm text-gray-700">{grant.past_winners.funder_pattern}</p>
+                {pw.funder_pattern && (
+                  <p className="mb-2 text-sm text-gray-700">{pw.funder_pattern}</p>
                 )}
-                {grant.past_winners.strategic_note && (
-                  <p className="mb-3 text-sm font-medium text-blue-700">{grant.past_winners.strategic_note}</p>
+                {pw.strategic_note && (
+                  <p className="mb-3 text-sm font-medium text-blue-700">{pw.strategic_note}</p>
                 )}
-                {grant.past_winners.winners && grant.past_winners.winners.length > 0 && (
+                {pw.winners && pw.winners.length > 0 && (
                   <div className="space-y-2">
-                    {grant.past_winners.winners.slice(0, 5).map((w, i: number) => (
+                    {pw.winners.slice(0, 5).map((w: { name: string; altcarbon_similarity: string; project_brief: string }, i: number) => (
                       <div key={i} className="rounded border border-gray-100 bg-gray-50 p-2 text-xs">
                         <div className="flex items-center justify-between">
                           <span className="font-medium text-gray-900">{w.name}</span>
@@ -440,7 +525,8 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                   </div>
                 )}
               </Section>
-            )}
+              );
+            })()}
 
             {/* Themes */}
             {grant.themes_detected && grant.themes_detected.length > 0 && (

@@ -9,6 +9,7 @@ const LANDING =
     : "/dashboard";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
+  trustHost: true,
   providers: [
     Google({
       clientId: process.env.GOOGLE_CLIENT_ID!,
@@ -33,9 +34,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       const isLoginPage = request.nextUrl.pathname.startsWith("/login");
       const isAuthApi = request.nextUrl.pathname.startsWith("/api/auth");
       const isCronApi = request.nextUrl.pathname.startsWith("/api/cron");
+      const isHealthApi = request.nextUrl.pathname.startsWith("/api/health");
 
-      // Always allow auth API and cron endpoints
-      if (isAuthApi || isCronApi) return true;
+      // Always allow auth API, cron, and health endpoints
+      if (isAuthApi || isCronApi || isHealthApi) return true;
 
       // Redirect logged-in users away from login page
       if (isLoginPage) {

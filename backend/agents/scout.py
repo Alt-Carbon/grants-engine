@@ -41,7 +41,7 @@ import httpx
 
 from backend.db.mongo import grants_raw, grants_scored, scout_runs, audit_logs
 from backend.graph.state import GrantState
-from backend.utils.llm import chat, HAIKU
+from backend.utils.llm import chat, HAIKU, SCOUT_MODEL
 from backend.utils.parsing import parse_json_safe, retry_async, api_health, CreditExhaustedError
 
 logger = logging.getLogger(__name__)
@@ -1270,7 +1270,7 @@ class ScoutAgent:
         try:
             raw = await chat(
                 prompt,
-                model=HAIKU,
+                model=SCOUT_MODEL,
                 max_tokens=1024,   # was 600 — raised to prevent JSON truncation
                 system=EXTRACTION_SYSTEM,
             )

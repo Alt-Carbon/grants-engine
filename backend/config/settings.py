@@ -20,12 +20,13 @@ class Settings(BaseSettings):
     # Anthropic direct (fallback if no gateway key)
     anthropic_api_key: str = ""
 
-    # OpenAI (embeddings only)
+    # OpenAI (no longer used — Pinecone Integrated Inference handles embeddings)
     openai_api_key: str = ""
 
     # Knowledge sources
     notion_token: str = ""
     notion_knowledge_base_page_id: str = ""  # Optional: scope sync to this page + descendants
+    notion_webhook_secret: str = ""  # For HMAC signature validation on webhook events
     google_client_id: str = ""
     google_client_secret: str = ""
     google_refresh_token: str = ""

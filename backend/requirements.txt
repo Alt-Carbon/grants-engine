@@ -13,7 +13,7 @@ langchain-anthropic>=0.3.0,<1.0.0
 # Anthropic
 anthropic>=0.40.0,<1.0.0
 
-# OpenAI (embeddings only)
+# OpenAI SDK (used as client for AI Gateway, NOT for embeddings)
 openai>=1.0.0,<2.0.0
 
 # MongoDB
@@ -41,6 +41,9 @@ mcp>=1.0.0
 
 # Scheduling
 apscheduler>=3.10.0,<4.0.0
+
+# Pusher (real-time notifications)
+pusher>=3.3.0
 
 # Utilities
 python-multipart>=0.0.9
