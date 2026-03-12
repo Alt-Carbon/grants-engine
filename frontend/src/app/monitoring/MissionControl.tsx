@@ -118,7 +118,7 @@ interface APIHealthData {
   tavily: ServiceHealth;
   exa: ServiceHealth;
   perplexity: ServiceHealth;
-  jina: ServiceHealth;
+  cloudflare: ServiceHealth;
 }
 
 interface NotionMcpStatus {
@@ -1345,8 +1345,8 @@ const SERVICE_META: Record<
     iconColor: "text-cyan-600",
     iconBg: "bg-cyan-50",
   },
-  jina: {
-    label: "Jina",
+  cloudflare: {
+    label: "Cloudflare BR",
     desc: "Page fetcher",
     iconColor: "text-amber-600",
     iconBg: "bg-amber-50",

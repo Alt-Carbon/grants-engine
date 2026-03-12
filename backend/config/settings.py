@@ -38,7 +38,10 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     exa_api_key: str = ""
     perplexity_api_key: str = ""
-    jina_api_key: str = ""
+
+    # Cloudflare Browser Rendering (page fetcher)
+    cloudflare_account_id: str = ""
+    cloudflare_browser_token: str = ""
 
     # Backend auth
     cron_secret: str = "dev-cron-secret"

@@ -34,7 +34,7 @@ interface APIHealthData {
   tavily: ServiceHealth;
   exa: ServiceHealth;
   perplexity: ServiceHealth;
-  jina: ServiceHealth;
+  cloudflare: ServiceHealth;
 }
 
 interface NotionMcpStatus {

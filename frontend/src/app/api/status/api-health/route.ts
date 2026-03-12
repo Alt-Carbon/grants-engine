@@ -17,7 +17,7 @@ export async function GET() {
           tavily: { status: "unknown" },
           exa: { status: "unknown" },
           perplexity: { status: "unknown" },
-          jina: { status: "unknown" },
+          cloudflare: { status: "unknown" },
         },
         error: e instanceof Error ? e.message : "Backend unreachable",
       },

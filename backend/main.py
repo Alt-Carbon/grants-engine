@@ -666,7 +666,7 @@ async def knowledge_sources_status():
 
 @app.get("/status/api-health")
 async def api_health_status():
-    """Check credit/quota health of external APIs (Tavily, Exa, Perplexity, Jina)."""
+    """Check credit/quota health of external APIs (Tavily, Exa, Perplexity, Cloudflare BR)."""
     from backend.utils.parsing import api_health
     return {
         "services": api_health.get_status(),
@@ -2160,7 +2160,7 @@ async def add_manual_grant(
     body: ManualGrantRequest,
     _: None = Depends(verify_internal),
 ):
-    """Save a manually entered grant URL — fetches content via Jina, detects themes,
+    """Save a manually entered grant URL — fetches content via Cloudflare BR, detects themes,
     saves to grants_raw as an unprocessed entry ready for the analyst."""
     import hashlib
     import re
@@ -2186,17 +2186,29 @@ async def add_manual_grant(
 
     s = get_settings()
     raw_content = ""
-    jina_url = f"https://r.jina.ai/{url}"
-    headers: dict = {"X-Return-Format": "markdown", "X-With-Links-Summary": "false"}
-    if s.jina_api_key:
-        headers["Authorization"] = f"Bearer {s.jina_api_key}"
 
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        try:
-            r = await client.get(jina_url, headers=headers)
-            r.raise_for_status()
-            raw_content = r.text.strip()[:80_000]
-        except Exception:
+    # Primary: Cloudflare Browser Rendering
+    if s.cloudflare_account_id and s.cloudflare_browser_token:
+        cf_url = f"https://api.cloudflare.com/client/v4/accounts/{s.cloudflare_account_id}/browser-rendering/markdown"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                r = await client.post(
+                    cf_url,
+                    headers={
+                        "Authorization": f"Bearer {s.cloudflare_browser_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"url": url},
+                )
+                r.raise_for_status()
+                data = r.json()
+                raw_content = (data.get("result") or "").strip()[:80_000]
+            except Exception:
+                pass
+
+    # Fallback: plain HTTP
+    if len(raw_content) < 100:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             try:
                 r2 = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
                 r2.raise_for_status()

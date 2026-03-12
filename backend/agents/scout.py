@@ -7,15 +7,15 @@ Architecture:
   4. Crawl known grant pages directly (DFIs, foundations, govt programs, aggregators)
   5. Merge + deduplicate results by URL hash
   6. 3-layer dedup against existing DB (url_hash → normalized URL hash → content hash)
-  7. Fetch full content for each new grant (Jina primary, plain HTTP fallback) with retry
+  7. Fetch full content for each new grant (Cloudflare BR primary, plain HTTP fallback) with retry
   8. LLM field extraction with robust JSON parsing
   9. Quality filter + save via upsert to grants_raw
   10. Hand off raw_grants list to Analyst
 
 Robustness features:
 - parse_json_safe: handles code fences, prose prefix, array wrapping
-- retry_async: exponential backoff on Jina/Tavily/Exa failures
-- Jina concurrency limited to 3 (respects free-tier 10 RPM with per-request delay)
+- retry_async: exponential backoff on Cloudflare BR/Tavily/Exa failures
+- Cloudflare BR concurrency limited to 5
 - Per-item enrichment timeout (45s) prevents hung grants from blocking the pipeline
 - Direct-crawl has an overall 180s timeout guard
 - insert_one → update_one upsert (safe for concurrent/replayed runs)
@@ -366,7 +366,7 @@ DIRECT_SOURCE_URLS: Dict[str, List[Dict[str, str]]] = {
         {"funder": "DOE ARPA-E", "url": "https://arpa-e.energy.gov/technologies/programs"},
         {"funder": "USAID", "url": "https://www.usaid.gov/work-usaid/find-a-funding-opportunity"},
         {"funder": "UKRI Innovate UK", "url": "https://www.ukri.org/opportunity/"},
-        # BIRAC — CFP hub + known major programs (plain HTTP used, bypasses Jina 402)
+        # BIRAC — CFP hub + known major programs (plain HTTP used, bypasses remote fetch)
         {"funder": "BIRAC", "url": "https://birac.nic.in/cfp.php"},
         {"funder": "BIRAC BIG", "url": "https://birac.nic.in/webcontent/1665_BIRAC_BIG_Scheme.pdf"},
         {"funder": "BIRAC BIPP", "url": "https://birac.nic.in/bipp.php"},
@@ -1055,9 +1055,9 @@ def _relevance_prescore(grant: Dict) -> float:
 
 # ── HTTP fetch helpers ─────────────────────────────────────────────────────────
 
-# Domains where Jina always returns 402 (Indian govt portals, some protected pages).
-# For these we go straight to plain HTTP — skipping 3×4s retries against Jina.
-_SKIP_JINA_DOMAINS = frozenset({
+# Domains where remote fetchers always fail (Indian govt portals, protected pages).
+# For these we go straight to plain HTTP — skipping retries against Cloudflare BR.
+_SKIP_REMOTE_FETCH_DOMAINS = frozenset({
     # Indian central government
     "birac.nic.in", "dst.gov.in", "anrfonline.in", "startupindia.gov.in",
     "aim.gov.in", "msh.gov.in", "tdb.gov.in", "nabard.org",
@@ -1092,56 +1092,56 @@ _BROWSER_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-# Jina concurrency: keep to 3 with a small delay between requests to stay
-# within the free-tier limit of 10 RPM (6s per request at concurrency 1 is
-# safest, but 3-concurrent with ~1s sleep per batch keeps us under 20 RPM).
-_JINA_SEM: asyncio.Semaphore | None = None
-_JINA_INTER_REQUEST_DELAY = 1.0  # seconds between Jina requests per slot
+# Cloudflare Browser Rendering concurrency limiter
+_CF_SEM: asyncio.Semaphore | None = None
 
 
-def _get_jina_sem() -> asyncio.Semaphore:
-    global _JINA_SEM
-    if _JINA_SEM is None:
-        _JINA_SEM = asyncio.Semaphore(3)
-    return _JINA_SEM
+def _get_cf_sem() -> asyncio.Semaphore:
+    global _CF_SEM
+    if _CF_SEM is None:
+        _CF_SEM = asyncio.Semaphore(5)
+    return _CF_SEM
 
 
-async def _fetch_with_jina(url: str, api_key: str = "") -> str:
-    """Fetch page content via Jina Reader with rate-limit-aware concurrency."""
-    if api_health.is_exhausted("jina"):
-        logger.debug("Skipping Jina (exhausted) for %s — falling back to plain HTTP", url[:60])
+async def _fetch_with_cloudflare(url: str, account_id: str = "", api_token: str = "") -> str:
+    """Fetch page content as markdown via Cloudflare Browser Rendering."""
+    if not account_id or not api_token:
+        return ""
+    if api_health.is_exhausted("cloudflare"):
+        logger.debug("Skipping Cloudflare BR (exhausted) for %s — falling back", url[:60])
         return ""
 
-    jina_url = f"https://r.jina.ai/{url.strip()}"
-    headers: Dict[str, str] = {
-        "X-Return-Format": "markdown",
-        "X-With-Links-Summary": "false",
-    }
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    cf_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/browser-rendering/markdown"
 
     async def _do_fetch() -> str:
-        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
-            r = await client.get(jina_url, headers=headers)
-            if r.status_code in (402, 429):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                cf_url,
+                headers={
+                    "Authorization": f"Bearer {api_token}",
+                    "Content-Type": "application/json",
+                },
+                json={"url": url.strip()},
+            )
+            if r.status_code in (429, 402):
                 raise httpx.HTTPStatusError(
-                    f"Jina rate limit {r.status_code}", request=r.request, response=r
+                    f"Cloudflare BR rate limit {r.status_code}", request=r.request, response=r
                 )
             r.raise_for_status()
-            return r.text.strip()[:80_000]
+            data = r.json()
+            return (data.get("result") or "").strip()[:80_000]
 
-    sem = _get_jina_sem()
+    sem = _get_cf_sem()
     async with sem:
         try:
             result = await retry_async(
-                _do_fetch, retries=3, base_delay=4.0, label=f"jina:{url[:60]}", service="jina"
+                _do_fetch, retries=3, base_delay=4.0, label=f"cf-br:{url[:60]}", service="cloudflare"
             )
         except CreditExhaustedError:
             return ""
-        await asyncio.sleep(_JINA_INTER_REQUEST_DELAY)
     if result is None:
         return ""
-    api_health.record_success("jina")
+    api_health.record_success("cloudflare")
     return result
 
 
@@ -1157,12 +1157,12 @@ async def _fetch_plain(url: str) -> str:
     return result or ""
 
 
-def _should_skip_jina(url: str) -> bool:
-    """Return True for domains that always return 402/403 from Jina — go straight to plain HTTP."""
+def _should_skip_remote_fetch(url: str) -> bool:
+    """Return True for domains that block remote fetchers — go straight to plain HTTP."""
     try:
         domain = urlparse(url).netloc.replace("www.", "").lower()
         # Exact-domain match
-        if domain in _SKIP_JINA_DOMAINS:
+        if domain in _SKIP_REMOTE_FETCH_DOMAINS:
             return True
         # All Indian government TLD subdomains (.gov.in and .nic.in)
         if domain.endswith(".gov.in") or domain.endswith(".nic.in"):
@@ -1173,7 +1173,7 @@ def _should_skip_jina(url: str) -> bool:
 
 
 async def _fetch_with_browser(url: str) -> str:
-    """Headless browser fallback — used when Jina + plain HTTP both fail.
+    """Headless browser fallback — used when Cloudflare BR + plain HTTP both fail.
 
     Handles JS-rendered portals, Cloudflare challenges, and SPAs.
     Returns empty string if browser is unavailable or fetch fails.
@@ -1191,24 +1191,23 @@ async def _fetch_with_browser(url: str) -> str:
         return ""
 
 
-async def _fetch_content(url: str, jina_key: str = "") -> str:
-    # Skip Jina entirely for domains known to block it — saves 3×4s retry time
-    if _should_skip_jina(url):
-        logger.debug("Skipping Jina for known blocked domain: %s", url[:60])
+async def _fetch_content(url: str, cf_account_id: str = "", cf_token: str = "") -> str:
+    # Skip remote fetch for domains known to block it — saves retry time
+    if _should_skip_remote_fetch(url):
+        logger.debug("Skipping remote fetch for known blocked domain: %s", url[:60])
         content = await _fetch_plain(url)
         if len(content) > 300:
             return content
-        # Plain HTTP also failed — try headless browser
         return await _fetch_with_browser(url)
 
-    content = await _fetch_with_jina(url, jina_key)
+    content = await _fetch_with_cloudflare(url, cf_account_id, cf_token)
     if len(content) > 300:
         return content
-    logger.debug("Jina returned short content for %s — falling back to plain HTTP", url)
+    logger.debug("Cloudflare BR returned short content for %s — falling back to plain HTTP", url)
     content = await _fetch_plain(url)
     if len(content) > 300:
         return content
-    # Both Jina and plain HTTP failed — try headless browser
+    # Both Cloudflare BR and plain HTTP failed — try headless browser
     return await _fetch_with_browser(url)
 
 
@@ -1217,7 +1216,8 @@ class ScoutAgent:
         self,
         tavily_api_key: str = "",
         exa_api_key: str = "",
-        jina_api_key: str = "",
+        cloudflare_account_id: str = "",
+        cloudflare_browser_token: str = "",
         perplexity_api_key: str = "",
         gateway_api_key: str = "",
         gateway_url: str = "https://ai-gateway.vercel.sh/v1",
@@ -1229,7 +1229,8 @@ class ScoutAgent:
     ):
         self.tavily_key = tavily_api_key
         self.exa_key = exa_api_key
-        self.jina_key = jina_api_key
+        self.cf_account_id = cloudflare_account_id
+        self.cf_token = cloudflare_browser_token
         self.perplexity_key = perplexity_api_key  # direct API key (preferred)
         self.gateway_key = gateway_api_key          # gateway fallback for Perplexity
         self.gateway_url = gateway_url
@@ -1481,7 +1482,7 @@ class ScoutAgent:
     async def _crawl_direct_source(self, source: Dict[str, str]) -> Optional[Dict]:
         url = source["url"]
         funder = source["funder"]
-        content = await _fetch_content(url, self.jina_key)
+        content = await _fetch_content(url, self.cf_account_id, self.cf_token)
         if len(content) < 100:
             logger.debug("Direct crawl: no content for %s", url)
             return None
@@ -1663,7 +1664,7 @@ class ScoutAgent:
 
                 # Fetch full content if we don't have enough
                 if len(item.get("raw_content", "")) < 400:
-                    item["raw_content"] = await _fetch_content(item["url"], self.jina_key)
+                    item["raw_content"] = await _fetch_content(item["url"], self.cf_account_id, self.cf_token)
 
                 content = item.get("raw_content", "")
 
@@ -1888,7 +1889,8 @@ async def scout_node(state: GrantState) -> Dict:
     agent = ScoutAgent(
         tavily_api_key=s.tavily_api_key,
         exa_api_key=s.exa_api_key,
-        jina_api_key=s.jina_api_key,
+        cloudflare_account_id=s.cloudflare_account_id,
+        cloudflare_browser_token=s.cloudflare_browser_token,
         perplexity_api_key=s.perplexity_api_key,
         gateway_api_key=s.ai_gateway_api_key,
         gateway_url=s.ai_gateway_url,

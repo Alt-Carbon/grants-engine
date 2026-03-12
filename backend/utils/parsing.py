@@ -5,7 +5,7 @@ robust JSON extraction from responses that may include code fences, leading
 prose, or unexpectedly return arrays instead of objects.
 
 Also provides `APIHealthTracker` — a singleton that detects credit/quota
-exhaustion for external APIs (Tavily, Exa, Jina, Perplexity) and tracks
+exhaustion for external APIs (Tavily, Exa, Cloudflare BR, Perplexity) and tracks
 cooldowns so callers skip dead services instead of wasting time.
 """
 from __future__ import annotations
@@ -127,7 +127,7 @@ class APIHealthTracker:
                 self._last_errors.pop(svc, None)
                 self._exhausted_at.pop(svc, None)
 
-        all_services = ["tavily", "exa", "perplexity", "jina"]
+        all_services = ["tavily", "exa", "perplexity", "cloudflare"]
         result: Dict[str, Any] = {}
         for svc in all_services:
             if svc in self._exhausted:

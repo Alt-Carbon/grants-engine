@@ -3,7 +3,7 @@
 agent-browser uses a client-daemon architecture. The daemon auto-starts
 on first command. Each session gets an isolated Chromium instance.
 
-Used as a third-tier fallback when Jina Reader + plain HTTP both fail
+Used as a third-tier fallback when Cloudflare BR + plain HTTP both fail
 (JS-rendered pages, Cloudflare challenges, Indian govt portals).
 
 Usage:
