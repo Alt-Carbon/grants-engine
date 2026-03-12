@@ -21,4 +21,7 @@ export const HYBRID_HIDDEN_ROUTES = new Set([
   "/dashboard",
   "/pipeline",
   "/triage",
+  "/toolkit",
+  "/audit",
+  "/config",
 ]);

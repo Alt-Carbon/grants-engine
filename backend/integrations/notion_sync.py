@@ -1156,3 +1156,137 @@ async def backfill_grants(grants: list[dict[str, Any]]) -> int:
             await asyncio.sleep(1.0)
     log.info("Notion backfill: synced %d / %d grants", count, len(grants))
     return count
+
+
+# ── Reverse sync: Notion → MongoDB ───────────────────────────────────────────
+
+# Notion select value → MongoDB status
+REVERSE_STATUS_MAP = {
+    "Triage": "triage",
+    "Pursue": "pursuing",
+    "Watch": "watch",
+    "Pass": "passed",
+    "Auto Pass": "auto_pass",
+    "Drafting": "drafting",
+    "Submitted": "submitted",
+    "Won": "won",
+}
+
+REVERSE_PRIORITY_MAP = {
+    "High": "high",
+    "Medium": "medium",
+    "Low": "low",
+}
+
+
+def _extract_text(prop: dict) -> str:
+    """Extract plain text from a Notion rich_text or title property."""
+    arr = prop.get("rich_text") or prop.get("title") or []
+    return "".join(seg.get("plain_text", "") for seg in arr).strip()
+
+
+def _extract_select(prop: dict) -> str | None:
+    """Extract name from a Notion select property."""
+    sel = prop.get("select")
+    return sel["name"] if sel else None
+
+
+async def reverse_sync_from_notion() -> dict[str, int]:
+    """Read all grants from the Notion Pipeline DB and update MongoDB statuses.
+
+    Syncs: Status, Priority (human overrides from Notion → MongoDB).
+    Returns dict with counts: {checked, updated, errors}.
+    """
+    from backend.db.mongo import grants_scored
+
+    client = _get_client()
+    collection = grants_scored()
+    checked = 0
+    updated = 0
+    errors = 0
+    has_more = True
+    start_cursor: str | None = None
+
+    while has_more:
+        try:
+            query_args: dict[str, Any] = {
+                "database_id": GRANT_PIPELINE_DS,
+                "page_size": 100,
+            }
+            if start_cursor:
+                query_args["start_cursor"] = start_cursor
+
+            resp = await client.databases.query(**query_args)
+            pages = resp.get("results", [])
+            has_more = resp.get("has_more", False)
+            start_cursor = resp.get("next_cursor")
+
+            for page in pages:
+                checked += 1
+                try:
+                    props = page.get("properties", {})
+
+                    # Extract MongoDB ID
+                    mongo_id = _extract_text(props.get("MongoDB ID", {}))
+                    if not mongo_id:
+                        continue
+
+                    # Extract current Notion values
+                    notion_status = _extract_select(props.get("Status", {}))
+                    notion_priority = _extract_select(props.get("Priority", {}))
+
+                    # Build MongoDB update
+                    update_fields: dict[str, Any] = {}
+
+                    if notion_status and notion_status in REVERSE_STATUS_MAP:
+                        update_fields["status"] = REVERSE_STATUS_MAP[notion_status]
+
+                    if notion_priority and notion_priority in REVERSE_PRIORITY_MAP:
+                        update_fields["human_priority"] = REVERSE_PRIORITY_MAP[notion_priority]
+
+                    if not update_fields:
+                        continue
+
+                    # Only update if values actually differ
+                    from bson import ObjectId
+
+                    try:
+                        doc_filter = {"_id": ObjectId(mongo_id)}
+                    except Exception:
+                        doc_filter = {"_id": mongo_id}
+
+                    existing = await collection.find_one(doc_filter, {"status": 1, "human_priority": 1})
+                    if not existing:
+                        continue
+
+                    changes: dict[str, Any] = {}
+                    if "status" in update_fields and existing.get("status") != update_fields["status"]:
+                        changes["status"] = update_fields["status"]
+                    if "human_priority" in update_fields and existing.get("human_priority") != update_fields.get("human_priority"):
+                        changes["human_priority"] = update_fields["human_priority"]
+
+                    if changes:
+                        changes["notion_synced_at"] = datetime.now(timezone.utc)
+                        await collection.update_one(doc_filter, {"$set": changes})
+                        updated += 1
+                        log.debug(
+                            "Reverse sync: %s → %s",
+                            mongo_id,
+                            changes,
+                        )
+
+                except Exception:
+                    errors += 1
+                    log.debug("Reverse sync error for page %s", page.get("id"), exc_info=True)
+
+            # Rate limit between pages
+            if has_more:
+                await asyncio.sleep(0.5)
+
+        except Exception:
+            log.error("Reverse sync query failed", exc_info=True)
+            errors += 1
+            break
+
+    log.info("Reverse sync complete: checked=%d updated=%d errors=%d", checked, updated, errors)
+    return {"checked": checked, "updated": updated, "errors": errors}

@@ -36,6 +36,12 @@ import {
   WifiOff,
   Globe,
   BookOpen,
+  Rocket,
+  ChevronDown,
+  ChevronUp,
+  CheckCircle2,
+  Wrench,
+  Database,
 } from "lucide-react";
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -285,13 +291,6 @@ function CommandHeader({
         <div className="flex items-center gap-4">
           <div className="hidden items-center gap-2 lg:flex">
             <Link
-              href="/toolkit"
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
-            >
-              <Terminal className="h-3.5 w-3.5" />
-              Toolkit
-            </Link>
-            <Link
               href="/drafter"
               className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
             >
@@ -357,7 +356,8 @@ function NotionPipelineBanner({
       href={NOTION_WORKSPACE_URL}
       target="_blank"
       rel="noopener noreferrer"
-      className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg"
+      className="group relative overflow-hidden rounded-2xl border border-slate-200 p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg"
+      style={{ background: "linear-gradient(to right, #0f172a, #1e293b, #0f172a)" }}
     >
       {/* Subtle gradient shimmer */}
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-white/[0.03] to-transparent opacity-0 transition-opacity group-hover:opacity-100" />
@@ -371,7 +371,7 @@ function NotionPipelineBanner({
             <h2 className="text-sm font-bold text-white">
               Grant Pipeline in Notion
             </h2>
-            <p className="mt-0.5 text-[11px] text-white/50">
+            <p className="mt-0.5 text-[11px] text-slate-300">
               {pipeline.total_discovered} grants discovered · {pipeline.pursuing} pursuing · {pipeline.drafting} drafting
             </p>
           </div>
@@ -379,7 +379,7 @@ function NotionPipelineBanner({
 
         <div className="flex items-center gap-3">
           {/* Notion MCP status */}
-          <div className="flex items-center gap-2 rounded-full bg-white/10 px-3 py-1.5">
+          <div className="flex items-center gap-2 rounded-full bg-white/[0.15] px-3 py-1.5">
             {notionConnected ? (
               <>
                 <Wifi className="h-3 w-3 text-emerald-400" />
@@ -397,7 +397,7 @@ function NotionPipelineBanner({
             )}
           </div>
 
-          <div className="flex items-center gap-1.5 text-white/60 transition-colors group-hover:text-white">
+          <div className="flex items-center gap-1.5 text-slate-300 transition-colors group-hover:text-white">
             <span className="text-xs font-semibold">Open in Notion</span>
             <ArrowUpRight className="h-4 w-4" />
           </div>
@@ -414,10 +414,10 @@ function NotionPipelineBanner({
         ].map((stage) => (
           <div
             key={stage.label}
-            className="flex items-center gap-2 rounded-lg bg-white/[0.07] px-3 py-1.5"
+            className="flex items-center gap-2 rounded-lg bg-white/[0.12] px-3 py-1.5"
           >
             <div className={`h-1.5 w-1.5 rounded-full ${stage.color}`} />
-            <span className="text-[10px] font-semibold text-white/70">
+            <span className="text-[10px] font-semibold text-slate-200">
               {stage.count} {stage.label}
             </span>
           </div>
@@ -1504,6 +1504,221 @@ function APIHealthPanel({ data }: { data: APIHealthData | null }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   Operations Panel (merged Toolkit — backfill, sync, reconnect, force-analyze)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+type OpsActionKey =
+  | "force_analyst"
+  | "sync_profile"
+  | "notion_backfill"
+  | "notion_backfill_views"
+  | "reconnect_notion"
+  | "notion_reverse_sync";
+
+function OperationsPanel({
+  notionMcp,
+  onRefresh,
+}: {
+  notionMcp: NotionMcpStatus | null;
+  onRefresh: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [actionLoading, setActionLoading] = useState<Record<OpsActionKey, boolean>>({
+    force_analyst: false,
+    sync_profile: false,
+    notion_backfill: false,
+    notion_backfill_views: false,
+    reconnect_notion: false,
+    notion_reverse_sync: false,
+  });
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const runOp = useCallback(
+    async (key: OpsActionKey, req: () => Promise<Response>, successMsg: string) => {
+      setActionLoading((prev) => ({ ...prev, [key]: true }));
+      setMessage(null);
+      setError(null);
+      try {
+        const res = await req();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.error || data?.detail || `Failed (${res.status})`);
+        setMessage(successMsg);
+        onRefresh();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Action failed");
+      } finally {
+        setActionLoading((prev) => ({ ...prev, [key]: false }));
+      }
+    },
+    [onRefresh]
+  );
+
+  const notionConnected = notionMcp?.status === "connected";
+
+  const OPS_ACTIONS: {
+    key: OpsActionKey;
+    title: string;
+    subtitle: string;
+    icon: React.ElementType;
+    iconColor: string;
+    run: () => void;
+    accent?: string;
+  }[] = [
+    {
+      key: "notion_reverse_sync",
+      title: "Sync from Notion",
+      subtitle: "Pull status & priority changes from Notion into dashboard",
+      icon: RefreshCw,
+      iconColor: "text-emerald-600",
+      run: () =>
+        runOp("notion_reverse_sync", () => fetch("/api/notion/reverse-sync", { method: "POST" }), "Reverse sync started — pulling changes from Notion."),
+    },
+    {
+      key: "force_analyst",
+      title: "Force Re-Analyze All",
+      subtitle: "Re-score every grant regardless of state",
+      icon: Zap,
+      iconColor: "text-amber-600",
+      run: () =>
+        runOp("force_analyst", () => fetch("/api/run/analyst?force=true", { method: "POST" }), "Force analyst started."),
+      accent: "border-amber-200",
+    },
+    {
+      key: "sync_profile",
+      title: "Sync Company Profile",
+      subtitle: "Refresh AltCarbon profile from Notion",
+      icon: Database,
+      iconColor: "text-violet-600",
+      run: () =>
+        runOp("sync_profile", () => fetch("/api/run/sync-profile", { method: "POST" }), "Profile sync started."),
+    },
+    {
+      key: "notion_backfill",
+      title: "Backfill to Notion",
+      subtitle: "Sync all scored grants to Notion pipeline",
+      icon: ArrowUpRight,
+      iconColor: "text-blue-600",
+      run: () =>
+        runOp(
+          "notion_backfill",
+          () =>
+            fetch("/api/notion/backfill", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ setup_views: false }),
+            }),
+          "Notion backfill started."
+        ),
+    },
+    {
+      key: "notion_backfill_views",
+      title: "Backfill + Setup Views",
+      subtitle: "Backfill and create Notion board/table views",
+      icon: Layers,
+      iconColor: "text-indigo-600",
+      run: () =>
+        runOp(
+          "notion_backfill_views",
+          () =>
+            fetch("/api/notion/backfill", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ setup_views: true }),
+            }),
+          "Backfill + views started."
+        ),
+    },
+    {
+      key: "reconnect_notion",
+      title: "Reconnect Notion MCP",
+      subtitle: notionConnected ? "MCP connected — reconnect if needed" : "MCP disconnected — reconnect now",
+      icon: notionConnected ? Wifi : WifiOff,
+      iconColor: notionConnected ? "text-emerald-600" : "text-rose-600",
+      run: () =>
+        runOp("reconnect_notion", () => fetch("/api/run/notion-mcp/reconnect", { method: "POST" }), "Notion MCP reconnected."),
+      accent: notionConnected ? undefined : "border-rose-200",
+    },
+  ];
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+      {/* Toggle header */}
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center justify-between px-5 py-4 text-left transition-colors hover:bg-slate-50"
+      >
+        <div className="flex items-center gap-2.5">
+          <Wrench className="h-4 w-4 text-slate-400" />
+          <h2 className="text-sm font-bold text-slate-900">Operations</h2>
+          <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+            {OPS_ACTIONS.length} actions
+          </span>
+        </div>
+        {expanded ? (
+          <ChevronUp className="h-4 w-4 text-slate-400" />
+        ) : (
+          <ChevronDown className="h-4 w-4 text-slate-400" />
+        )}
+      </button>
+
+      {expanded && (
+        <div className="border-t border-slate-100 px-5 py-4">
+          {/* Status messages */}
+          {(message || error) && (
+            <div
+              className={`mb-4 rounded-lg border px-3 py-2 text-xs ${
+                error
+                  ? "border-rose-200 bg-rose-50 text-rose-700"
+                  : "border-emerald-200 bg-emerald-50 text-emerald-700"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {error ? <AlertTriangle className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                <span>{error || message}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Action grid */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {OPS_ACTIONS.map((action) => {
+              const Icon = action.icon;
+              const loading = actionLoading[action.key];
+              return (
+                <button
+                  key={action.key}
+                  onClick={action.run}
+                  disabled={loading}
+                  className={`rounded-xl border bg-white p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60 ${
+                    action.accent || "border-slate-200"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <Icon className={`h-4 w-4 shrink-0 ${action.iconColor}`} />
+                        <p className="text-xs font-semibold text-slate-900">{action.title}</p>
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-400">{action.subtitle}</p>
+                    </div>
+                    {loading ? (
+                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />
+                    ) : (
+                      <Rocket className="h-4 w-4 shrink-0 text-slate-300" />
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    Main Component
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -1592,6 +1807,9 @@ export default function MissionControl({
 
       {/* Alert badges */}
       <AlertBadges data={pipeline} />
+
+      {/* Operations panel (backfill, sync, force-analyze, reconnect) */}
+      <OperationsPanel notionMcp={notionMcp} onRefresh={poll} />
 
       {/* API Health — external service credit/quota monitoring */}
       <APIHealthPanel data={apiHealth} />

@@ -2126,6 +2126,26 @@ async def admin_notion_backfill(
     return {"status": "notion_backfill_started", "ts": datetime.now(timezone.utc).isoformat()}
 
 
+@app.post("/admin/notion-reverse-sync")
+async def admin_notion_reverse_sync(
+    background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
+):
+    """Pull status/priority changes from Notion back into MongoDB.
+
+    Reads all grants from the Notion Grant Pipeline, compares Status and
+    Priority with MongoDB, and updates any that differ. Safe to run repeatedly.
+    """
+    from backend.integrations.notion_sync import reverse_sync_from_notion
+
+    async def _reverse_sync():
+        result = await reverse_sync_from_notion()
+        logger.info("Notion reverse sync: %s", result)
+
+    background_tasks.add_task(_reverse_sync)
+    return {"status": "notion_reverse_sync_started", "ts": datetime.now(timezone.utc).isoformat()}
+
+
 # ── Grant management ───────────────────────────────────────────────────────────
 
 _VALID_STATUSES = {
