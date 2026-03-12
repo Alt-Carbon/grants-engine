@@ -65,6 +65,12 @@ def make_mock_client():
     # pages.update returns the same
     client.pages.update.return_value = {"id": FAKE_PAGE_ID}
 
+    # blocks.children.list returns empty (for _replace_page_children)
+    client.blocks.children.list.return_value = {"results": [], "has_more": False}
+
+    # blocks.children.append returns empty
+    client.blocks.children.append.return_value = {"results": []}
+
     return client
 
 
@@ -130,7 +136,8 @@ def test_sync_scored_grant_create():
         assert len(props["Themes"]["multi_select"]) == 2
         assert props["Themes"]["multi_select"][0]["name"] == "Climate Tech"
         assert props["Funding USD"]["number"] == 500000
-        assert props["AI Recommendation"]["select"]["name"] == "Pursue"
+        # AI Recommendation is a rollup in Notion (read-only), so it's not synced as a property
+        assert "AI Recommendation" not in props
         assert props["Grant URL"]["url"] == "https://ec.europa.eu/horizon/climate-innovation-2026"
         assert props["Deadline"]["date"]["start"] == "2026-06-30"
 

@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     watch_threshold: float = 5.0
     min_grant_funding: int = 3000
 
+    # Browser automation (agent-browser) — headless fallback for JS-rendered pages
+    browser_enabled: bool = True
+    browser_max_concurrent: int = 2
+    browser_page_load_wait: float = 3.0
+    browser_fetch_timeout: float = 45.0
+
     # AltCarbon themes
     themes: List[str] = [
         "climatetech",

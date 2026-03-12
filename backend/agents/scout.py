@@ -1172,17 +1172,44 @@ def _should_skip_jina(url: str) -> bool:
     return False
 
 
+async def _fetch_with_browser(url: str) -> str:
+    """Headless browser fallback — used when Jina + plain HTTP both fail.
+
+    Handles JS-rendered portals, Cloudflare challenges, and SPAs.
+    Returns empty string if browser is unavailable or fetch fails.
+    """
+    try:
+        from backend.utils.browser import browser_fetch, is_available
+        if not is_available():
+            return ""
+        content = await browser_fetch(url, timeout=45.0)
+        if content:
+            logger.info("Browser fallback succeeded for %s (%d chars)", url[:60], len(content))
+        return content
+    except Exception as e:
+        logger.debug("Browser fallback failed for %s: %s", url[:60], e)
+        return ""
+
+
 async def _fetch_content(url: str, jina_key: str = "") -> str:
     # Skip Jina entirely for domains known to block it — saves 3×4s retry time
     if _should_skip_jina(url):
         logger.debug("Skipping Jina for known blocked domain: %s", url[:60])
-        return await _fetch_plain(url)
+        content = await _fetch_plain(url)
+        if len(content) > 300:
+            return content
+        # Plain HTTP also failed — try headless browser
+        return await _fetch_with_browser(url)
 
     content = await _fetch_with_jina(url, jina_key)
     if len(content) > 300:
         return content
     logger.debug("Jina returned short content for %s — falling back to plain HTTP", url)
-    return await _fetch_plain(url)
+    content = await _fetch_plain(url)
+    if len(content) > 300:
+        return content
+    # Both Jina and plain HTTP failed — try headless browser
+    return await _fetch_with_browser(url)
 
 
 class ScoutAgent:

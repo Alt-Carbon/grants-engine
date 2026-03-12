@@ -784,10 +784,14 @@ async def analyst_status():
 @app.post("/run/analyst")
 async def manual_analyst(
     background_tasks: BackgroundTasks,
+    force: bool = False,
     _: None = Depends(verify_internal),
 ):
-    """Run the Analyst on all unprocessed grants_raw entries (including manually
-    added ones). Idempotent — already-scored grants are skipped automatically."""
+    """Run the Analyst on grants_raw entries.
+
+    - Default: processes only unprocessed grants (idempotent).
+    - force=true: re-scores ALL grants, ignoring processed/already-scored flags.
+    """
     global _analyst_running, _analyst_started_at
     if _analyst_running:
         return {"status": "analyst_already_running", "started_at": _analyst_started_at}
@@ -808,9 +812,13 @@ async def manual_analyst(
             weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
             min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
 
-            # Fetch ALL unprocessed raw grants
-            raw_docs = await grants_raw().find({"processed": False}).to_list(length=2000)
-            logger.info("Analyst run: %d unprocessed grants found", len(raw_docs))
+            # Fetch grants: all if force, only unprocessed otherwise
+            if force:
+                raw_docs = await grants_raw().find({}).to_list(length=5000)
+                logger.info("Analyst FORCE run: %d total grants found", len(raw_docs))
+            else:
+                raw_docs = await grants_raw().find({"processed": False}).to_list(length=2000)
+                logger.info("Analyst run: %d unprocessed grants found", len(raw_docs))
 
             agent = AnalystAgent(
                 perplexity_api_key=s.perplexity_api_key,
@@ -819,7 +827,7 @@ async def manual_analyst(
                 weights=weights,
                 min_funding=min_funding,
             )
-            scored = await agent.run(raw_docs)
+            scored = await agent.run(raw_docs, force=force)
             scored_count = len(scored)
             logger.info("Analyst run: %d grants scored", scored_count)
 
@@ -2033,16 +2041,33 @@ async def notion_webhook_section_review(
 async def admin_notion_backfill(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    setup_views: bool = False,
 ):
-    """Backfill all scored grants to Notion Mission Control."""
+    """Backfill all scored grants to Notion with full data + rich page body.
+
+    Query params:
+        setup_views: If true, also create Kanban and Table views in Notion.
+    """
     from backend.db.mongo import grants_scored
-    from backend.integrations.notion_sync import backfill_grants
+    from backend.integrations.notion_sync import (
+        backfill_grants,
+        ensure_grant_pipeline_schema,
+        setup_grant_pipeline_views,
+    )
 
     async def _backfill():
+        # Step 1: Ensure all new DB properties exist
+        await ensure_grant_pipeline_schema()
+
+        # Step 2: Optionally create views
+        if setup_views:
+            await setup_grant_pipeline_views()
+
+        # Step 3: Backfill all grants with full data
         cursor = grants_scored().find({}).sort("weighted_total", -1)
         all_grants = await cursor.to_list(length=2000)
         count = await backfill_grants(all_grants)
-        logger.info("Notion backfill complete: %d grants synced", count)
+        logger.info("Notion backfill complete: %d grants synced with full data", count)
 
     background_tasks.add_task(_backfill)
     return {"status": "notion_backfill_started", "ts": datetime.now(timezone.utc).isoformat()}
