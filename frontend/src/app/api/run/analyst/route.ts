@@ -2,8 +2,6 @@
  * POST /api/run/analyst  — trigger analyst to score unprocessed grants
  * GET  /api/run/analyst  — poll analyst job status
  */
-import { NextRequest } from "next/server";
-
 function env() {
   return {
     url: (process.env.FASTAPI_URL ?? "").replace(/\/+$/, ""),
@@ -11,13 +9,10 @@ function env() {
   };
 }
 
-export async function POST(req: NextRequest) {
+export async function POST() {
   const { url, secret } = env();
   try {
-    const force = req.nextUrl.searchParams.get("force") === "true";
-    const endpoint = force ? `${url}/run/analyst?force=true` : `${url}/run/analyst`;
-
-    const res = await fetch(endpoint, {
+    const res = await fetch(`${url}/run/analyst`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

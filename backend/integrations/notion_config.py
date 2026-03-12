@@ -92,24 +92,6 @@ def get_priority_label(score: float) -> str:
         return "Medium"
     return "Low"
 
-# ── Eligibility checklist status → emoji (mirrors GrantDetailSheet STATUS_ICON) ──
-CHECKLIST_STATUS_EMOJI = {
-    "met": "\u2705",
-    "likely_met": "\U0001f7e1",
-    "verify": "\U0001f50d",
-    "not_met": "\u274c",
-}
-
-# ── Score dimension keys → display names ─────────────────────────────────────
-SCORE_DIMENSION_DISPLAY = {
-    "theme_alignment": "Theme Alignment",
-    "eligibility_confidence": "Eligibility Confidence",
-    "funding_amount": "Funding Amount",
-    "deadline_urgency": "Deadline Urgency",
-    "geography_fit": "Geography Fit",
-    "competition_level": "Competition Level",
-}
-
 # ── Agent name mapping ───────────────────────────────────────────────────────
 AGENT_DISPLAY = {
     "scout": "Scout",

@@ -131,16 +131,14 @@ def _render_manual_entry():
         if st.button("Fetch & Queue for Analyst", type="primary", key="manual_submit",
                      disabled=not url):
             import os
-            cf_account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
-            cf_token = os.environ.get("CLOUDFLARE_BROWSER_TOKEN", "")
+            jina_key = os.environ.get("JINA_API_KEY", "")
             with st.spinner("Fetching page content…"):
                 ok, msg = save_manual_grant(
                     url=url,
                     title_override=title_override,
                     funder_override=funder_override,
                     notes=notes,
-                    cf_account_id=cf_account_id,
-                    cf_token=cf_token,
+                    jina_key=jina_key,
                 )
             if ok:
                 st.success(f"✅ {msg}\n\nRun the Analyst from the sidebar to score it.")

@@ -39,10 +39,7 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     exa_api_key: str = ""
     perplexity_api_key: str = ""
-
-    # Cloudflare Browser Rendering (page fetcher)
-    cloudflare_account_id: str = ""
-    cloudflare_browser_token: str = ""
+    jina_api_key: str = ""
 
     # Backend auth
     cron_secret: str = "dev-cron-secret"
@@ -58,12 +55,6 @@ class Settings(BaseSettings):
     pursue_threshold: float = 6.5
     watch_threshold: float = 5.0
     min_grant_funding: int = 3000
-
-    # Browser automation (agent-browser) — headless fallback for JS-rendered pages
-    browser_enabled: bool = True
-    browser_max_concurrent: int = 2
-    browser_page_load_wait: float = 3.0
-    browser_fetch_timeout: float = 45.0
 
     # AltCarbon themes
     themes: List[str] = [

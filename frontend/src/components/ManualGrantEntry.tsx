@@ -183,7 +183,7 @@ export function ManualGrantEntry() {
 
             <div className="flex items-center justify-between">
               <p className="text-xs text-gray-400">
-                Content fetched via Cloudflare · Analyst will score it next
+                Content fetched via Jina · Analyst will score it next
               </p>
               <button
                 type="submit"

@@ -524,8 +524,6 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [clearingSection, setClearingSection] = useState(false);
   const [generatingBrief, setGeneratingBrief] = useState(false);
-  const [pushingToNotion, setPushingToNotion] = useState(false);
-  const [notionPushUrl, setNotionPushUrl] = useState<string | null>(null);
   const [streamingByKey, setStreamingByKey] = useState<Record<string, string>>({});
   const [streamStatusByKey, setStreamStatusByKey] = useState<Record<string, string>>({});
 
@@ -551,11 +549,6 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const allApproved =
     tiles.length > 0 &&
     tiles.every((t) => approvedSections.has(buildKey(selectedId, t.id)));
-  const hasDraftContent = tiles.some((t) => {
-    const key = buildKey(selectedId, t.id);
-    const msgs = chatHistories[key] ?? [];
-    return msgs.some((m) => m.role === "agent" && m.content.trim().length > 0);
-  });
 
   // Per-key streaming state → derive active values
   const sending = activeKey ? sendingKeys.has(activeKey) : false;
@@ -641,10 +634,6 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       .catch(() => {}); // silent — brief will retry on click
     return () => { cancelled = true; };
   }, [selectedPipeline?.grant_id]);
-
-  useEffect(() => {
-    setNotionPushUrl(null);
-  }, [selectedId]);
 
   // -- Load persisted chat history from DB -----------------------------------
   useEffect(() => {
@@ -1153,39 +1142,6 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     }
   }, [selectedPipeline, generatingBrief]);
 
-  // -- Push complete draft to Notion -----------------------------------------
-  const pushDraftToNotion = useCallback(async () => {
-    if (!selectedPipeline || pushingToNotion) return;
-    if (!selectedPipeline.grant_id) {
-      setError("No grant linked to this pipeline entry");
-      return;
-    }
-
-    setPushingToNotion(true);
-    setError(null);
-    setNotionPushUrl(null);
-
-    try {
-      const res = await fetch("/api/drafter/push-to-notion", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          grant_id: selectedPipeline.grant_id,
-          pipeline_id: selectedPipeline._id,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || `Push failed (${res.status})`);
-      }
-      setNotionPushUrl(data.notion_url || null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to push draft to Notion");
-    } finally {
-      setPushingToNotion(false);
-    }
-  }, [selectedPipeline, pushingToNotion]);
-
   // -- Copy agent response ---------------------------------------------------
   const copySnippet = useCallback((msgIdx: number) => {
     const msg = activeMessages[msgIdx];
@@ -1499,50 +1455,36 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         </div>
 
         {/* Export & Intelligence Brief */}
-        <div className="border-t border-gray-100 p-3 space-y-1.5">
-          {/* Row 1: Brief .md / Brief .pdf / Push to Notion */}
+        <div className="border-t border-gray-100 p-3 space-y-2">
+          {/* Intelligence Brief — .md and .pdf options */}
           <div className="flex gap-1.5">
             <Button
               variant="outline"
               size="sm"
-              className="flex-1 gap-1 border-violet-200 text-violet-700 hover:bg-violet-50 px-2 text-[11px]"
+              className="flex-1 gap-1.5 border-violet-200 text-violet-700 hover:bg-violet-50"
               onClick={() => downloadIntelBrief("md")}
               disabled={generatingBrief}
             >
               {generatingBrief ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <FileText className="h-3 w-3" />
+                <FileText className="h-3.5 w-3.5" />
               )}
-              .md
+              Brief .md
             </Button>
             <Button
               variant="outline"
               size="sm"
-              className="flex-1 gap-1 border-violet-200 text-violet-700 hover:bg-violet-50 px-2 text-[11px]"
+              className="flex-1 gap-1.5 border-violet-200 text-violet-700 hover:bg-violet-50"
               onClick={() => downloadIntelBrief("pdf")}
               disabled={generatingBrief}
             >
               {generatingBrief ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <FileText className="h-3 w-3" />
+                <FileText className="h-3.5 w-3.5" />
               )}
-              .pdf
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="flex-1 gap-1 border-blue-200 text-blue-700 hover:bg-blue-50 px-2 text-[11px]"
-              onClick={pushDraftToNotion}
-              disabled={pushingToNotion || !hasDraftContent}
-            >
-              {pushingToNotion ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <Cloud className="h-3 w-3" />
-              )}
-              Notion
+              Brief .pdf
             </Button>
           </div>
 
@@ -1557,17 +1499,6 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
               <Download className="h-4 w-4" />
               Export Draft
             </Button>
-          )}
-
-          {notionPushUrl && (
-            <a
-              href={notionPushUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="block rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100"
-            >
-              Draft pushed → Open in Notion
-            </a>
           )}
         </div>
       </div>

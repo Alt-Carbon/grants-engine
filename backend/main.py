@@ -338,10 +338,9 @@ def _build_grant_context(grant: dict) -> str:
         for w in winners:
             yr = f" ({w['year']})" if w.get("year") else ""
             sim = w.get("altcarbon_similarity", "")
-            country = f" — {w.get('country', '')}" if w.get("country") else ""
             w_lines.append(
                 f"  • {w.get('name', '?')}{yr}"
-                f"{country}"
+                f"{(' — ' + w.get('country', '')) if w.get('country') else ''}"
                 f" [{sim} similarity]: {w.get('project_brief', '')}"
             )
         parts.append("PAST WINNERS:\n" + "\n".join(w_lines))
@@ -924,7 +923,7 @@ async def table_of_content_status():
 
 @app.get("/status/api-health")
 async def api_health_status():
-    """Check credit/quota health of external APIs (Tavily, Exa, Perplexity, Cloudflare BR)."""
+    """Check credit/quota health of external APIs (Tavily, Exa, Perplexity, Jina)."""
     from backend.utils.parsing import api_health
     return {
         "services": api_health.get_status(),
@@ -1330,14 +1329,10 @@ async def analyst_status():
 @app.post("/run/analyst")
 async def manual_analyst(
     background_tasks: BackgroundTasks,
-    force: bool = False,
     _: None = Depends(verify_internal),
 ):
-    """Run the Analyst on grants_raw entries.
-
-    - Default: processes only unprocessed grants (idempotent).
-    - force=true: re-scores ALL grants, ignoring processed/already-scored flags.
-    """
+    """Run the Analyst on all unprocessed grants_raw entries (including manually
+    added ones). Idempotent — already-scored grants are skipped automatically."""
     global _analyst_running, _analyst_started_at
     if _analyst_running:
         return {"status": "analyst_already_running", "started_at": _analyst_started_at}
@@ -1358,13 +1353,9 @@ async def manual_analyst(
             weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
             min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
 
-            # Fetch grants: all if force, only unprocessed otherwise
-            if force:
-                raw_docs = await grants_raw().find({}).to_list(length=5000)
-                logger.info("Analyst FORCE run: %d total grants found", len(raw_docs))
-            else:
-                raw_docs = await grants_raw().find({"processed": False}).to_list(length=2000)
-                logger.info("Analyst run: %d unprocessed grants found", len(raw_docs))
+            # Fetch ALL unprocessed raw grants
+            raw_docs = await grants_raw().find({"processed": False}).to_list(length=2000)
+            logger.info("Analyst run: %d unprocessed grants found", len(raw_docs))
 
             agent = AnalystAgent(
                 perplexity_api_key=s.perplexity_api_key,
@@ -1373,7 +1364,7 @@ async def manual_analyst(
                 weights=weights,
                 min_funding=min_funding,
             )
-            scored = await agent.run(raw_docs, force=force)
+            scored = await agent.run(raw_docs)
             scored_count = len(scored)
             logger.info("Analyst run: %d grants scored", scored_count)
 
@@ -2081,58 +2072,6 @@ class IntelligenceBriefRequest(BaseModel):
     grant_id: str
 
 
-class PushDraftToNotionRequest(BaseModel):
-    grant_id: str
-    pipeline_id: Optional[str] = None
-
-
-@app.post("/drafter/push-to-notion")
-async def push_draft_to_notion(
-    body: PushDraftToNotionRequest,
-    _: None = Depends(verify_internal),
-):
-    """Push the latest complete draft to Notion as a rich page."""
-    from bson import ObjectId
-    from backend.db.mongo import grant_drafts, grants_scored
-    from backend.integrations.notion_sync import push_complete_draft_to_notion
-
-    # Fetch latest draft from MongoDB
-    query: dict = {"grant_id": body.grant_id}
-    if body.pipeline_id:
-        query["pipeline_id"] = body.pipeline_id
-    draft = await grant_drafts().find_one(query, sort=[("version", -1)])
-    if not draft:
-        return {"success": False, "error": "No draft found for this grant"}
-
-    # Fetch grant info for context
-    grant = {}
-    try:
-        grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)}) or {}
-    except Exception:
-        pass
-
-    grant_name = grant.get("grant_name") or grant.get("title") or "Unknown Grant"
-    funder = grant.get("funder", "")
-    deadline = grant.get("deadline", "")
-    if hasattr(deadline, "strftime"):
-        deadline = deadline.strftime("%Y-%m-%d")
-
-    page_id = await push_complete_draft_to_notion(
-        grant_id=body.grant_id,
-        grant_name=grant_name,
-        sections=draft.get("sections", {}),
-        version=draft.get("version", 1),
-        evidence_gaps=draft.get("evidence_gaps_all"),
-        funder=funder,
-        deadline=str(deadline) if deadline else "",
-    )
-
-    if page_id:
-        notion_url = f"https://notion.so/{page_id.replace('-', '')}"
-        return {"success": True, "notion_page_id": page_id, "notion_url": notion_url}
-    return {"success": False, "error": "Notion push failed — check server logs"}
-
-
 @app.post("/drafter/intelligence-brief")
 async def intelligence_brief(
     body: IntelligenceBriefRequest,
@@ -2676,56 +2615,19 @@ async def notion_webhook_section_review(
 async def admin_notion_backfill(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
-    setup_views: bool = False,
 ):
-    """Backfill all scored grants to Notion with full data + rich page body.
-
-    Query params:
-        setup_views: If true, also create Kanban and Table views in Notion.
-    """
+    """Backfill all scored grants to Notion Mission Control."""
     from backend.db.mongo import grants_scored
-    from backend.integrations.notion_sync import (
-        backfill_grants,
-        ensure_grant_pipeline_schema,
-        setup_grant_pipeline_views,
-    )
+    from backend.integrations.notion_sync import backfill_grants
 
     async def _backfill():
-        # Step 1: Ensure all new DB properties exist
-        await ensure_grant_pipeline_schema()
-
-        # Step 2: Optionally create views
-        if setup_views:
-            await setup_grant_pipeline_views()
-
-        # Step 3: Backfill all grants with full data
         cursor = grants_scored().find({}).sort("weighted_total", -1)
         all_grants = await cursor.to_list(length=2000)
         count = await backfill_grants(all_grants)
-        logger.info("Notion backfill complete: %d grants synced with full data", count)
+        logger.info("Notion backfill complete: %d grants synced", count)
 
     background_tasks.add_task(_backfill)
     return {"status": "notion_backfill_started", "ts": datetime.now(timezone.utc).isoformat()}
-
-
-@app.post("/admin/notion-reverse-sync")
-async def admin_notion_reverse_sync(
-    background_tasks: BackgroundTasks,
-    _: None = Depends(verify_internal),
-):
-    """Pull status/priority changes from Notion back into MongoDB.
-
-    Reads all grants from the Notion Grant Pipeline, compares Status and
-    Priority with MongoDB, and updates any that differ. Safe to run repeatedly.
-    """
-    from backend.integrations.notion_sync import reverse_sync_from_notion
-
-    async def _reverse_sync():
-        result = await reverse_sync_from_notion()
-        logger.info("Notion reverse sync: %s", result)
-
-    background_tasks.add_task(_reverse_sync)
-    return {"status": "notion_reverse_sync_started", "ts": datetime.now(timezone.utc).isoformat()}
 
 
 # ── Grant management ───────────────────────────────────────────────────────────
@@ -2742,7 +2644,7 @@ async def add_manual_grant(
     body: ManualGrantRequest,
     _: None = Depends(verify_internal),
 ):
-    """Save a manually entered grant URL — fetches content via Cloudflare BR, detects themes,
+    """Save a manually entered grant URL — fetches content via Jina, detects themes,
     saves to grants_raw as an unprocessed entry ready for the analyst."""
     import hashlib
     import re
@@ -2768,29 +2670,17 @@ async def add_manual_grant(
 
     s = get_settings()
     raw_content = ""
+    jina_url = f"https://r.jina.ai/{url}"
+    headers: dict = {"X-Return-Format": "markdown", "X-With-Links-Summary": "false"}
+    if s.jina_api_key:
+        headers["Authorization"] = f"Bearer {s.jina_api_key}"
 
-    # Primary: Cloudflare Browser Rendering
-    if s.cloudflare_account_id and s.cloudflare_browser_token:
-        cf_url = f"https://api.cloudflare.com/client/v4/accounts/{s.cloudflare_account_id}/browser-rendering/markdown"
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                r = await client.post(
-                    cf_url,
-                    headers={
-                        "Authorization": f"Bearer {s.cloudflare_browser_token}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"url": url},
-                )
-                r.raise_for_status()
-                data = r.json()
-                raw_content = (data.get("result") or "").strip()[:80_000]
-            except Exception:
-                pass
-
-    # Fallback: plain HTTP
-    if len(raw_content) < 100:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        try:
+            r = await client.get(jina_url, headers=headers)
+            r.raise_for_status()
+            raw_content = r.text.strip()[:80_000]
+        except Exception:
             try:
                 r2 = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
                 r2.raise_for_status()

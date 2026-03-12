@@ -904,10 +904,7 @@ async def _perplexity_funder_research(
 # ── Minimal HTTP fetch for analyst-side scraping ──────────────────────────────
 
 async def _fetch_url_content(url: str) -> str:
-    """Fetch page content — plain HTTP first, headless browser fallback.
-
-    Used for past-winners pages which are often JS-rendered SPAs.
-    """
+    """Plain HTTP GET, used only for fetching past-winners pages — no Jina needed."""
     try:
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             r = await client.get(
@@ -915,24 +912,10 @@ async def _fetch_url_content(url: str) -> str:
                 headers={"User-Agent": "Mozilla/5.0 (compatible; AltCarbonBot/1.0)"},
             )
             r.raise_for_status()
-            content = r.text[:60_000]
-            if len(content) > 300:
-                return content
+            return r.text[:60_000]
     except Exception as e:
-        logger.debug("_fetch_url_content HTTP failed for %s: %s", url[:60], e)
-
-    # Fallback to headless browser for JS-rendered winner pages
-    try:
-        from backend.utils.browser import browser_fetch, is_available
-        if is_available():
-            content = await browser_fetch(url, timeout=30.0)
-            if content:
-                logger.info("Browser fallback for winners page %s (%d chars)", url[:60], len(content))
-                return content[:60_000]
-    except Exception as e:
-        logger.debug("Browser fallback failed for winners page %s: %s", url[:60], e)
-
-    return ""
+        logger.debug("_fetch_url_content failed for %s: %s", url[:60], e)
+        return ""
 
 
 # ── Past winners scraping (runs concurrently with deep analysis) ───────────────
@@ -1607,20 +1590,13 @@ class AnalystAgent:
         self.weights = weights or DEFAULT_WEIGHTS
         self.min_funding = min_funding
 
-    async def run(self, raw_grants: List[Dict], force: bool = False) -> List[Dict]:
-        """Score a batch of raw grants.
-
-        Args:
-            raw_grants: List of raw grant documents from MongoDB.
-            force: If True, re-score even if already in grants_scored.
-        """
+    async def run(self, raw_grants: List[Dict]) -> List[Dict]:
         if not raw_grants:
             logger.info("Analyst: no grants to score")
             return []
 
         import traceback as _tb
 
-        self._force = force
         _run_start = datetime.now(timezone.utc)
 
         try:
@@ -1651,39 +1627,34 @@ class AnalystAgent:
     async def _run_inner(self, raw_grants: List[Dict]) -> List[Dict]:
         logger.info("Analyst: received %d grants to process", len(raw_grants))
 
-        # ── Skip already-scored grants (idempotency) — unless force=True ────
+        # ── Skip already-scored grants (idempotency) ─────────────────────────
         col = grants_scored()
+        existing_url_hashes: set = set()
+        existing_raw_ids: set = set()
+
+        async for doc in col.find(
+            {},
+            {"url_hash": 1, "raw_grant_id": 1, "url": 1},
+        ):
+            if doc.get("url_hash"):
+                existing_url_hashes.add(doc["url_hash"])
+            if doc.get("raw_grant_id"):
+                existing_raw_ids.add(doc["raw_grant_id"])
+
+        to_score = []
         skipped = 0
-
-        if getattr(self, "_force", False):
-            logger.info("Analyst: FORCE mode — re-scoring all %d grants", len(raw_grants))
-            to_score = list(raw_grants)
-        else:
-            existing_url_hashes: set = set()
-            existing_raw_ids: set = set()
-
-            async for doc in col.find(
-                {},
-                {"url_hash": 1, "raw_grant_id": 1, "url": 1},
-            ):
-                if doc.get("url_hash"):
-                    existing_url_hashes.add(doc["url_hash"])
-                if doc.get("raw_grant_id"):
-                    existing_raw_ids.add(doc["raw_grant_id"])
-
-            to_score = []
-            for g in raw_grants:
-                url_h = g.get("url_hash", "")
-                raw_id = str(g.get("_id", ""))
-                if url_h and url_h in existing_url_hashes:
-                    logger.debug("Already scored (url_hash match): %s", g.get("title", "")[:50])
-                    skipped += 1
-                    continue
-                if raw_id and raw_id in existing_raw_ids:
-                    logger.debug("Already scored (raw_grant_id match): %s", g.get("title", "")[:50])
-                    skipped += 1
-                    continue
-                to_score.append(g)
+        for g in raw_grants:
+            url_h = g.get("url_hash", "")
+            raw_id = str(g.get("_id", ""))
+            if url_h and url_h in existing_url_hashes:
+                logger.debug("Already scored (url_hash match): %s", g.get("title", "")[:50])
+                skipped += 1
+                continue
+            if raw_id and raw_id in existing_raw_ids:
+                logger.debug("Already scored (raw_grant_id match): %s", g.get("title", "")[:50])
+                skipped += 1
+                continue
+            to_score.append(g)
 
         logger.info(
             "Analyst: %d to score, %d already in grants_scored (skipped)",
