@@ -65,6 +65,12 @@ def make_mock_client():
     # pages.update returns the same
     client.pages.update.return_value = {"id": FAKE_PAGE_ID}
 
+    # blocks.children.list returns empty (for _replace_page_children)
+    client.blocks.children.list.return_value = {"results": [], "has_more": False}
+
+    # blocks.children.append returns empty
+    client.blocks.children.append.return_value = {"results": []}
+
     return client
 
 
@@ -130,7 +136,8 @@ def test_sync_scored_grant_create():
         assert len(props["Themes"]["multi_select"]) == 2
         assert props["Themes"]["multi_select"][0]["name"] == "Climate Tech"
         assert props["Funding USD"]["number"] == 500000
-        assert props["AI Recommendation"]["select"]["name"] == "Pursue"
+        # AI Recommendation is a rollup in Notion (read-only), so it's not synced as a property
+        assert "AI Recommendation" not in props
         assert props["Grant URL"]["url"] == "https://ec.europa.eu/horizon/climate-innovation-2026"
         assert props["Deadline"]["date"]["start"] == "2026-06-30"
 
@@ -347,6 +354,62 @@ def test_sync_draft_section_create():
         TestResults.fail(name, str(e))
 
 
+def test_push_complete_draft_to_notion_create():
+    """Push a complete draft to the grant's own page in the Pipeline DB."""
+    name = "push_complete_draft_to_notion (append to grant page)"
+    try:
+        mock_client = make_mock_client()
+        # _find_page_by_mongo_id returns the grant page
+        mock_client.databases.query.return_value = {
+            "results": [{"id": FAKE_PAGE_ID}]
+        }
+        sections = {
+            "Executive Summary": {
+                "content": "AltCarbon proposes a scalable biochar intervention for smallholder farms.",
+                "word_count": 11,
+                "word_limit": 300,
+                "within_limit": True,
+            },
+            "Budget": {
+                "content": "Budget requests cover field pilots, MRV sampling, and implementation staffing.",
+                "word_count": 11,
+                "word_limit": 400,
+                "within_limit": True,
+            },
+        }
+
+        with patch("backend.integrations.notion_sync._get_client", return_value=mock_client):
+            from backend.integrations.notion_sync import push_complete_draft_to_notion
+            result = run(push_complete_draft_to_notion(
+                grant_id=FAKE_MONGO_ID,
+                grant_name="EU Horizon Climate Innovation Fund",
+                sections=sections,
+                version=2,
+                evidence_gaps=["Need 2025 pilot sequestration results"],
+                funder="European Commission",
+                deadline="2026-06-30",
+            ))
+
+        assert result == FAKE_PAGE_ID
+        # Should append blocks to the existing grant page, not create a new page
+        assert mock_client.blocks.children.append.called, "blocks.children.append should be called"
+        call_kwargs = mock_client.blocks.children.append.call_args
+        block_id = call_kwargs.kwargs.get("block_id") or call_kwargs[1].get("block_id")
+        children = call_kwargs.kwargs.get("children") or call_kwargs[1].get("children")
+        assert block_id == FAKE_PAGE_ID
+        assert children is not None and len(children) > 0
+        # First block should be a divider, second a callout
+        assert children[0]["type"] == "divider"
+        assert children[1]["type"] == "callout"
+
+        # Should also update status to Drafting
+        assert mock_client.pages.update.called
+
+        TestResults.ok(name)
+    except Exception as e:
+        TestResults.fail(name, str(e))
+
+
 def test_update_grant_status():
     """Update just the status of an existing grant."""
     name = "update_grant_status"
@@ -408,6 +471,7 @@ def test_fire_and_forget_safety():
             from backend.integrations.notion_sync import (
                 sync_scored_grant, log_agent_run, log_error,
                 log_triage_decision, sync_draft_section, update_grant_status,
+                push_complete_draft_to_notion,
             )
 
             # None of these should raise
@@ -417,6 +481,11 @@ def test_fire_and_forget_safety():
             r4 = run(log_triage_decision(grant_id="x", grant_name="x", decision="pursue"))
             r5 = run(sync_draft_section(grant_id="x", grant_name="x", section_name="x", content="x"))
             r6 = run(update_grant_status("x", "pursue"))
+            r7 = run(push_complete_draft_to_notion(
+                grant_id="x",
+                grant_name="x",
+                sections={"Executive Summary": {"content": "test"}},
+            ))
 
         assert r1 is None
         assert r2 is None
@@ -424,6 +493,7 @@ def test_fire_and_forget_safety():
         assert r4 is None
         assert r5 is None
         assert r6 is False
+        assert r7 is None
 
         TestResults.ok(name)
     except Exception as e:
@@ -540,6 +610,7 @@ if __name__ == "__main__":
         test_log_error,
         test_log_triage_decision,
         test_sync_draft_section_create,
+        test_push_complete_draft_to_notion_create,
         test_update_grant_status,
         test_backfill_grants,
         test_fire_and_forget_safety,

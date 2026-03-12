@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
+import { LANDING_ROUTE } from "@/lib/deployment";
 
 export default function Home() {
-  redirect("/dashboard");
+  redirect(LANDING_ROUTE);
 }
