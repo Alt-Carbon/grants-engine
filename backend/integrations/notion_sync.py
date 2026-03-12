@@ -1033,6 +1033,112 @@ async def sync_draft_section(
         return None
 
 
+# ── Push complete draft to Notion ─────────────────────────────────────────────
+
+async def push_complete_draft_to_notion(
+    grant_id: str,
+    grant_name: str,
+    sections: dict[str, dict[str, Any]],
+    version: int = 1,
+    evidence_gaps: list[str] | None = None,
+    funder: str = "",
+    deadline: str = "",
+) -> str | None:
+    """Append the complete draft to the grant's own page in the Pipeline DB.
+
+    Finds the grant page in Grant Pipeline, appends a "Draft" section with
+    all draft sections, word counts, and evidence gaps. Updates status to
+    "Drafting".
+
+    Returns the Notion page ID on success, None on failure.
+    """
+    try:
+        client = _get_client()
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        # ── Find the grant's page in the Pipeline DB ────────────────────
+        page_id = await _find_page_by_mongo_id(GRANT_PIPELINE_DS, grant_id)
+        if not page_id:
+            log.warning("Notion: grant %s not found in pipeline for draft push", grant_id)
+            return None
+
+        # ── Build draft blocks to append ────────────────────────────────
+        total_words = sum(
+            int(sec.get("word_count") or len(str(sec.get("content", "")).split()))
+            for sec in sections.values()
+        )
+
+        blocks: list[dict[str, Any]] = []
+
+        blocks.append(_divider())
+        blocks.append(_callout(
+            f"\U0001f4dd Draft v{version}  |  {len(sections)} sections  |  {total_words} words  |  {now}",
+            emoji="\U0001f4dd",
+            color="blue_background",
+        ))
+
+        # Each section
+        for section_name, sec_data in sections.items():
+            content = str(sec_data.get("content", "") or "")
+            word_count = int(sec_data.get("word_count") or len(content.split()))
+            word_limit = int(sec_data.get("word_limit") or 500)
+            within = bool(sec_data.get("within_limit", word_count <= word_limit))
+            status_mark = "\u2705" if within else f"\u26a0\ufe0f OVER ({word_count}/{word_limit})"
+
+            blocks.append(_heading2(section_name))
+            blocks.append(_paragraph(
+                f"{word_count} words / {word_limit} limit {status_mark}",
+                italic=True, color="gray",
+            ))
+
+            # Content paragraphs (auto-chunked for Notion 2000-char limit)
+            if content:
+                for chunk in [content[i:i+1900] for i in range(0, len(content), 1900)]:
+                    blocks.append(_paragraph(chunk))
+
+            blocks.append(_divider())
+
+        # Evidence gaps section
+        if evidence_gaps:
+            blocks.append(_callout(
+                f"{len(evidence_gaps)} Evidence Gap{'s' if len(evidence_gaps) != 1 else ''} — Fill Before Submission",
+                emoji="\u26a0\ufe0f",
+                color="orange_background",
+            ))
+            for gap in evidence_gaps:
+                blocks.append(_bullet(gap))
+            blocks.append(_divider())
+
+        # Footer
+        blocks.append(_paragraph(
+            f"Pushed from Grants Engine  |  {now}",
+            color="gray",
+        ))
+
+        # ── Append blocks to the grant page ─────────────────────────────
+        for i in range(0, len(blocks), 100):
+            await client.blocks.children.append(
+                block_id=page_id,
+                children=blocks[i:i+100],
+            )
+
+        # ── Update status to Drafting ───────────────────────────────────
+        try:
+            await client.pages.update(
+                page_id=page_id,
+                properties={"Status": {"select": {"name": "Drafting"}}},
+            )
+        except Exception:
+            log.debug("Failed to update grant status for %s", grant_id, exc_info=True)
+
+        log.info("Notion: pushed draft v%d to grant page %s (%s)", version, grant_name[:40], page_id)
+        return page_id
+
+    except Exception:
+        log.warning("Notion push_complete_draft failed", exc_info=True)
+        return None
+
+
 # ── Bulk sync (for initial backfill) ─────────────────────────────────────────
 
 async def backfill_grants(grants: list[dict[str, Any]]) -> int:

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
+import { isHybridMode, NOTION_WORKSPACE_URL } from "@/lib/deployment";
 import {
   Play,
   Search,
@@ -34,6 +35,7 @@ import {
   Wifi,
   WifiOff,
   Globe,
+  BookOpen,
 } from "lucide-react";
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -111,6 +113,11 @@ interface APIHealthData {
   exa: ServiceHealth;
   perplexity: ServiceHealth;
   jina: ServiceHealth;
+}
+
+interface NotionMcpStatus {
+  status: "connected" | "disconnected" | "error" | string;
+  tools?: number;
 }
 
 interface MissionControlProps {
@@ -276,6 +283,23 @@ function CommandHeader({
 
         {/* Right: System status + refresh */}
         <div className="flex items-center gap-4">
+          <div className="hidden items-center gap-2 lg:flex">
+            <Link
+              href="/toolkit"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              <Terminal className="h-3.5 w-3.5" />
+              Toolkit
+            </Link>
+            <Link
+              href="/drafter"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              Drafter
+            </Link>
+          </div>
+
           {/* System status pill */}
           <div className="hidden items-center gap-2.5 rounded-full border border-slate-200 px-3.5 py-2 sm:flex">
             <StatusDot
@@ -310,6 +334,96 @@ function CommandHeader({
         </div>
       </div>
     </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Notion Pipeline Banner (hybrid mode only)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function NotionPipelineBanner({
+  pipeline,
+  notionMcp,
+}: {
+  pipeline: PipelineSummary;
+  notionMcp: NotionMcpStatus | null;
+}) {
+  if (!isHybridMode) return null;
+
+  const notionConnected = notionMcp?.status === "connected";
+
+  return (
+    <a
+      href={NOTION_WORKSPACE_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg"
+    >
+      {/* Subtle gradient shimmer */}
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-white/[0.03] to-transparent opacity-0 transition-opacity group-hover:opacity-100" />
+
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white/10 backdrop-blur-sm">
+            <BookOpen className="h-5 w-5 text-white" />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold text-white">
+              Grant Pipeline in Notion
+            </h2>
+            <p className="mt-0.5 text-[11px] text-white/50">
+              {pipeline.total_discovered} grants discovered · {pipeline.pursuing} pursuing · {pipeline.drafting} drafting
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* Notion MCP status */}
+          <div className="flex items-center gap-2 rounded-full bg-white/10 px-3 py-1.5">
+            {notionConnected ? (
+              <>
+                <Wifi className="h-3 w-3 text-emerald-400" />
+                <span className="text-[10px] font-semibold text-emerald-400">
+                  Notion Synced
+                </span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="h-3 w-3 text-amber-400" />
+                <span className="text-[10px] font-semibold text-amber-400">
+                  Notion Offline
+                </span>
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 text-white/60 transition-colors group-hover:text-white">
+            <span className="text-xs font-semibold">Open in Notion</span>
+            <ArrowUpRight className="h-4 w-4" />
+          </div>
+        </div>
+      </div>
+
+      {/* Mini pipeline stages */}
+      <div className="mt-4 flex gap-2">
+        {[
+          { label: "Triage", count: pipeline.in_triage, color: "bg-blue-400" },
+          { label: "Pursuing", count: pipeline.pursuing, color: "bg-emerald-400" },
+          { label: "Drafting", count: pipeline.drafting, color: "bg-purple-400" },
+          { label: "Submitted", count: pipeline.submitted, color: "bg-cyan-400" },
+        ].map((stage) => (
+          <div
+            key={stage.label}
+            className="flex items-center gap-2 rounded-lg bg-white/[0.07] px-3 py-1.5"
+          >
+            <div className={`h-1.5 w-1.5 rounded-full ${stage.color}`} />
+            <span className="text-[10px] font-semibold text-white/70">
+              {stage.count} {stage.label}
+            </span>
+          </div>
+        ))}
+      </div>
+    </a>
   );
 }
 
@@ -410,14 +524,27 @@ function AlertBadges({ data }: { data: PipelineSummary }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       {data.urgent > 0 && (
-        <Link
-          href="/triage"
-          className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-[11px] font-semibold text-rose-700 transition-colors hover:bg-rose-100"
-        >
-          <AlertTriangle className="h-3 w-3" />
-          {data.urgent} urgent deadline{data.urgent !== 1 ? "s" : ""}
-          <ArrowUpRight className="h-3 w-3" />
-        </Link>
+        isHybridMode ? (
+          <a
+            href={NOTION_WORKSPACE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-[11px] font-semibold text-rose-700 transition-colors hover:bg-rose-100"
+          >
+            <AlertTriangle className="h-3 w-3" />
+            {data.urgent} urgent deadline{data.urgent !== 1 ? "s" : ""}
+            <ArrowUpRight className="h-3 w-3" />
+          </a>
+        ) : (
+          <Link
+            href="/triage"
+            className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-[11px] font-semibold text-rose-700 transition-colors hover:bg-rose-100"
+          >
+            <AlertTriangle className="h-3 w-3" />
+            {data.urgent} urgent deadline{data.urgent !== 1 ? "s" : ""}
+            <ArrowUpRight className="h-3 w-3" />
+          </Link>
+        )
       )}
       {data.unprocessed > 0 && (
         <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] font-semibold text-amber-700">
@@ -1057,13 +1184,25 @@ function RecentDiscoveries({ grants }: { grants: Discovery[] }) {
             {grants.length}
           </span>
         </div>
-        <Link
-          href="/pipeline?view=table&sort=scored_at"
-          className="flex items-center gap-1 text-[11px] font-semibold text-blue-600 transition-colors hover:text-blue-800"
-        >
-          View all
-          <ArrowRight className="h-3 w-3" />
-        </Link>
+        {isHybridMode ? (
+          <a
+            href={NOTION_WORKSPACE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 text-[11px] font-semibold text-blue-600 transition-colors hover:text-blue-800"
+          >
+            View in Notion
+            <ArrowRight className="h-3 w-3" />
+          </a>
+        ) : (
+          <Link
+            href="/pipeline?view=table&sort=scored_at"
+            className="flex items-center gap-1 text-[11px] font-semibold text-blue-600 transition-colors hover:text-blue-800"
+          >
+            View all
+            <ArrowRight className="h-3 w-3" />
+          </Link>
+        )}
       </div>
 
       {grants.length === 0 ? (
@@ -1377,6 +1516,7 @@ export default function MissionControl({
   const [scout, setScout] = useState<AgentStatus | null>(null);
   const [analyst, setAnalyst] = useState<AgentStatus | null>(null);
   const [apiHealth, setApiHealth] = useState<APIHealthData | null>(null);
+  const [notionMcp, setNotionMcp] = useState<NotionMcpStatus | null>(null);
   const [triggerLoading, setTriggerLoading] = useState<string | null>(null);
   const [activity, setActivity] = useState<ActivityEvent[]>(initialActivity);
   const [discoveries, setDiscoveries] =
@@ -1386,13 +1526,14 @@ export default function MissionControl({
 
   const poll = useCallback(async () => {
     try {
-      const [s, a, act, disc, pipe, health] = await Promise.all([
+      const [s, a, act, disc, pipe, health, notion] = await Promise.all([
         fetch("/api/run/scout").then((r) => r.json()),
         fetch("/api/run/analyst").then((r) => r.json()),
         fetch("/api/activity").then((r) => r.json()),
         fetch("/api/discoveries").then((r) => r.json()),
         fetch("/api/pipeline-summary").then((r) => r.json()),
         fetch("/api/status/api-health").then((r) => r.json()).catch(() => null),
+        fetch("/api/status/notion-mcp").then((r) => r.json()).catch(() => null),
       ]);
       setScout(s);
       setAnalyst(a);
@@ -1400,6 +1541,7 @@ export default function MissionControl({
       if (Array.isArray(disc)) setDiscoveries(disc);
       if (pipe && typeof pipe.total_discovered === "number") setPipeline(pipe);
       if (health?.services) setApiHealth(health.services);
+      if (notion) setNotionMcp(notion);
       setLastRefresh(Date.now());
     } catch {
       /* ignore */
@@ -1441,6 +1583,9 @@ export default function MissionControl({
         analystRunning={analyst?.running ?? false}
         apiExhaustedCount={apiExhaustedCount}
       />
+
+      {/* Notion Pipeline Banner (hybrid mode) */}
+      <NotionPipelineBanner pipeline={pipeline} notionMcp={notionMcp} />
 
       {/* KPI metrics row */}
       <PipelineMetrics data={pipeline} />

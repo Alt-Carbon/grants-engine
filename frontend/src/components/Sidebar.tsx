@@ -16,20 +16,27 @@ import {
   Activity,
   ScrollText,
   LogOut,
+  Wrench,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { isHybridMode, HYBRID_HIDDEN_ROUTES } from "@/lib/deployment";
 import { AgentControls } from "./AgentControls";
 
-const NAV = [
+const ALL_NAV = [
   { href: "/dashboard", label: "Dashboard", icon: BarChart3 },
   { href: "/pipeline", label: "Pipeline", icon: Kanban },
   { href: "/triage", label: "Shortlisted", icon: ListChecks },
   { href: "/drafter", label: "Drafter", icon: FileText },
   { href: "/monitoring", label: "Mission Control", icon: Activity },
+  { href: "/toolkit", label: "Toolkit", icon: Wrench },
   { href: "/audit", label: "Audit Log", icon: ScrollText },
   { href: "/config", label: "Config", icon: Settings },
   { href: "/knowledge", label: "Knowledge", icon: Database },
 ];
+
+const NAV = isHybridMode
+  ? ALL_NAV.filter((n) => !HYBRID_HIDDEN_ROUTES.has(n.href))
+  : ALL_NAV;
 
 export function Sidebar() {
   const pathname = usePathname();

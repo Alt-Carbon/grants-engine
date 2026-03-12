@@ -337,9 +337,10 @@ def _build_grant_context(grant: dict) -> str:
         for w in winners:
             yr = f" ({w['year']})" if w.get("year") else ""
             sim = w.get("altcarbon_similarity", "")
+            country = f" — {w.get('country', '')}" if w.get("country") else ""
             w_lines.append(
                 f"  • {w.get('name', '?')}{yr}"
-                f"{f' — {w.get(\"country\", \"\")}' if w.get('country') else ''}"
+                f"{country}"
                 f" [{sim} similarity]: {w.get('project_brief', '')}"
             )
         parts.append("PAST WINNERS:\n" + "\n".join(w_lines))
@@ -1496,6 +1497,58 @@ def _sse(event: str, data: dict) -> str:
 
 class IntelligenceBriefRequest(BaseModel):
     grant_id: str
+
+
+class PushDraftToNotionRequest(BaseModel):
+    grant_id: str
+    pipeline_id: Optional[str] = None
+
+
+@app.post("/drafter/push-to-notion")
+async def push_draft_to_notion(
+    body: PushDraftToNotionRequest,
+    _: None = Depends(verify_internal),
+):
+    """Push the latest complete draft to Notion as a rich page."""
+    from bson import ObjectId
+    from backend.db.mongo import grant_drafts, grants_scored
+    from backend.integrations.notion_sync import push_complete_draft_to_notion
+
+    # Fetch latest draft from MongoDB
+    query: dict = {"grant_id": body.grant_id}
+    if body.pipeline_id:
+        query["pipeline_id"] = body.pipeline_id
+    draft = await grant_drafts().find_one(query, sort=[("version", -1)])
+    if not draft:
+        return {"success": False, "error": "No draft found for this grant"}
+
+    # Fetch grant info for context
+    grant = {}
+    try:
+        grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)}) or {}
+    except Exception:
+        pass
+
+    grant_name = grant.get("grant_name") or grant.get("title") or "Unknown Grant"
+    funder = grant.get("funder", "")
+    deadline = grant.get("deadline", "")
+    if hasattr(deadline, "strftime"):
+        deadline = deadline.strftime("%Y-%m-%d")
+
+    page_id = await push_complete_draft_to_notion(
+        grant_id=body.grant_id,
+        grant_name=grant_name,
+        sections=draft.get("sections", {}),
+        version=draft.get("version", 1),
+        evidence_gaps=draft.get("evidence_gaps_all"),
+        funder=funder,
+        deadline=str(deadline) if deadline else "",
+    )
+
+    if page_id:
+        notion_url = f"https://notion.so/{page_id.replace('-', '')}"
+        return {"success": True, "notion_page_id": page_id, "notion_url": notion_url}
+    return {"success": False, "error": "Notion push failed — check server logs"}
 
 
 @app.post("/drafter/intelligence-brief")

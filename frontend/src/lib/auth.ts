@@ -3,6 +3,11 @@ import Google from "next-auth/providers/google";
 
 const ALLOWED_DOMAIN = "altcarbon.com";
 
+const LANDING =
+  process.env.NEXT_PUBLIC_DEPLOYMENT_MODE === "hybrid"
+    ? "/monitoring"
+    : "/dashboard";
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [
     Google({
@@ -35,7 +40,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       // Redirect logged-in users away from login page
       if (isLoginPage) {
         if (isLoggedIn) {
-          return Response.redirect(new URL("/dashboard", request.nextUrl));
+          return Response.redirect(new URL(LANDING, request.nextUrl));
         }
         return true;
       }

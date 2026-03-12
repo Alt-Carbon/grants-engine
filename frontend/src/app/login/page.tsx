@@ -1,5 +1,6 @@
 import { auth, signIn } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { LANDING_ROUTE } from "@/lib/deployment";
 import Image from "next/image";
 import {
   Search,
@@ -16,7 +17,7 @@ export default async function LoginPage({
   searchParams: Promise<{ error?: string }>;
 }) {
   const session = await auth();
-  if (session) redirect("/dashboard");
+  if (session) redirect(LANDING_ROUTE);
 
   const params = await searchParams;
   const error = params.error;
@@ -144,7 +145,7 @@ export default async function LoginPage({
           <form
             action={async () => {
               "use server";
-              await signIn("google", { redirectTo: "/dashboard" });
+              await signIn("google", { redirectTo: LANDING_ROUTE });
             }}
           >
             <button
