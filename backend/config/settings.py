@@ -10,8 +10,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # MongoDB
+    # MongoDB (legacy — being replaced by SQLite + Notion)
     mongodb_uri: str = "mongodb://localhost:27017"
+
+    # SQLite (primary backend state store)
+    sqlite_db_path: str = ""  # Auto-detected if empty: backend/data/grants_engine.db
 
     # AI Gateway (primary — routes to all models via OpenAI-compatible API)
     ai_gateway_url: str = "https://ai-gateway.vercel.sh/v1"

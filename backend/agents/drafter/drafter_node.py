@@ -101,8 +101,6 @@ async def drafter_node(state: GrantState) -> Dict:
 async def _drafter_node_inner(state: GrantState) -> Dict:
     """Inner drafter logic, wrapped by drafter_node() for error handling."""
     from backend.agents.drafter.theme_profiles import resolve_theme, get_theme_profile
-    from backend.db.mongo import grants_scored
-    from bson import ObjectId
 
     grant_requirements = state.get("grant_requirements") or {}
     sections = grant_requirements.get("sections_required", [])
@@ -117,11 +115,20 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
     review_decision = state.get("section_review_decision")
     edited_content = state.get("section_edited_content")
 
-    # Load grant info
+    # Load grant info — Notion-first, MongoDB fallback
     grant = {}
+    notion_page_id = state.get("selected_notion_page_id")
     grant_id = state.get("selected_grant_id")
-    if grant_id:
+    if notion_page_id:
         try:
+            from backend.integrations.notion_data import get_grant_by_page_id
+            grant = await get_grant_by_page_id(notion_page_id) or {}
+        except Exception:
+            pass
+    if not grant and grant_id:
+        try:
+            from backend.db.mongo import grants_scored
+            from bson import ObjectId
             grant = await grants_scored().find_one({"_id": ObjectId(grant_id)}) or {}
         except Exception:
             pass

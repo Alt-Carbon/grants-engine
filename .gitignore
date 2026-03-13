@@ -39,6 +39,9 @@ out/
 .env.*
 !.env.example
 
+# ── SQLite database ────────────────────────────────────────
+backend/data/*.db
+
 # ── Generated outputs ───────────────────────────────────────
 *.xlsx
 *.csv

@@ -1,8 +1,9 @@
 /**
- * TypeScript port of app/db/queries.py — all MongoDB read functions for the UI.
- * Import only in Server Components, Server Actions, and API routes.
+ * Frontend query layer — all reads go through the FastAPI backend v2 API.
+ * Notion (grants) and SQLite (metadata) are the sources of truth.
+ * No direct MongoDB access.
  */
-import { getDb } from "./mongodb";
+import { apiGet, apiPost } from "./api";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -34,6 +35,7 @@ export interface Grant {
   scored_at?: string;
   scraped_at?: string;
   notion_page_url?: string;
+  notion_page_id?: string;
 }
 
 export interface PipelineRecord {
@@ -82,311 +84,79 @@ export interface AgentConfig {
   [key: string]: unknown;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-function serializeId(doc: Record<string, unknown>): Record<string, unknown> {
-  return { ...doc, _id: String(doc._id) };
-}
-
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 
 export async function getDashboardStats() {
-  const db = await getDb();
-  const [total, triage, pursuing, onHold, drafting, complete, urgentCount] =
-    await Promise.all([
-      db.collection("grants_scored").countDocuments({}),
-      db.collection("grants_scored").countDocuments({ status: "triage" }),
-      db.collection("grants_scored").countDocuments({ status: { $in: ["pursue", "pursuing"] } }),
-      db.collection("grants_scored").countDocuments({ status: "hold" }),
-      db.collection("grants_pipeline").countDocuments({ status: "drafting" }),
-      db.collection("grants_pipeline").countDocuments({ status: "draft_complete" }),
-      db.collection("grants_scored").countDocuments({
-        deadline_urgent: true,
-        status: { $in: ["triage", "pursue"] },
-      }),
-    ]);
-
-  const warnings: string[] = [];
-  if (total > 0 && triage === 0) {
-    warnings.push(
-      "Shortlist is empty — run a new scout to discover fresh opportunities."
-    );
-  }
-  if (urgentCount > 0) {
-    warnings.push(
-      `${urgentCount} grant(s) with urgent deadlines (≤30 days) in your active queue — review now.`
-    );
-  }
-  if (onHold > 0) {
-    warnings.push(`${onHold} grant(s) on HOLD due to unresolved currency — manual review needed.`);
-  }
-
-  return {
-    total_discovered: total,
-    in_triage: triage,
-    pursuing,
-    on_hold: onHold,
-    deadline_urgent_count: urgentCount,
-    drafting,
-    draft_complete: complete,
-    warnings,
-  };
+  return apiGet<{
+    total_discovered: number;
+    in_triage: number;
+    pursuing: number;
+    on_hold: number;
+    deadline_urgent_count: number;
+    drafting: number;
+    draft_complete: number;
+    warnings: string[];
+  }>("/api/v2/dashboard/stats");
 }
 
 export async function getGrantsActivity(
   days = 30
 ): Promise<{ date: string; count: number }[]> {
-  const db = await getDb();
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-
-  const result = await db
-    .collection("grants_raw")
-    .aggregate([
-      { $match: { scraped_at: { $gte: since } } },
-      {
-        $group: {
-          _id: { $substr: ["$scraped_at", 0, 10] },
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { _id: 1 } },
-    ])
-    .toArray();
-
-  return result.map((r) => ({ date: r._id as string, count: r.count as number }));
+  return apiGet(`/api/v2/activity?days=${days}`);
 }
 
 // ── Pipeline Kanban ────────────────────────────────────────────────────────────
 
 export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
-  const db = await getDb();
-  // Fetch ALL scored grants — table view shows auto-passed too
-  const docs = await db
-    .collection("grants_scored")
-    .find({})
-    .sort({ weighted_total: -1 })
-    .limit(1000)
-    .toArray();
-
-  const grouped: Record<string, Grant[]> = {
-    shortlisted: [],
-    pursue: [],
-    drafting: [],
-    submitted: [],
-    rejected: [],
-  };
-
-  for (const doc of docs) {
-    const g = serializeId(doc as Record<string, unknown>) as unknown as Grant;
-    if (!g.grant_name && g.title) g.grant_name = g.title;
-
-    if (g.status === "triage") grouped.shortlisted.push(g);
-    else if (g.status === "pursue" || g.status === "pursuing") grouped.pursue.push(g);
-    else if (g.status === "drafting") grouped.drafting.push(g);
-    else if (g.status === "draft_complete" || g.status === "submitted" || g.status === "won")
-      grouped.submitted.push(g);
-    else if (g.status === "passed" || g.status === "auto_pass" || g.status === "human_passed" || g.status === "reported")
-      grouped.rejected.push(g);
-  }
-
-  return grouped;
+  return apiGet("/api/v2/grants");
 }
 
 // ── Triage Queue ───────────────────────────────────────────────────────────────
 
 export async function getTriageQueue(): Promise<Grant[]> {
-  const db = await getDb();
-  const docs = await db
-    .collection("grants_scored")
-    .find({ status: "triage" })
-    .sort({ weighted_total: -1 })
-    .toArray();
-
-  return docs.map((doc) => {
-    const g = serializeId(doc as Record<string, unknown>) as unknown as Grant;
-    if (!g.grant_name && g.title) g.grant_name = g.title;
-    return g;
-  });
+  return apiGet("/api/v2/grants/status/triage");
 }
 
 // ── Drafter ────────────────────────────────────────────────────────────────────
 
 export async function getDraftGrants(): Promise<PipelineRecord[]> {
-  const db = await getDb();
-
-  // Use $lookup to avoid N+1 queries (was: sequential findOne per pipeline)
-  const pipelines = await db
-    .collection("grants_pipeline")
-    .aggregate([
-      { $match: { status: { $in: ["drafting", "draft_complete"] } } },
-      { $sort: { started_at: -1 } },
-      {
-        $addFields: {
-          _grant_oid: {
-            $cond: {
-              if: { $ne: ["$grant_id", null] },
-              then: { $toObjectId: "$grant_id" },
-              else: null,
-            },
-          },
-        },
-      },
-      {
-        $lookup: {
-          from: "grants_scored",
-          localField: "_grant_oid",
-          foreignField: "_id",
-          as: "_grant",
-        },
-      },
-      {
-        $lookup: {
-          from: "grant_drafts",
-          let: { pid: { $toString: "$_id" } },
-          pipeline: [
-            { $match: { $expr: { $eq: ["$pipeline_id", "$$pid"] } } },
-            { $sort: { version: -1 } },
-            { $limit: 1 },
-          ],
-          as: "_drafts",
-        },
-      },
-      {
-        $addFields: {
-          grant_title: {
-            $ifNull: [
-              { $arrayElemAt: ["$_grant.grant_name", 0] },
-              { $ifNull: [{ $arrayElemAt: ["$_grant.title", 0] }, "Unknown Grant"] },
-            ],
-          },
-          grant_funder: { $ifNull: [{ $arrayElemAt: ["$_grant.funder", 0] }, ""] },
-          grant_themes: { $ifNull: [{ $arrayElemAt: ["$_grant.themes_detected", 0] }, []] },
-          latest_draft: { $arrayElemAt: ["$_drafts", 0] },
-        },
-      },
-      {
-        $project: { _grant: 0, _drafts: 0, _grant_oid: 0 },
-      },
-    ])
-    .toArray();
-
-  return pipelines.map((p) => {
-    const rec = serializeId(p as Record<string, unknown>) as unknown as PipelineRecord;
-    if (rec.latest_draft) {
-      rec.latest_draft = serializeId(
-        rec.latest_draft as unknown as Record<string, unknown>
-      ) as unknown as DraftDoc;
-    }
-    return rec;
-  });
+  return apiGet("/api/v2/drafts");
 }
 
 export async function getSections(pipelineId: string): Promise<Record<string, DraftSection>> {
-  const db = await getDb();
-  const draft = await db
-    .collection("grant_drafts")
-    .findOne({ pipeline_id: pipelineId }, { sort: { version: -1 } });
-  if (!draft) return {};
-  return (draft.sections as Record<string, DraftSection>) || {};
+  return apiGet(`/api/v2/drafts/${pipelineId}/sections`);
 }
 
 // ── Knowledge Health ───────────────────────────────────────────────────────────
 
 export async function getKnowledgeStatus(): Promise<KnowledgeStatus> {
-  const db = await getDb();
-  const [total, notion, drive, pastGrants] = await Promise.all([
-    db.collection("knowledge_chunks").countDocuments({}),
-    db.collection("knowledge_chunks").countDocuments({ source: "notion" }),
-    db.collection("knowledge_chunks").countDocuments({ source: "drive" }),
-    db.collection("knowledge_chunks").countDocuments({ doc_type: "past_grant_application" }),
-  ]);
-
-  const byTypeAgg = await db
-    .collection("knowledge_chunks")
-    .aggregate([{ $group: { _id: "$doc_type", count: { $sum: 1 } } }])
-    .toArray();
-  const byType: Record<string, number> = {};
-  for (const r of byTypeAgg) byType[r._id as string] = r.count as number;
-
-  const byThemeAgg = await db
-    .collection("knowledge_chunks")
-    .aggregate([
-      { $unwind: "$themes" },
-      { $group: { _id: "$themes", count: { $sum: 1 } } },
-    ])
-    .toArray();
-  const byTheme: Record<string, number> = {};
-  for (const r of byThemeAgg) byTheme[r._id as string] = r.count as number;
-
-  const lastSync = await db
-    .collection("knowledge_sync_logs")
-    .findOne({}, { sort: { synced_at: -1 } });
-
-  const status: KnowledgeStatus["status"] =
-    total >= 200 ? "healthy" : total >= 50 ? "thin" : "critical";
-
-  return {
-    total_chunks: total,
-    notion_chunks: notion,
-    drive_chunks: drive,
-    past_grant_chunks: pastGrants,
-    by_type: byType,
-    by_theme: byTheme,
-    last_synced: lastSync ? (lastSync.synced_at as string) : null,
-    status,
-  };
+  return apiGet("/api/v2/knowledge/status");
 }
 
 export async function getSyncLogs(limit = 5) {
-  const db = await getDb();
-  const docs = await db
-    .collection("knowledge_sync_logs")
-    .find({})
-    .sort({ synced_at: -1 })
-    .limit(limit)
-    .toArray();
-  return docs.map((d) => serializeId(d as Record<string, unknown>));
+  return apiGet<Record<string, unknown>[]>(`/api/v2/knowledge/sync-logs?limit=${limit}`);
 }
 
 // ── Agent Config ───────────────────────────────────────────────────────────────
 
 export async function getAgentConfig(agent?: string): Promise<AgentConfig | Record<string, AgentConfig>> {
-  const db = await getDb();
-  if (agent) {
-    const doc = await db.collection("agent_config").findOne({ agent });
-    if (!doc) return { agent };
-    return serializeId(doc as Record<string, unknown>) as unknown as AgentConfig;
-  }
-  const docs = await db.collection("agent_config").find({}).toArray();
-  const result: Record<string, AgentConfig> = {};
-  for (const d of docs) {
-    const cfg = serializeId(d as Record<string, unknown>) as unknown as AgentConfig;
-    result[cfg.agent] = cfg;
-  }
-  return result;
+  const path = agent ? `/api/v2/agent-config?agent=${agent}` : "/api/v2/agent-config";
+  return apiGet(path);
 }
 
 export async function getGrantById(id: string): Promise<Grant | null> {
-  const db = await getDb();
-  const { ObjectId } = await import("mongodb");
   try {
-    const doc = await db.collection("grants_scored").findOne({ _id: new ObjectId(id) });
-    if (!doc) return null;
-    const g = serializeId(doc as Record<string, unknown>) as unknown as Grant;
-    if (!g.grant_name && g.title) g.grant_name = g.title;
-    return g;
+    return await apiGet<Grant>(`/api/v2/grants/by-id/${id}`);
   } catch {
     return null;
   }
 }
 
 export async function saveAgentConfig(agent: string, config: Record<string, unknown>) {
-  const db = await getDb();
-  const update = { ...config, agent, updated_at: new Date().toISOString() };
-  await db.collection("agent_config").updateOne({ agent }, { $set: update }, { upsert: true });
+  return apiPost("/api/v2/agent-config", { agent, ...config });
 }
 
-// ── Monitoring (B2) ─────────────────────────────────────────────────────────
+// ── Monitoring ─────────────────────────────────────────────────────────────────
 
 export interface AgentRun {
   _id: string;
@@ -419,89 +189,18 @@ export interface AgentHealth {
 }
 
 export async function getAgentHealth(): Promise<AgentHealth[]> {
-  const db = await getDb();
-  const agents = ["scout", "analyst", "drafter", "knowledge_sync"];
-  const results: AgentHealth[] = [];
-
-  for (const agent of agents) {
-    const query = agent === "scout"
-      ? { node: "scout" }
-      : agent === "analyst"
-      ? { node: "analyst" }
-      : agent === "knowledge_sync"
-      ? { event: { $regex: /knowledge/i } }
-      : { node: agent };
-
-    const allRuns = await db.collection("audit_logs")
-      .find(query)
-      .sort({ created_at: -1 })
-      .limit(100)
-      .toArray();
-
-    const lastRun = allRuns[0];
-    const totalRuns = allRuns.length;
-
-    // For scout, also check scout_runs
-    let scoutRuns = 0;
-    if (agent === "scout") {
-      scoutRuns = await db.collection("scout_runs").countDocuments({});
-    }
-
-    const failedRuns = allRuns.filter(
-      (r) => String(r.action || "").toLowerCase().includes("fail")
-    ).length;
-
-    results.push({
-      agent,
-      lastRun: lastRun?.created_at ?? lastRun?.run_at ?? null,
-      lastStatus: lastRun ? "completed" : "never_run",
-      totalRuns: agent === "scout" ? Math.max(totalRuns, scoutRuns) : totalRuns,
-      successfulRuns: totalRuns - failedRuns,
-      failedRuns,
-      uptimePct: totalRuns > 0 ? Math.round(((totalRuns - failedRuns) / totalRuns) * 100) : 0,
-      lastGrantsProcessed: lastRun?.grants_scored ?? lastRun?.new_grants ?? 0,
-    });
-  }
-
-  return results;
+  return apiGet("/api/v2/agent-health");
 }
 
 export async function getRunHistory(limit = 50): Promise<AgentRun[]> {
-  const db = await getDb();
-  const docs = await db.collection("audit_logs")
-    .find({ node: { $in: ["scout", "analyst", "drafter", "company_brain", "grant_reader"] } })
-    .sort({ created_at: -1 })
-    .limit(limit)
-    .toArray();
-
-  return docs.map((d) => serializeId(d as Record<string, unknown>) as unknown as AgentRun);
+  return apiGet(`/api/v2/run-history?limit=${limit}`);
 }
 
 export async function getErrorTimeline(days = 7): Promise<{ date: string; agent: string; message: string; created_at: string }[]> {
-  const db = await getDb();
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-
-  const docs = await db.collection("audit_logs")
-    .find({
-      created_at: { $gte: since },
-      $or: [
-        { action: { $regex: /fail|error/i } },
-        { event: { $regex: /fail|error/i } },
-      ],
-    })
-    .sort({ created_at: -1 })
-    .limit(50)
-    .toArray();
-
-  return docs.map((d) => ({
-    date: (d.created_at as string || "").slice(0, 10),
-    agent: (d.node as string) || "unknown",
-    message: (d.action as string) || (d.event as string) || "Error",
-    created_at: d.created_at as string || "",
-  }));
+  return apiGet(`/api/v2/error-timeline?days=${days}`);
 }
 
-// ── Audit Log (B5) ──────────────────────────────────────────────────────────
+// ── Audit Log ──────────────────────────────────────────────────────────────────
 
 export interface AuditEntry {
   _id: string;
@@ -516,28 +215,14 @@ export async function getAuditLogs(
   filters?: { agent?: string; days?: number },
   limit = 100
 ): Promise<AuditEntry[]> {
-  const db = await getDb();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const query: Record<string, any> = {};
-
-  if (filters?.agent) {
-    query.node = filters.agent;
-  }
-  if (filters?.days) {
-    const since = new Date(Date.now() - filters.days * 24 * 60 * 60 * 1000).toISOString();
-    query.created_at = { $gte: since };
-  }
-
-  const docs = await db.collection("audit_logs")
-    .find(query)
-    .sort({ created_at: -1 })
-    .limit(limit)
-    .toArray();
-
-  return docs.map((d) => serializeId(d as Record<string, unknown>) as unknown as AuditEntry);
+  const params = new URLSearchParams();
+  if (filters?.agent) params.set("agent", filters.agent);
+  if (filters?.days) params.set("days", String(filters.days));
+  params.set("limit", String(limit));
+  return apiGet(`/api/v2/audit-logs?${params}`);
 }
 
-// ── Grant Comments (B4) ─────────────────────────────────────────────────────
+// ── Grant Comments ─────────────────────────────────────────────────────────────
 
 export interface GrantComment {
   _id: string;
@@ -547,17 +232,13 @@ export interface GrantComment {
   message: string;
   created_at: string;
   parent_id?: string;
+  pinned?: boolean;
+  reactions?: Record<string, string[]>;
+  edited_at?: string | null;
 }
 
 export async function getGrantComments(grantId: string): Promise<GrantComment[]> {
-  const db = await getDb();
-  const docs = await db.collection("grant_comments")
-    .find({ grant_id: grantId })
-    .sort({ created_at: 1 })
-    .limit(100)
-    .toArray();
-
-  return docs.map((d) => serializeId(d as Record<string, unknown>) as unknown as GrantComment);
+  return apiGet(`/api/v2/comments/${grantId}`);
 }
 
 export interface ScoutRunDetail {
@@ -574,13 +255,7 @@ export interface ScoutRunDetail {
 }
 
 export async function getScoutRuns(limit = 10): Promise<ScoutRunDetail[]> {
-  const db = await getDb();
-  const docs = await db.collection("scout_runs")
-    .find({})
-    .sort({ run_at: -1 })
-    .limit(limit)
-    .toArray();
-  return docs.map((d) => serializeId(d as Record<string, unknown>) as unknown as ScoutRunDetail);
+  return apiGet(`/api/v2/scout-runs?limit=${limit}`);
 }
 
 export async function addGrantComment(
@@ -589,19 +264,14 @@ export async function addGrantComment(
   userEmail: string,
   message: string
 ): Promise<GrantComment> {
-  const db = await getDb();
-  const doc = {
-    grant_id: grantId,
+  return apiPost(`/api/v2/comments/${grantId}`, {
     user_name: userName,
     user_email: userEmail,
     message,
-    created_at: new Date().toISOString(),
-  };
-  const result = await db.collection("grant_comments").insertOne(doc);
-  return { ...doc, _id: String(result.insertedId) };
+  });
 }
 
-// ── Recent Discoveries (Mission Control) ──────────────────────────────────
+// ── Recent Discoveries (Mission Control) ──────────────────────────────────────
 
 export interface RecentDiscovery {
   _id: string;
@@ -618,31 +288,10 @@ export interface RecentDiscovery {
 }
 
 export async function getRecentDiscoveries(limit = 20): Promise<RecentDiscovery[]> {
-  const db = await getDb();
-
-  // Get recently scored grants (newest first)
-  const scored = await db.collection("grants_scored")
-    .find({})
-    .sort({ scored_at: -1, _id: -1 })
-    .limit(limit)
-    .toArray();
-
-  return scored.map((d) => ({
-    _id: String(d._id),
-    grant_name: (d.grant_name as string) || (d.title as string) || "Untitled",
-    funder: (d.funder as string) || "Unknown",
-    source: (d.source as string) || "scout",
-    scored_at: (d.scored_at as string) || null,
-    scraped_at: (d.scraped_at as string) || null,
-    weighted_total: (d.weighted_total as number) ?? null,
-    status: (d.status as string) || "triage",
-    themes_detected: (d.themes_detected as string[]) || [],
-    max_funding_usd: (d.max_funding_usd as number) ?? (d.max_funding as number) ?? null,
-    url: (d.url as string) || null,
-  }));
+  return apiGet(`/api/v2/discoveries?limit=${limit}`);
 }
 
-// ── Activity Feed (Mission Control) ────────────────────────────────────────
+// ── Activity Feed (Mission Control) ────────────────────────────────────────────
 
 export interface ActivityEvent {
   _id: string;
@@ -654,40 +303,10 @@ export interface ActivityEvent {
 }
 
 export async function getActivityFeed(limit = 50): Promise<ActivityEvent[]> {
-  const db = await getDb();
-
-  const docs = await db.collection("audit_logs")
-    .find({})
-    .sort({ created_at: -1 })
-    .limit(limit)
-    .toArray();
-
-  return docs.map((d) => {
-    const action = (d.action as string) || (d.event as string) || "";
-    const isError = /fail|error/i.test(action);
-    const isWarning = /warn|skip|reject/i.test(action);
-
-    const details: string[] = [];
-    if (d.grants_scored) details.push(`${d.grants_scored} scored`);
-    if (d.new_grants) details.push(`${d.new_grants} new`);
-    if (d.total_found) details.push(`${d.total_found} found`);
-    if (d.pursue_count) details.push(`${d.pursue_count} pursue`);
-    if (d.auto_pass_count) details.push(`${d.auto_pass_count} auto-pass`);
-    if (d.scored_count) details.push(`${d.scored_count} scored`);
-    if (d.input_count) details.push(`${d.input_count} input`);
-
-    return {
-      _id: String(d._id),
-      agent: (d.node as string) || "system",
-      action,
-      details: details.join(" · ") || "",
-      created_at: (d.created_at as string) || "",
-      type: isError ? "error" : isWarning ? "warning" : "success",
-    };
-  });
+  return apiGet(`/api/v2/activity-feed?limit=${limit}`);
 }
 
-// ── Pipeline Summary (Mission Control) ─────────────────────────────────────
+// ── Pipeline Summary (Mission Control) ─────────────────────────────────────────
 
 export interface PipelineSummary {
   total_discovered: number;
@@ -702,34 +321,10 @@ export interface PipelineSummary {
 }
 
 export async function getPipelineSummary(): Promise<PipelineSummary> {
-  const db = await getDb();
-  const [total, triage, pursuing, onHold, drafting, submitted, rejected, urgent, unprocessed] =
-    await Promise.all([
-      db.collection("grants_scored").countDocuments({}),
-      db.collection("grants_scored").countDocuments({ status: "triage" }),
-      db.collection("grants_scored").countDocuments({ status: { $in: ["pursue", "pursuing"] } }),
-      db.collection("grants_scored").countDocuments({ status: "hold" }),
-      db.collection("grants_pipeline").countDocuments({ status: "drafting" }),
-      db.collection("grants_pipeline").countDocuments({ status: { $in: ["draft_complete", "submitted", "won"] } }),
-      db.collection("grants_scored").countDocuments({ status: { $in: ["passed", "auto_pass", "human_passed"] } }),
-      db.collection("grants_scored").countDocuments({ deadline_urgent: true, status: { $in: ["triage", "pursue"] } }),
-      db.collection("grants_raw").countDocuments({ processed: false }),
-    ]);
-
-  return {
-    total_discovered: total,
-    in_triage: triage,
-    pursuing,
-    on_hold: onHold,
-    drafting,
-    submitted,
-    rejected,
-    urgent,
-    unprocessed,
-  };
+  return apiGet("/api/v2/pipeline-summary");
 }
 
-// ── What's New Digest (returning user) ──────────────────────────────────
+// ── What's New Digest ──────────────────────────────────────────────────────────
 
 export interface WhatsNewDigest {
   daysSinceVisit: number;
@@ -756,98 +351,7 @@ export interface WhatsNewDigest {
 }
 
 export async function getWhatsNewDigest(since: string): Promise<WhatsNewDigest> {
-  const db = await getDb();
-
-  const daysSinceVisit = Math.max(
-    1,
-    Math.floor((Date.now() - new Date(since).getTime()) / 86_400_000)
-  );
-
-  const [
-    scoutRunCount,
-    newGrantsAdded,
-    newInTriage,
-    urgentDeadlines,
-    errorCount,
-  ] = await Promise.all([
-    db.collection("scout_runs").countDocuments({ run_at: { $gte: since } }),
-    db.collection("grants_scored").countDocuments({ scored_at: { $gte: since } }),
-    db.collection("grants_scored").countDocuments({
-      scored_at: { $gte: since },
-      status: "triage",
-    }),
-    db.collection("grants_scored").countDocuments({
-      deadline_urgent: true,
-      status: { $in: ["triage", "pursue"] },
-    }),
-    db.collection("audit_logs").countDocuments({
-      created_at: { $gte: since },
-      $or: [
-        { action: { $regex: /fail|error/i } },
-        { event: { $regex: /fail|error/i } },
-      ],
-    }),
-  ]);
-
-  // Total found across scout runs since last visit
-  const scoutAgg = await db.collection("scout_runs")
-    .aggregate([
-      { $match: { run_at: { $gte: since } } },
-      { $group: { _id: null, total_found: { $sum: "$total_found" }, new_grants: { $sum: "$new_grants" } } },
-    ])
-    .toArray();
-  const totalFound = scoutAgg[0]?.total_found ?? 0;
-
-  // Analyst scoring count
-  const analystAgg = await db.collection("audit_logs")
-    .aggregate([
-      { $match: { created_at: { $gte: since }, event: "analyst_run_complete" } },
-      { $group: { _id: null, scored: { $sum: "$scored_count" } } },
-    ])
-    .toArray();
-  const grantsScored = analystAgg[0]?.scored ?? 0;
-
-  // Top new grants (highest score first)
-  const topNewDocs = await db.collection("grants_scored")
-    .find({ scored_at: { $gte: since } })
-    .sort({ weighted_total: -1 })
-    .limit(5)
-    .toArray();
-
-  const topNewGrants = topNewDocs.map((d) => ({
-    _id: String(d._id),
-    grant_name: (d.grant_name as string) || (d.title as string) || "Untitled",
-    funder: (d.funder as string) || "Unknown",
-    weighted_total: (d.weighted_total as number) ?? null,
-    themes_detected: (d.themes_detected as string[]) || [],
-    scored_at: (d.scored_at as string) || null,
-  }));
-
-  // Recent agent activity (latest 8)
-  const recentActivity = await db.collection("audit_logs")
-    .find({ created_at: { $gte: since } })
-    .sort({ created_at: -1 })
-    .limit(8)
-    .toArray();
-
-  const recentAgentRuns = recentActivity.map((d) => ({
-    agent: (d.node as string) || "system",
-    action: (d.action as string) || (d.event as string) || "",
-    created_at: (d.created_at as string) || "",
-  }));
-
-  return {
-    daysSinceVisit,
-    scoutRuns: scoutRunCount,
-    totalFound,
-    newGrantsAdded,
-    grantsScored,
-    newInTriage,
-    urgentDeadlines,
-    errors: errorCount,
-    topNewGrants,
-    recentAgentRuns,
-  };
+  return apiGet(`/api/v2/whats-new?since=${encodeURIComponent(since)}`);
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────
@@ -869,39 +373,19 @@ export async function getNotifications(
   limit = 30,
   unreadOnly = false,
 ): Promise<Notification[]> {
-  const db = await getDb();
-  const query: Record<string, unknown> = {};
-  if (unreadOnly) query.read = false;
-
-  const docs = await db
-    .collection("notifications")
-    .find(query)
-    .sort({ created_at: -1 })
-    .limit(limit)
-    .toArray();
-
-  return docs.map((d) => serializeId(d as Record<string, unknown>) as unknown as Notification);
+  return apiGet(`/api/v2/notifications?limit=${limit}&unread_only=${unreadOnly}`);
 }
 
 export async function getUnreadNotificationCount(): Promise<number> {
-  const db = await getDb();
-  return db.collection("notifications").countDocuments({ read: false });
+  const data = await apiGet<{ count: number }>("/api/v2/notifications/count");
+  return data.count;
 }
 
 export async function markNotificationsRead(ids: string[]): Promise<void> {
   if (!ids.length) return;
-  const { ObjectId } = await import("mongodb");
-  const db = await getDb();
-  await db.collection("notifications").updateMany(
-    { _id: { $in: ids.map((id) => new ObjectId(id)) } },
-    { $set: { read: true, read_at: new Date().toISOString() } },
-  );
+  await apiPost("/api/v2/notifications/mark-read", { ids });
 }
 
 export async function markAllNotificationsRead(): Promise<void> {
-  const db = await getDb();
-  await db.collection("notifications").updateMany(
-    { read: false },
-    { $set: { read: true, read_at: new Date().toISOString() } },
-  );
+  await apiPost("/api/v2/notifications/mark-all-read", {});
 }

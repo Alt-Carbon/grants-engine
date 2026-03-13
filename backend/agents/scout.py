@@ -40,6 +40,10 @@ from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 import httpx
 
 from backend.db.mongo import grants_raw, grants_scored, scout_runs, audit_logs
+from backend.integrations.notion_data import (
+    batch_find_url_hashes as _notion_batch_find_url_hashes,
+    create_grant_page as _notion_create_grant_page,
+)
 from backend.graph.state import GrantState
 from backend.utils.llm import chat, HAIKU, SCOUT_MODEL
 from backend.utils.parsing import parse_json_safe, retry_async, api_health, CreditExhaustedError
@@ -1616,7 +1620,7 @@ class ScoutAgent:
 
         logger.info("Scout: %d unique URLs after in-memory dedup (incl. hub expansions)", len(unique))
 
-        # ── DB dedup (3-layer) ────────────────────────────────────────────────
+        # ── DB dedup (3-layer) — Notion-primary + MongoDB fallback ──────────
         col = grants_raw()
         scored_col = grants_scored()
 
@@ -1624,6 +1628,17 @@ class ScoutAgent:
         known_norm_hashes: set = set()
         known_content_hashes: set = set()
 
+        # Primary: query Notion Grant Pipeline for existing URL hashes
+        try:
+            notion_known = await _notion_batch_find_url_hashes(
+                [item["url_hash"] for item in unique]
+            )
+            known_url_hashes.update(notion_known.keys())
+            logger.info("Scout: %d existing grants found in Notion", len(notion_known))
+        except Exception as e:
+            logger.warning("Scout: Notion dedup failed, falling back to MongoDB: %s", e)
+
+        # Fallback: also check MongoDB for any grants not yet migrated
         async for doc in col.find({}, {"url_hash": 1, "url": 1, "content_hash": 1}):
             known_url_hashes.add(doc.get("url_hash"))
             if doc.get("url"):
@@ -1788,7 +1803,17 @@ class ScoutAgent:
             # Clean up internal tracking field
             grant.pop("_raw_title", None)
 
-            # Upsert (safe for concurrent/replayed runs — unique index on url_hash)
+            # Primary: write to Notion Grant Pipeline (Status="Raw")
+            notion_ok = False
+            try:
+                page_id = await _notion_create_grant_page(grant, status="raw")
+                grant["notion_page_id"] = page_id
+                notion_ok = True
+                saved.append(grant)
+            except Exception as e:
+                logger.warning("Notion write failed for %s, falling back to MongoDB: %s", grant.get("url"), e)
+
+            # Secondary: MongoDB fallback (always write for backward compat during migration)
             try:
                 from pymongo.errors import DuplicateKeyError
                 await col.update_one(
@@ -1796,7 +1821,8 @@ class ScoutAgent:
                     {"$setOnInsert": grant},
                     upsert=True,
                 )
-                saved.append(grant)
+                if not notion_ok:
+                    saved.append(grant)
             except DuplicateKeyError:
                 logger.debug("Race-condition duplicate for url_hash %s — skipped", grant["url_hash"])
             except Exception as e:
@@ -1912,8 +1938,15 @@ async def scout_node(state: GrantState) -> Dict:
             seen.add(g.get("url_hash"))
             newly_saved.append(g)
 
+    # Build notion_page_ids mapping from saved grants
+    notion_page_ids = dict(state.get("notion_page_ids") or {})
+    for g in newly_saved:
+        if g.get("notion_page_id") and g.get("url_hash"):
+            notion_page_ids[g["url_hash"]] = g["notion_page_id"]
+
     return {
         "raw_grants": newly_saved,
+        "notion_page_ids": notion_page_ids,
         "audit_log": state.get("audit_log", []) + [{
             "node": "scout",
             "ts": datetime.now(timezone.utc).isoformat(),

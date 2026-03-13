@@ -17,6 +17,10 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from backend.db.mongo import grant_drafts, grants_pipeline, grants_scored
+from backend.integrations.notion_data import (
+    get_grant_by_page_id as _notion_get_grant,
+    update_grant_status as _notion_update_status,
+)
 from backend.graph.state import GrantState
 
 logger = logging.getLogger(__name__)
@@ -109,15 +113,23 @@ def _assemble_markdown(
 
 async def exporter_node(state: GrantState) -> Dict:
     """LangGraph node: assemble and save the complete draft."""
-    from bson import ObjectId
-
-    grant_id = state.get("selected_grant_id")
+    # Notion-first, MongoDB fallback
     grant = {}
-    if grant_id:
+    notion_page_id = state.get("selected_notion_page_id")
+    if notion_page_id:
         try:
-            grant = await grants_scored().find_one({"_id": ObjectId(grant_id)}) or {}
+            grant = await _notion_get_grant(notion_page_id) or {}
         except Exception:
             pass
+
+    if not grant:
+        grant_id = state.get("selected_grant_id")
+        if grant_id:
+            try:
+                from bson import ObjectId
+                grant = await grants_scored().find_one({"_id": ObjectId(grant_id)}) or {}
+            except Exception:
+                pass
 
     requirements = state.get("grant_requirements") or {}
     approved_sections = state.get("approved_sections") or {}
@@ -160,12 +172,21 @@ async def exporter_node(state: GrantState) -> Dict:
     }
     await grant_drafts().insert_one(draft_record)
 
-    # Update pipeline status
+    # Update pipeline status — Notion first, MongoDB second
+    if notion_page_id:
+        try:
+            await _notion_update_status(notion_page_id, "draft_complete")
+        except Exception:
+            logger.debug("Notion status update failed for exporter", exc_info=True)
     if pipeline_id:
-        await grants_pipeline().update_one(
-            {"_id": ObjectId(pipeline_id)},
-            {"$set": {"status": "draft_complete", "current_draft_version": version}},
-        )
+        try:
+            from bson import ObjectId
+            await grants_pipeline().update_one(
+                {"_id": ObjectId(pipeline_id)},
+                {"$set": {"status": "draft_complete", "current_draft_version": version}},
+            )
+        except Exception:
+            logger.debug("MongoDB pipeline update failed for exporter", exc_info=True)
 
     audit_entry = {
         "node": "exporter",

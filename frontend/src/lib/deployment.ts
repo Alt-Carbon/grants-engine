@@ -1,16 +1,16 @@
 /**
  * Deployment mode configuration.
  *
- * "full"   — complete web dashboard (pipeline, dashboard, triage, etc.)
  * "hybrid" — Notion-primary: grants live in Notion, web app = Mission Control + Drafter + ops
+ * "full"   — legacy mode (pipeline pages removed — always hybrid now)
  */
 
 export const DEPLOYMENT_MODE =
-  (process.env.NEXT_PUBLIC_DEPLOYMENT_MODE as "full" | "hybrid") || "full";
+  (process.env.NEXT_PUBLIC_DEPLOYMENT_MODE as "full" | "hybrid") || "hybrid";
 
-export const isHybridMode = DEPLOYMENT_MODE === "hybrid";
+export const isHybridMode = true; // Always hybrid — Notion is the UI for grants
 
-export const LANDING_ROUTE = isHybridMode ? "/monitoring" : "/dashboard";
+export const LANDING_ROUTE = "/monitoring";
 
 export const NOTION_WORKSPACE_URL =
   process.env.NEXT_PUBLIC_NOTION_WORKSPACE_URL ||

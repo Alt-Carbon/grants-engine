@@ -10,9 +10,13 @@ class GrantState(TypedDict):
     raw_grants: List[Dict]          # Scout output — raw discovered grants
     scored_grants: List[Dict]       # Analyst output — scored + ranked
 
+    # ── Notion page tracking ────────────────────────────────────────────────────
+    notion_page_ids: Dict[str, str]          # url_hash → Notion page_id mapping
+    selected_notion_page_id: Optional[str]   # Notion page_id of chosen grant
+
     # ── Human Gate 1: Triage ───────────────────────────────────────────────────
     human_triage_decision: Optional[str]    # "pursue" | "pass" | "watch"
-    selected_grant_id: Optional[str]        # MongoDB _id of chosen grant
+    selected_grant_id: Optional[str]        # MongoDB _id (backward compat)
     triage_notes: Optional[str]
 
     # ── Grant Reading ──────────────────────────────────────────────────────────

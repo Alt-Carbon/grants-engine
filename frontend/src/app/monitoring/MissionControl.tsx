@@ -1275,8 +1275,20 @@ function DiscoveryCard({ grant }: { grant: Discovery }) {
               {score.toFixed(1)}
             </span>
           )}
+          {grant._id && (
+            <a
+              href={`https://notion.so/${grant._id.replace(/-/g, "")}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="opacity-0 transition-opacity group-hover:opacity-100"
+              onClick={(e) => e.stopPropagation()}
+              title="Open in Notion"
+            >
+              <FileText className="h-3 w-3 text-slate-400 hover:text-slate-700" />
+            </a>
+          )}
           {grant.url && (
-            <a href={grant.url} target="_blank" rel="noopener noreferrer" className="opacity-0 transition-opacity group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
+            <a href={grant.url} target="_blank" rel="noopener noreferrer" className="opacity-0 transition-opacity group-hover:opacity-100" onClick={(e) => e.stopPropagation()} title="Grant source">
               <ExternalLink className="h-3 w-3 text-slate-400 hover:text-blue-500" />
             </a>
           )}

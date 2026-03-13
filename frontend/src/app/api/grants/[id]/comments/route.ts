@@ -1,36 +1,21 @@
-import { getDb } from "@/lib/mongodb";
+/**
+ * GET  /api/grants/[id]/comments — fetch all comments for a grant
+ * POST /api/grants/[id]/comments — add a new comment
+ *
+ * Proxies to backend v2 API (SQLite).
+ */
+import { apiGet, apiPost } from "@/lib/api";
 import { triggerEvent } from "@/lib/pusher";
 import { NextRequest, NextResponse } from "next/server";
 
-/**
- * GET /api/grants/[id]/comments
- * Fetch all comments for a grant. Pinned first, then oldest-first.
- */
 export async function GET(
   _req: NextRequest,
   props: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await props.params;
-    const db = await getDb();
-
-    const comments = await db
-      .collection("grant_comments")
-      .find({ grant_id: id })
-      .sort({ pinned: -1, created_at: 1 })
-      .toArray();
-
-    // Serialize _id and parent_id
-    const result = comments.map((c) => ({
-      ...c,
-      _id: String(c._id),
-      parent_id: c.parent_id ? String(c.parent_id) : null,
-      pinned: c.pinned ?? false,
-      reactions: c.reactions ?? {},
-      edited_at: c.edited_at ?? null,
-    }));
-
-    return NextResponse.json(result);
+    const comments = await apiGet(`/api/v2/comments/${id}`);
+    return NextResponse.json(comments);
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "Unknown error" },
@@ -39,11 +24,6 @@ export async function GET(
   }
 }
 
-/**
- * POST /api/grants/[id]/comments
- * Add a new comment or reply.
- * Body: { user_name, user_email?, user_image?, message, parent_id? }
- */
 export async function POST(
   req: NextRequest,
   props: { params: Promise<{ id: string }> }
@@ -60,27 +40,15 @@ export async function POST(
       );
     }
 
-    const doc: Record<string, unknown> = {
-      grant_id: id,
+    const comment = await apiPost(`/api/v2/comments/${id}`, {
       user_name:
         typeof user_name === "string" && user_name.trim()
           ? user_name.trim()
           : "Team Member",
+      user_email: user_email || "",
       message: message.trim(),
-      created_at: new Date().toISOString(),
       parent_id: parent_id || null,
-      pinned: false,
-      pinned_at: null,
-      pinned_by: null,
-      reactions: {},
-      edited_at: null,
-    };
-    if (user_email) doc.user_email = user_email;
-    if (user_image) doc.user_image = user_image;
-
-    const db = await getDb();
-    const result = await db.collection("grant_comments").insertOne(doc);
-    const comment = { ...doc, _id: String(result.insertedId) };
+    });
 
     // Real-time push
     await triggerEvent(`grant-${id}`, "comment:new", { comment });

@@ -61,16 +61,25 @@ Respond ONLY with valid JSON:
 
 async def reviewer_node(state: GrantState) -> Dict:
     """LangGraph node: critique the full draft and produce a review report."""
-    from backend.db.mongo import grants_scored
-    from bson import ObjectId
-
-    grant_id = state.get("selected_grant_id")
+    # Notion-first, MongoDB fallback
     grant = {}
-    if grant_id:
+    notion_page_id = state.get("selected_notion_page_id")
+    if notion_page_id:
         try:
-            grant = await grants_scored().find_one({"_id": ObjectId(grant_id)}) or {}
+            from backend.integrations.notion_data import get_grant_by_page_id
+            grant = await get_grant_by_page_id(notion_page_id) or {}
         except Exception:
             pass
+
+    if not grant:
+        grant_id = state.get("selected_grant_id")
+        if grant_id:
+            try:
+                from backend.db.mongo import grants_scored
+                from bson import ObjectId
+                grant = await grants_scored().find_one({"_id": ObjectId(grant_id)}) or {}
+            except Exception:
+                pass
 
     requirements = state.get("grant_requirements") or {}
     approved_sections = state.get("approved_sections") or {}

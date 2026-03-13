@@ -16,9 +16,12 @@ anthropic>=0.40.0,<1.0.0
 # OpenAI SDK (used as client for AI Gateway, NOT for embeddings)
 openai>=1.0.0,<2.0.0
 
-# MongoDB
+# MongoDB (legacy — kept for migration period, will be removed)
 motor>=3.5.0,<4.0.0
 pymongo>=4.8.0,<5.0.0
+
+# SQLite (primary backend state store)
+aiosqlite>=0.20.0
 
 # Search tools
 tavily-python>=0.5.0

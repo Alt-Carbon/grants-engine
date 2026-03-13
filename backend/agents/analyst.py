@@ -48,6 +48,10 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from backend.db.mongo import grants_raw, grants_scored, agent_config, audit_logs
+from backend.integrations.notion_data import (
+    update_grant_page as _notion_update_grant_page,
+    batch_find_url_hashes as _notion_batch_find_url_hashes,
+)
 from backend.graph.state import GrantState
 from backend.utils.llm import chat, ANALYST_HEAVY, ANALYST_LIGHT, ANALYST_FUNDER, SONNET, HAIKU
 from backend.utils.parsing import parse_json_safe, retry_async, api_health, CreditExhaustedError
@@ -1523,6 +1527,7 @@ def _build_scored_doc(
     return {
         # ── Identity ──────────────────────────────────────────────────────────
         "raw_grant_id":   str(grant.get("_id", "")),
+        "notion_page_id": grant.get("notion_page_id"),      # Notion page ID (if sourced from Notion)
         "url_hash":       grant.get("url_hash", ""),        # for dedup on future runs
         "content_hash":   grant.get("content_hash", ""),    # for cross-pipeline dedup
         "grant_name":     grant_name,                       # NEW: explicit grant_name field
@@ -1847,10 +1852,40 @@ class AnalystAgent:
         )
         scored: List[Dict] = list(await asyncio.gather(*all_tasks))
 
-        # ── Upsert to grants_scored (keyed on url_hash) ───────────────────────
+        # ── Primary: update Notion Grant Pipeline, Secondary: MongoDB cache ────
         raw_col = grants_raw()
         saved_count = 0
         for s in scored:
+            # Determine Notion status from scoring result
+            action = s.get("recommended_action", "auto_pass")
+            notion_status = "triage" if action in ("pursue", "watch") else "auto_pass"
+
+            # Primary: update Notion page (Scout already created it with Status=Raw)
+            notion_page_id = s.get("notion_page_id")
+            if not notion_page_id and s.get("url_hash"):
+                # Try to find the page by URL hash (may have been created by Scout)
+                try:
+                    from backend.integrations.notion_data import find_grant_by_url_hash
+                    notion_page_id = await find_grant_by_url_hash(s["url_hash"])
+                except Exception:
+                    pass
+
+            if notion_page_id:
+                try:
+                    await _notion_update_grant_page(notion_page_id, s, status=notion_status)
+                    s["notion_page_id"] = notion_page_id
+                except Exception:
+                    logger.warning("Notion update failed for %s, writing to MongoDB only", s.get("url"), exc_info=True)
+            else:
+                # No Notion page found — create one (grant may have been from MongoDB backlog)
+                try:
+                    from backend.integrations.notion_data import create_grant_page
+                    page_id = await create_grant_page(s, status=notion_status)
+                    s["notion_page_id"] = page_id
+                except Exception:
+                    logger.warning("Notion create failed for %s", s.get("url"), exc_info=True)
+
+            # Secondary: MongoDB cache (for backward compat during migration)
             try:
                 key = (
                     {"url_hash": s["url_hash"]}
@@ -1863,14 +1898,6 @@ class AnalystAgent:
                     upsert=True,
                 )
                 saved_count += 1
-
-                # Sync to Notion Mission Control
-                try:
-                    from backend.integrations.notion_sync import sync_scored_grant
-                    await sync_scored_grant(s)
-                except Exception:
-                    logger.debug("Notion sync skipped for grant %s", s.get("url"), exc_info=True)
-
             except Exception as e:
                 logger.warning("Failed to upsert scored grant %s: %s", s.get("url"), e)
 
@@ -1956,7 +1983,21 @@ async def analyst_node(state: GrantState) -> Dict:
 
     raw_grants = state.get("raw_grants", [])
     company_profile = state.get("company_profile", "")
+
+    # Pass notion_page_ids to raw grants so analyst can find their Notion pages
+    notion_page_ids = state.get("notion_page_ids") or {}
+    for g in raw_grants:
+        uh = g.get("url_hash", "")
+        if uh in notion_page_ids and not g.get("notion_page_id"):
+            g["notion_page_id"] = notion_page_ids[uh]
+
     scored = await agent.run(raw_grants, company_profile=company_profile)
+
+    # Update notion_page_ids with any new pages created during scoring
+    updated_ids = dict(notion_page_ids)
+    for g in scored:
+        if g.get("notion_page_id") and g.get("url_hash"):
+            updated_ids[g["url_hash"]] = g["notion_page_id"]
 
     pursue_count = sum(1 for g in scored if g["recommended_action"] == "pursue")
     audit_entry = {
@@ -1967,6 +2008,7 @@ async def analyst_node(state: GrantState) -> Dict:
     }
     return {
         "scored_grants": scored,
+        "notion_page_ids": updated_ids,
         "audit_log": state.get("audit_log", []) + [audit_entry],
     }
 

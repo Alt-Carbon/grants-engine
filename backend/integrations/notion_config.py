@@ -71,17 +71,19 @@ THEME_DISPLAY = {
 
 # ── Status mapping: MongoDB status → Notion select option ────────────────────
 STATUS_MAP = {
-    "triage": "Triage",
+    "raw": "Raw",
+    "triage": "Shortlisted",
     "pursue": "Pursue",
     "pursuing": "Pursue",
     "watch": "Watch",
     "passed": "Pass",
     "human_passed": "Pass",
-    "auto_pass": "Auto Pass",
-    "drafting": "Drafting",
-    "draft_complete": "Submitted",
-    "submitted": "Submitted",
+    "auto_pass": "Rejected",
+    "drafting": "Draft",
+    "draft_complete": "Submit",
+    "submitted": "Submit",
     "won": "Won",
+    "hold": "Hold",
 }
 
 # ── Priority thresholds (mirror frontend/backend logic) ──────────────────────

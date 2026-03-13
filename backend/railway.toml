@@ -6,3 +6,8 @@ dockerfilePath = "backend/Dockerfile"
 healthcheckPath = "/health"
 healthcheckTimeout = 120
 restartPolicyType = "on_failure"
+
+# Persistent volume for SQLite database (survives redeploys)
+[[deploy.volumes]]
+mountPath = "/app/backend/data"
+name = "grants-engine-sqlite"

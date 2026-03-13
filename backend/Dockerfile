@@ -34,6 +34,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Ensure SQLite data directory exists (will be mounted as volume on Railway)
+RUN mkdir -p backend/data
+
 EXPOSE 8000
 
 # Railway sets $PORT dynamically; fall back to 8000 for local docker run

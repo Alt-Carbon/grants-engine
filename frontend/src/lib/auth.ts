@@ -3,10 +3,7 @@ import Google from "next-auth/providers/google";
 
 const ALLOWED_DOMAIN = "altcarbon.com";
 
-const LANDING =
-  process.env.NEXT_PUBLIC_DEPLOYMENT_MODE === "hybrid"
-    ? "/monitoring"
-    : "/dashboard";
+const LANDING = "/monitoring";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   trustHost: true,
@@ -22,12 +19,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   },
   callbacks: {
     async signIn({ profile }) {
-      // Only allow @altcarbon.com emails
       const email = profile?.email ?? "";
-      if (!email.endsWith(`@${ALLOWED_DOMAIN}`)) {
-        return false;
-      }
-      return true;
+      return email.endsWith(`@${ALLOWED_DOMAIN}`);
     },
     authorized({ auth: session, request }) {
       const isLoggedIn = !!session?.user;

@@ -62,6 +62,26 @@ def setup_scheduler() -> None:
         misfire_grace_time=1800,
     )
 
+    # Notion triage detection: every 5 min — check for grants with Status="Pursue"
+    scheduler.add_job(
+        _safe_poll_notion_triage,
+        trigger=IntervalTrigger(minutes=5),
+        id="notion_triage_poll",
+        name="Notion Triage Detection (5min polling)",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+    # Weekly Monday 9 AM IST (3:30 AM UTC) — run Scout + Analyst pipeline
+    scheduler.add_job(
+        _safe_weekly_pipeline,
+        trigger=CronTrigger(day_of_week="mon", hour=3, minute=30),
+        id="weekly_monday_pipeline",
+        name="Weekly Pipeline (Mon 9AM IST)",
+        replace_existing=True,
+        misfire_grace_time=7200,
+    )
+
     scheduler.start()
     logger.info(
         "APScheduler started with %d jobs: %s",
@@ -155,6 +175,53 @@ async def _safe_check_notion_changes() -> None:
         await check_notion_changes()
     except Exception as e:
         logger.error("Scheduled Notion change check failed: %s", e)
+
+
+async def _safe_poll_notion_triage() -> None:
+    """Poll Notion Grant Pipeline for grants with Status='Pursue' without active draft."""
+    try:
+        await poll_notion_triage()
+    except Exception as e:
+        logger.error("Scheduled Notion triage poll failed: %s", e)
+
+
+async def _safe_weekly_pipeline() -> None:
+    """Weekly Monday 9 AM IST — run Scout discovery then Analyst scoring."""
+    logger.info("Weekly Monday pipeline triggered (Mon 9AM IST / 3:30 UTC)")
+    try:
+        # Step 1: Scout
+        from backend.jobs.scout_job import run_scout_pipeline
+        scout_result = await run_scout_pipeline()
+        logger.info("Weekly scout complete: %s", scout_result.get("status"))
+
+        # Step 2: Analyst on new grants
+        from backend.agents.analyst import analyst_node
+        from backend.graph.state import GrantsState
+        from backend.integrations.notion_data import query_grants_by_status
+        raw_grants = await query_grants_by_status("Raw")
+        if raw_grants:
+            state = GrantsState(
+                raw_grants=raw_grants,
+                scored=[],
+                run_config={},
+            )
+            await analyst_node(state)
+            logger.info("Weekly analyst scored %d raw grants", len(raw_grants))
+
+        # Notify
+        try:
+            from backend.notifications.hub import notify
+            await notify(
+                event_type="weekly_pipeline",
+                title="Weekly pipeline complete",
+                body=f"Scout: {scout_result.get('status', '?')} | Analyst: {len(raw_grants)} scored",
+                action_url="/monitoring",
+                metadata={"scout": scout_result, "analyst_count": len(raw_grants)},
+            )
+        except Exception:
+            logger.debug("Weekly pipeline notification failed", exc_info=True)
+    except Exception as e:
+        logger.error("Weekly Monday pipeline failed: %s", e)
 
 
 async def check_notion_changes() -> dict:
@@ -263,3 +330,95 @@ async def check_notion_changes() -> dict:
 
     logger.info("Notion change check: %d pages checked, %d re-synced", checked, synced)
     return {"status": "complete", "checked": checked, "synced": synced}
+
+
+# ── Active drafting threads tracker (in-memory, reset on restart) ────────────
+_active_drafting_page_ids: set = set()
+
+
+async def poll_notion_triage() -> dict:
+    """Check Grant Pipeline for grants with Status='Pursue' without an active draft pipeline.
+
+    For each such grant, triggers Graph B (drafting pipeline) as a background task.
+    This is the primary mechanism for humans to trigger drafting by changing status in Notion.
+    """
+    import uuid
+    from backend.integrations.notion_data import query_grants_by_status
+    from backend.graph.graph import get_drafting_graph
+
+    grants = await query_grants_by_status("Pursue")
+    triggered = 0
+
+    for grant in grants:
+        page_id = grant.get("notion_page_id")
+        if not page_id:
+            continue
+
+        # Skip if already being drafted
+        if page_id in _active_drafting_page_ids:
+            continue
+
+        # Trigger drafting pipeline
+        _active_drafting_page_ids.add(page_id)
+        thread_id = f"draft-{page_id}-{uuid.uuid4().hex[:8]}"
+        try:
+            graph = get_drafting_graph()
+            initial_state = {
+                "selected_notion_page_id": page_id,
+                "selected_grant_id": None,
+                "notion_page_ids": {},
+                "raw_grants": [],
+                "scored_grants": [],
+                "human_triage_decision": "pursue",
+                "triage_notes": None,
+                "grant_requirements": None,
+                "grant_raw_doc": None,
+                "company_profile": None,
+                "company_context": None,
+                "style_examples": None,
+                "style_examples_loaded": False,
+                "draft_guardrail_result": None,
+                "override_guardrails": False,
+                "grant_theme": None,
+                "draft_outline": None,
+                "current_section_index": 0,
+                "approved_sections": {},
+                "section_critiques": {},
+                "section_revision_instructions": {},
+                "pending_interrupt": None,
+                "section_review_decision": None,
+                "section_edited_content": None,
+                "reviewer_output": None,
+                "draft_version": 0,
+                "draft_filepath": None,
+                "draft_filename": None,
+                "markdown_content": None,
+                "pipeline_id": None,
+                "thread_id": thread_id,
+                "run_id": uuid.uuid4().hex,
+                "errors": [],
+                "audit_log": [],
+            }
+
+            # Run until first interrupt (drafter section review)
+            await graph.ainvoke(
+                initial_state,
+                config={"configurable": {"thread_id": thread_id}},
+            )
+            triggered += 1
+            logger.info("Triage poll: triggered drafting for %s (thread=%s)", page_id, thread_id)
+
+            # Update Notion status to "Draft"
+            try:
+                from backend.integrations.notion_data import update_grant_status
+                await update_grant_status(page_id, "drafting")
+            except Exception:
+                logger.debug("Failed to update Notion status to Draft", exc_info=True)
+
+        except Exception as e:
+            logger.error("Triage poll: failed to trigger drafting for %s: %s", page_id, e)
+            _active_drafting_page_ids.discard(page_id)
+
+    if triggered:
+        logger.info("Triage poll: triggered %d new drafting pipelines", triggered)
+    return {"status": "complete", "pursue_grants": len(grants), "triggered": triggered}

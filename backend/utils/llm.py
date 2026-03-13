@@ -31,7 +31,7 @@ SCOUT_MODEL = "openai/gpt-5.4"
 # Analyst: Opus for heavy scoring & deep research, GPT-5.4 for light tasks
 ANALYST_HEAVY = "anthropic/claude-opus-4-6"     # scoring, deep research
 ANALYST_LIGHT = "openai/gpt-5.4"               # currency resolution, winners, extraction
-ANALYST_FUNDER = "perplexity/sonar-deep-research"  # funder enrichment
+ANALYST_FUNDER = "google/gemini-3-flash"  # funder enrichment
 
 # Company Brain: GPT-5.4 for chunk tagging
 BRAIN_MODEL = "openai/gpt-5.4"
@@ -62,6 +62,10 @@ _FALLBACK_CHAINS: Dict[str, List[str]] = {
     ],
     # Legacy fallbacks (if any old code references these)
     "anthropic/claude-sonnet-4-6": [
+        "openai/gpt-5.4",
+        "anthropic/claude-opus-4-6",
+    ],
+    "google/gemini-3-flash": [
         "openai/gpt-5.4",
         "anthropic/claude-opus-4-6",
     ],

@@ -155,18 +155,28 @@ async def parse_grant_document(raw_content: str) -> Dict:
 async def grant_reader_node(state: dict) -> dict:
     """LangGraph node: fetch and parse the grant document."""
     from backend.config.settings import get_settings
-    from backend.db.mongo import grants_scored
-    from bson import ObjectId
 
     s = get_settings()
 
-    grant_id = state.get("selected_grant_id")
+    # Notion-first: try selected_notion_page_id, fallback to MongoDB
     grant = {}
-    if grant_id:
+    notion_page_id = state.get("selected_notion_page_id")
+    if notion_page_id:
         try:
-            grant = await grants_scored().find_one({"_id": ObjectId(grant_id)}) or {}
+            from backend.integrations.notion_data import get_grant_by_page_id
+            grant = await get_grant_by_page_id(notion_page_id) or {}
         except Exception:
             pass
+
+    if not grant:
+        grant_id = state.get("selected_grant_id")
+        if grant_id:
+            try:
+                from backend.db.mongo import grants_scored
+                from bson import ObjectId
+                grant = await grants_scored().find_one({"_id": ObjectId(grant_id)}) or {}
+            except Exception:
+                pass
 
     url = grant.get("url", "")
     if not url:

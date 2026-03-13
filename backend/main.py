@@ -322,8 +322,15 @@ _scout_started_at: Optional[str] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Non-fatal startup: if MongoDB is unreachable (e.g. env var not yet
-    # propagated on Railway), the app still starts and /health responds.
+    # Initialize SQLite (primary state store)
+    try:
+        from backend.db.sqlite import ensure_db
+        await ensure_db()
+        logger.info("SQLite database initialized")
+    except Exception as exc:
+        logger.error("SQLite init failed (non-fatal): %s", exc)
+
+    # Non-fatal startup: MongoDB kept for legacy/migration fallback
     try:
         await ensure_indexes()
         await _seed_default_agent_config()
@@ -360,6 +367,13 @@ async def lifespan(app: FastAPI):
         await mcp_hub.disconnect_all()
     except Exception:
         pass
+
+    # Close SQLite connection
+    try:
+        from backend.db.sqlite import close_conn
+        await close_conn()
+    except Exception:
+        pass
     logger.info("Backend shutting down")
 
 
@@ -371,6 +385,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── v2 API routes (Notion + SQLite, replaces direct MongoDB from frontend) ───
+from backend.api.v2_routes import router as v2_router
+app.include_router(v2_router, prefix="/api/v2")
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────────────
@@ -434,6 +452,7 @@ class ManualGrantRequest(BaseModel):
     title_override: Optional[str] = ""
     funder_override: Optional[str] = ""
     notes: Optional[str] = ""
+    auto_analyze: bool = True
 
 
 # ── Seed default agent config ──────────────────────────────────────────────────
@@ -1375,11 +1394,16 @@ async def analyst_status():
 async def manual_analyst(
     background_tasks: BackgroundTasks,
     force: bool = False,
+    source: str = "mongo",
+    status_filter: str = "",
     _: None = Depends(verify_internal),
 ):
-    """Run the Analyst on grants_raw entries.
+    """Run the Analyst on grants.
 
-    - Default: processes only unprocessed grants (idempotent).
+    - source=mongo (default): reads from grants_raw MongoDB collection.
+    - source=notion: reads grants from Notion Grant Pipeline DB.
+    - status_filter: when source=notion, filter by Notion status (e.g. "Shortlisted").
+      If empty, fetches all grants from Notion.
     - force=true: re-scores ALL grants, ignoring processed/already-scored flags.
     """
     global _analyst_running, _analyst_started_at
@@ -1394,21 +1418,44 @@ async def manual_analyst(
         try:
             from backend.agents.analyst import AnalystAgent
             from backend.config.settings import get_settings
-            from backend.db.mongo import grants_raw, agent_config, get_db
 
             s = get_settings()
-            cfg_doc = await agent_config().find_one({"agent": "analyst"}) or {}
             from backend.agents.analyst import DEFAULT_WEIGHTS
-            weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
-            min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
+            weights = DEFAULT_WEIGHTS
+            min_funding = s.min_grant_funding
 
-            # Fetch grants: all if force, only unprocessed otherwise
-            if force:
-                raw_docs = await grants_raw().find({}).to_list(length=5000)
-                logger.info("Analyst FORCE run: %d total grants found", len(raw_docs))
+            # Try to load agent config from MongoDB (may fail during migration)
+            try:
+                from backend.db.mongo import agent_config
+                cfg_doc = await agent_config().find_one({"agent": "analyst"}) or {}
+                weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
+                min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
+            except Exception:
+                logger.debug("Agent config from MongoDB unavailable, using defaults")
+
+            # Fetch grants from the appropriate source
+            if source == "notion":
+                from backend.integrations.notion_data import (
+                    query_grants_by_status,
+                    query_all_grants,
+                )
+                if status_filter:
+                    raw_docs = await query_grants_by_status(status_filter)
+                    logger.info(
+                        "Analyst (Notion source, status=%s): %d grants found",
+                        status_filter, len(raw_docs),
+                    )
+                else:
+                    raw_docs = await query_all_grants()
+                    logger.info("Analyst (Notion source, all): %d grants found", len(raw_docs))
             else:
-                raw_docs = await grants_raw().find({"processed": False}).to_list(length=2000)
-                logger.info("Analyst run: %d unprocessed grants found", len(raw_docs))
+                from backend.db.mongo import grants_raw
+                if force:
+                    raw_docs = await grants_raw().find({}).to_list(length=5000)
+                    logger.info("Analyst FORCE run: %d total grants found", len(raw_docs))
+                else:
+                    raw_docs = await grants_raw().find({"processed": False}).to_list(length=2000)
+                    logger.info("Analyst run: %d unprocessed grants found", len(raw_docs))
 
             agent = AnalystAgent(
                 perplexity_api_key=s.perplexity_api_key,
@@ -1419,16 +1466,21 @@ async def manual_analyst(
             )
             scored = await agent.run(raw_docs, force=force)
             scored_count = len(scored)
-            logger.info("Analyst run: %d grants scored", scored_count)
+            logger.info("Analyst run: %d grants scored (source=%s)", scored_count, source)
 
-            # Write run audit entry so /status/analyst can report last run
-            db = get_db()
-            await db["audit_logs"].insert_one({
-                "event": "analyst_run_complete",
-                "scored_count": scored_count,
-                "input_count": len(raw_docs),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
+            # Write run audit entry
+            try:
+                from backend.db.mongo import get_db
+                db = get_db()
+                await db["audit_logs"].insert_one({
+                    "event": "analyst_run_complete",
+                    "scored_count": scored_count,
+                    "input_count": len(raw_docs),
+                    "source": source,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                logger.debug("Audit log write failed", exc_info=True)
 
             # Emit analyst completion notification
             try:
@@ -1476,82 +1528,14 @@ async def manual_analyst(
             _analyst_started_at = None
 
     background_tasks.add_task(_run)
-    return {"status": "analyst_job_started", "started_at": _analyst_started_at}
+    return {"status": "analyst_job_started", "source": source, "started_at": _analyst_started_at}
 
 
 # ── Resume endpoints ───────────────────────────────────────────────────────────
 
-@app.post("/resume/triage")
-async def resume_triage(
-    body: TriageResumeRequest,
-    background_tasks: BackgroundTasks,
-    _: None = Depends(verify_internal),
-):
-    """Human made triage decision. Resume graph from human_triage node.
-
-    If human_override=True, the override fields are written to grants_scored
-    immediately (before the graph resumes) so the Streamlit UI can display them
-    instantly and the flag survives even if the LangGraph resume fails.
-    """
-    # Durably persist the human override decision to MongoDB (fix #15).
-    if body.human_override:
-        from backend.db.mongo import grants_scored
-        from bson import ObjectId
-        try:
-            await grants_scored().update_one(
-                {"_id": ObjectId(body.grant_id)},
-                {"$set": {
-                    "human_override":  True,
-                    "override_reason": body.override_reason or "",
-                    "override_at":     datetime.now(timezone.utc).isoformat(),
-                }},
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to persist human_override for grant %s: %s", body.grant_id, exc
-            )
-
-    # ── Notion Mission Control sync — log triage decision ──────────────
-    try:
-        from backend.integrations.notion_sync import (
-            log_triage_decision,
-            update_grant_status,
-        )
-        from backend.db.mongo import grants_scored as _gs
-        from bson import ObjectId as _ObjId
-        _grant_doc = await _gs().find_one({"_id": _ObjId(body.grant_id)})
-        _grant_name = ""
-        _ai_rec = None
-        if _grant_doc:
-            _grant_name = _grant_doc.get("grant_name") or _grant_doc.get("title") or ""
-            _ai_rec = _grant_doc.get("recommended_action")
-        background_tasks.add_task(
-            log_triage_decision,
-            grant_id=body.grant_id,
-            grant_name=_grant_name,
-            decision=body.decision,
-            ai_recommendation=_ai_rec,
-            is_override=body.human_override or False,
-            override_reason=body.override_reason or "",
-        )
-        background_tasks.add_task(update_grant_status, body.grant_id, body.decision)
-    except Exception:
-        logger.debug("Notion triage sync skipped", exc_info=True)
-
-    async def _resume():
-        graph = get_graph()
-        config = {"configurable": {"thread_id": body.thread_id}}
-        await graph.ainvoke(
-            {
-                "human_triage_decision": body.decision,
-                "selected_grant_id": body.grant_id,
-                "triage_notes": body.notes,
-            },
-            config=config,
-        )
-
-    background_tasks.add_task(_resume)
-    return {"status": "triage_resumed", "thread_id": body.thread_id}
+# /resume/triage — REMOVED: replaced by Notion webhook/polling (Phase 3)
+# Humans now triage directly in Notion by changing Status to "Pursue".
+# The scheduler polls every 5 min and triggers the drafting pipeline.
 
 
 @app.post("/resume/section-review")
@@ -2645,7 +2629,8 @@ async def admin_deduplicate(
 
 class NotionTriageWebhookRequest(BaseModel):
     """Payload from Notion automation when a grant's Status property changes."""
-    mongo_id: str                      # MongoDB _id of the grant (stored in Notion as "MongoDB ID")
+    mongo_id: Optional[str] = None     # MongoDB _id (legacy)
+    notion_page_id: Optional[str] = None  # Notion page ID (primary)
     new_status: str                    # "Pursue" | "Watch" | "Pass"
     notes: Optional[str] = None
 
@@ -2663,14 +2648,14 @@ async def notion_webhook_triage(
     body: NotionTriageWebhookRequest,
     background_tasks: BackgroundTasks,
 ):
-    """Notion automation fires this when a grant Status changes to Pursue/Watch/Pass.
+    """Notion automation fires this when a grant Status changes to Pursue.
 
-    Finds the matching LangGraph thread and resumes the human_triage checkpoint.
+    Directly triggers Graph B (drafting pipeline) for the grant.
+    No longer needs to find a paused LangGraph thread — Notion is primary.
     """
-    from backend.db.mongo import grants_scored, grants_pipeline, graph_checkpoints
-    from bson import ObjectId
+    import uuid as _uuid
+    from backend.graph.graph import get_drafting_graph
 
-    # Normalize Notion status → internal status
     status_map = {
         "Pursue": "pursue", "pursue": "pursue",
         "Watch": "watch", "watch": "watch",
@@ -2683,81 +2668,68 @@ async def notion_webhook_triage(
             detail=f"Invalid status '{body.new_status}'. Expected Pursue, Watch, or Pass.",
         )
 
-    # Verify grant exists
-    try:
-        grant = await grants_scored().find_one({"_id": ObjectId(body.mongo_id)})
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid mongo_id")
-    if not grant:
-        raise HTTPException(status_code=404, detail="Grant not found in grants_scored")
+    # For "pursue" — trigger the drafting pipeline
+    if decision == "pursue" and body.notion_page_id:
+        thread_id = f"draft-webhook-{body.notion_page_id}-{_uuid.uuid4().hex[:8]}"
 
-    # Update grant status in MongoDB
-    await grants_scored().update_one(
-        {"_id": ObjectId(body.mongo_id)},
-        {"$set": {
-            "status": decision,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "triage_source": "notion_webhook",
-        }},
-    )
-
-    # Find the LangGraph thread paused at human_triage for this grant
-    # Look for the most recent pipeline that has this grant in its state
-    pipeline = await grants_pipeline().find_one(
-        {"grant_id": body.mongo_id},
-        sort=[("started_at", -1)],
-    )
-
-    # Also check checkpoints for scout/analyst threads waiting on triage
-    checkpoint = await graph_checkpoints().find_one(
-        {},
-        sort=[("checkpoint_id", -1)],
-    )
-
-    thread_id = None
-    if pipeline:
-        thread_id = pipeline.get("thread_id")
-    elif checkpoint:
-        thread_id = checkpoint.get("thread_id")
-
-    if thread_id:
-        async def _resume():
+        async def _start_drafting():
             try:
-                graph = get_graph()
-                config = {"configurable": {"thread_id": thread_id}}
+                graph = get_drafting_graph()
+                initial_state = {
+                    "selected_notion_page_id": body.notion_page_id,
+                    "selected_grant_id": body.mongo_id,
+                    "notion_page_ids": {},
+                    "raw_grants": [],
+                    "scored_grants": [],
+                    "human_triage_decision": "pursue",
+                    "triage_notes": body.notes,
+                    "grant_requirements": None,
+                    "grant_raw_doc": None,
+                    "company_profile": None,
+                    "company_context": None,
+                    "style_examples": None,
+                    "style_examples_loaded": False,
+                    "draft_guardrail_result": None,
+                    "override_guardrails": False,
+                    "grant_theme": None,
+                    "draft_outline": None,
+                    "current_section_index": 0,
+                    "approved_sections": {},
+                    "section_critiques": {},
+                    "section_revision_instructions": {},
+                    "pending_interrupt": None,
+                    "section_review_decision": None,
+                    "section_edited_content": None,
+                    "reviewer_output": None,
+                    "draft_version": 0,
+                    "draft_filepath": None,
+                    "draft_filename": None,
+                    "markdown_content": None,
+                    "pipeline_id": None,
+                    "thread_id": thread_id,
+                    "run_id": _uuid.uuid4().hex,
+                    "errors": [],
+                    "audit_log": [],
+                }
                 await graph.ainvoke(
-                    {
-                        "human_triage_decision": decision,
-                        "selected_grant_id": body.mongo_id,
-                        "triage_notes": body.notes,
-                    },
-                    config=config,
+                    initial_state,
+                    config={"configurable": {"thread_id": thread_id}},
                 )
             except Exception as e:
-                logger.error("Notion webhook triage resume failed: %s", e)
+                logger.error("Notion webhook drafting failed: %s", e)
 
-        background_tasks.add_task(_resume)
-        logger.info(
-            "Notion webhook: triage %s for grant %s (thread %s)",
-            decision, body.mongo_id, thread_id,
-        )
+        background_tasks.add_task(_start_drafting)
         return {
-            "status": "triage_resumed",
+            "status": "drafting_triggered",
             "decision": decision,
-            "grant_id": body.mongo_id,
+            "notion_page_id": body.notion_page_id,
             "thread_id": thread_id,
         }
-    else:
-        # No active thread — just update the status (already done above)
-        logger.info(
-            "Notion webhook: triage %s for grant %s (no active thread — status updated only)",
-            decision, body.mongo_id,
-        )
-        return {
-            "status": "status_updated",
-            "decision": decision,
-            "grant_id": body.mongo_id,
-            "thread_id": None,
+
+    return {
+        "status": "status_noted",
+        "decision": decision,
+        "notion_page_id": body.notion_page_id,
             "note": "No active LangGraph thread found. Grant status updated in MongoDB.",
         }
 
@@ -2855,6 +2827,22 @@ async def admin_notion_backfill(
     return {"status": "notion_backfill_started", "ts": datetime.now(timezone.utc).isoformat()}
 
 
+@app.post("/admin/notion-dedup")
+async def admin_notion_dedup(
+    background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
+):
+    """Remove duplicate pages in Notion Grant Pipeline (same MongoDB ID)."""
+    from backend.integrations.notion_sync import dedup_notion_pipeline
+
+    async def _dedup():
+        result = await dedup_notion_pipeline()
+        logger.info("Notion dedup complete: %s", result)
+
+    background_tasks.add_task(_dedup)
+    return {"status": "notion_dedup_started", "ts": datetime.now(timezone.utc).isoformat()}
+
+
 @app.post("/admin/notion-reverse-sync")
 async def admin_notion_reverse_sync(
     background_tasks: BackgroundTasks,
@@ -2883,6 +2871,9 @@ _VALID_STATUSES = {
     "human_passed", "hold", "reported",
 }
 
+
+# /grants/manual — REMOVED: manual grant entry now happens directly in Notion
+# Add a new page to the Grant Pipeline DB with Status="Raw"
 
 @app.post("/grants/manual")
 async def add_manual_grant(
@@ -2990,6 +2981,7 @@ async def add_manual_grant(
 
     doc = {
         "title": title,
+        "grant_name": title,
         "url": url,
         "url_hash": url_hash,
         "funder": funder,
@@ -2998,13 +2990,53 @@ async def add_manual_grant(
         "source": "manual",
         "deadline": None,
         "max_funding": None,
+        "max_funding_usd": None,
         "currency": "USD",
         "eligibility_raw": "",
-        "processed": False,
         "notes": body.notes or "",
         "scraped_at": datetime.now(timezone.utc).isoformat(),
     }
-    await db["grants_raw"].insert_one(doc)
+
+    # Write to Notion Grant Pipeline as "Raw" (primary)
+    notion_page_id = None
+    try:
+        from backend.integrations.notion_data import create_grant_page, find_grant_by_url_hash
+        existing_pid = await find_grant_by_url_hash(url_hash)
+        if existing_pid:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Already in Notion Grant Pipeline.",
+            )
+        notion_page_id = await create_grant_page(doc, status="raw")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Notion write failed for manual grant, falling back to MongoDB: %s", e)
+        # Fallback: write to MongoDB
+        await db["grants_raw"].insert_one(doc)
+
+    # Auto-trigger analyst scoring for this grant
+    analyst_message = ""
+    if notion_page_id and body.auto_analyze:
+        try:
+            from backend.integrations.notion_data import get_grant_by_page_id
+            grant_data = await get_grant_by_page_id(notion_page_id)
+            if grant_data:
+                grant_data["notion_page_id"] = notion_page_id
+                grant_data["raw_content"] = raw_content
+                from backend.agents.analyst import analyst_node
+                from backend.graph.state import GrantsState
+                state = GrantsState(
+                    raw_grants=[grant_data],
+                    scored=[],
+                    run_config={},
+                )
+                result = await analyst_node(state)
+                scored = result.get("scored", [])
+                analyst_message = f" · Analyst scored: {scored[0].get('weighted_total', 0):.1f}" if scored else ""
+        except Exception as e:
+            logger.warning("Auto-analyze failed: %s", e)
+            analyst_message = " · Auto-analyze failed (will retry on next run)"
 
     return {
         "success": True,
@@ -3012,41 +3044,13 @@ async def add_manual_grant(
         "funder": funder,
         "themes": themes,
         "chars_fetched": len(raw_content),
-        "message": f"Saved '{title[:70]}' · {len(raw_content):,} chars · themes: {', '.join(themes)}",
+        "notion_page_id": notion_page_id,
+        "message": f"Saved '{title[:70]}' · {len(raw_content):,} chars · themes: {', '.join(themes)}{analyst_message}",
     }
 
 
-@app.post("/update/grant-status")
-async def update_grant_status_api(
-    body: UpdateGrantStatusRequest,
-    _: None = Depends(verify_internal),
-):
-    """Move a grant to a new Kanban stage (called by the drag-and-drop UI)."""
-    from backend.db.mongo import grants_scored
-    from bson import ObjectId
-
-    if body.status not in _VALID_STATUSES:
-        raise HTTPException(status_code=400, detail=f"Invalid status: {body.status!r}")
-    try:
-        oid = ObjectId(body.grant_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid grant_id")
-
-    result = await grants_scored().update_one(
-        {"_id": oid},
-        {"$set": {"status": body.status, "updated_at": datetime.now(timezone.utc).isoformat()}},
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Grant not found")
-
-    # Sync status change to Notion
-    try:
-        from backend.integrations.notion_sync import update_grant_status
-        await update_grant_status(body.grant_id, body.status)
-    except Exception:
-        logger.debug("Notion status sync skipped for grant %s", body.grant_id, exc_info=True)
-
-    return {"status": "updated", "grant_id": body.grant_id, "new_status": body.status}
+# /update/grant-status — REMOVED: status changes now happen directly in Notion
+# The Kanban drag-and-drop UI has been replaced by Notion's native board view.
 
 
 @app.get("/drafts/{thread_id}/download")

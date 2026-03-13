@@ -57,7 +57,7 @@ async def _find_page_by_mongo_id(
     """
     try:
         client = _get_client()
-        resp = await client.databases.query(
+        resp = await client.data_sources.query(
             database_id=database_id,
             filter={"property": "MongoDB ID", "rich_text": {"equals": mongo_id}},
             page_size=1,
@@ -178,7 +178,7 @@ def _build_grant_page_body(grant: dict[str, Any]) -> list[dict[str, Any]]:
     score = grant.get("weighted_total", 0) or 0
     priority = get_priority_label(score)
     status_raw = grant.get("status", "triage")
-    status_display = STATUS_MAP.get(status_raw, "Triage")
+    status_display = STATUS_MAP.get(status_raw, "Shortlisted")
 
     # ── 1. Header callout ────────────────────────────────────────────────
     emoji = "\u2b50" if priority == "High" else "\U0001f7e1" if priority == "Medium" else "\u26aa"
@@ -518,7 +518,7 @@ async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
             "Funder": {"rich_text": [{"text": {"content": grant.get("funder", "") or ""}}]},
             "Score": {"number": round(score, 2)},
             "Priority": {"select": {"name": get_priority_label(score)}},
-            "Status": {"select": {"name": STATUS_MAP.get(status_raw, "Triage")}},
+            "Status": {"select": {"name": STATUS_MAP.get(status_raw, "Shortlisted")}},
             "Themes": {"multi_select": [{"name": THEME_DISPLAY.get(t, t)} for t in themes_raw if THEME_DISPLAY.get(t, t)]},
             "Geography": {"rich_text": [{"text": {"content": (grant.get("geography", "") or "")[:2000]}}]},
             "Grant Type": {"rich_text": [{"text": {"content": grant.get("grant_type", "") or ""}}]},
@@ -554,14 +554,23 @@ async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
 
         deadline = grant.get("deadline")
         if deadline:
-            if hasattr(deadline, "strftime"):
-                dl = deadline.strftime("%Y-%m-%d")
-                props["Deadline"] = {"date": {"start": dl}}
-            elif isinstance(deadline, str):
-                # Only use if it looks like an ISO date (YYYY-MM-DD...)
-                stripped = deadline.strip()[:10]
-                if len(stripped) >= 10 and stripped[4] == "-" and stripped[7] == "-":
-                    props["Deadline"] = {"date": {"start": stripped}}
+            try:
+                if hasattr(deadline, "strftime"):
+                    dl = deadline.strftime("%Y-%m-%d")
+                    props["Deadline"] = {"date": {"start": dl}}
+                elif isinstance(deadline, str):
+                    # Try parsing with analyst's robust parser first
+                    from backend.agents.analyst import parse_deadline
+                    parsed = parse_deadline(deadline)
+                    if parsed:
+                        props["Deadline"] = {"date": {"start": parsed.strftime("%Y-%m-%d")}}
+                    else:
+                        # Fallback: only use if it looks like an ISO date (YYYY-MM-DD...)
+                        stripped = deadline.strip()[:10]
+                        if len(stripped) >= 10 and stripped[4] == "-" and stripped[7] == "-":
+                            props["Deadline"] = {"date": {"start": stripped}}
+            except Exception:
+                log.debug("Skipping unparseable deadline: %s", deadline)
 
         if grant.get("deadline_urgent") is True:
             props["Urgent"] = {"checkbox": True}
@@ -628,12 +637,11 @@ async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
             page = await client.pages.create(
                 parent={"database_id": GRANT_PIPELINE_DS},
                 properties=props,
-                children=body_blocks[:100] if body_blocks else None,
             )
             page_id = page["id"]
-            # Append remaining blocks if > 100
-            if body_blocks and len(body_blocks) > 100:
-                for i in range(100, len(body_blocks), 100):
+            # Append body blocks in batches of 100
+            if body_blocks:
+                for i in range(0, len(body_blocks), 100):
                     await client.blocks.children.append(
                         block_id=page_id,
                         children=body_blocks[i : i + 100],
@@ -647,8 +655,10 @@ async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
         return None
 
 
-def _build_grant_page_body(grant: dict, da: dict) -> list[dict]:
+def _build_grant_page_body(grant: dict, da: dict | None = None) -> list[dict]:
     """Build rich Notion page body blocks with full grant intelligence."""
+    if da is None:
+        da = grant.get("deep_analysis") or {}
     blocks: list[dict] = []
 
     def _h2(text: str):
@@ -879,7 +889,7 @@ async def update_grant_status(mongo_id: str, new_status: str) -> bool:
             log.debug("Notion: grant %s not found for status update", mongo_id)
             return False
 
-        notion_status = STATUS_MAP.get(new_status, "Triage")
+        notion_status = STATUS_MAP.get(new_status, "Shortlisted")
         await client.pages.update(
             page_id=existing_id,
             properties={"Status": {"select": {"name": notion_status}}},
@@ -917,6 +927,17 @@ async def ensure_grant_pipeline_schema() -> bool:
             "Past Winners": {"number": {"format": "number"}},
             "Contact Email": {"email": {}},
             "Currency": {"rich_text": {}},
+            # Notion-primary fields (Phase 1 migration)
+            "URL Hash": {"rich_text": {}},
+            "Content Hash": {"rich_text": {}},
+            "Source": {"select": {"options": [
+                {"name": "tavily", "color": "blue"},
+                {"name": "exa", "color": "purple"},
+                {"name": "perplexity", "color": "orange"},
+                {"name": "direct_crawl", "color": "green"},
+                {"name": "hub_expansion", "color": "yellow"},
+                {"name": "manual", "color": "gray"},
+            ]}},
         }
 
         await client.databases.update(
@@ -945,7 +966,7 @@ async def setup_grant_pipeline_views() -> dict[str, Any]:
     try:
         from backend.integrations.notion_mcp import notion_mcp
 
-        # Kanban view grouped by Status (Triage → Pursue → Drafting → Submitted)
+        # Kanban view grouped by Status (Shortlisted → Pursue → Draft → Submit → Pass → Rejected)
         try:
             kanban = await notion_mcp._call_tool("notion-create-view", {
                 "database_id": GRANT_PIPELINE_DS,
@@ -1225,7 +1246,7 @@ async def sync_draft_section(
         # Try to find existing page for this section + grant
         existing_id = None
         try:
-            resp = await client.databases.query(
+            resp = await client.data_sources.query(
                 database_id=DRAFT_SECTIONS_DS,
                 filter={
                     "and": [
@@ -1276,7 +1297,7 @@ async def push_complete_draft_to_notion(
 
     Finds the grant page in Grant Pipeline, appends a "Draft" section with
     all draft sections, word counts, and evidence gaps. Updates status to
-    "Drafting".
+    "Draft".
 
     Returns the Notion page ID on success, None on failure.
     """
@@ -1354,7 +1375,7 @@ async def push_complete_draft_to_notion(
         try:
             await client.pages.update(
                 page_id=page_id,
-                properties={"Status": {"select": {"name": "Drafting"}}},
+                properties={"Status": {"select": {"name": "Draft"}}},
             )
         except Exception:
             log.debug("Failed to update grant status for %s", grant_id, exc_info=True)
@@ -1386,18 +1407,98 @@ async def backfill_grants(grants: list[dict[str, Any]]) -> int:
     return count
 
 
+async def dedup_notion_pipeline() -> dict[str, int]:
+    """Remove duplicate pages in Notion Grant Pipeline (same MongoDB ID).
+
+    Keeps the most recently edited page, archives older duplicates.
+    Returns counts of archived and failed pages.
+    """
+    client = _get_client()
+    all_pages: list[dict] = []
+    cursor: str | None = None
+
+    # Paginate through all pages in the database
+    while True:
+        kwargs: dict[str, Any] = {"database_id": GRANT_PIPELINE_DS, "page_size": 100}
+        if cursor:
+            kwargs["start_cursor"] = cursor
+        resp = await client.data_sources.query(**kwargs)
+        all_pages.extend(resp["results"])
+        if not resp.get("has_more"):
+            break
+        cursor = resp.get("next_cursor")
+        await asyncio.sleep(0.3)
+
+    log.info("Notion dedup: fetched %d pages total", len(all_pages))
+
+    # Group by MongoDB ID
+    by_mongo_id: dict[str, list[dict]] = {}
+    orphans = []
+    for page in all_pages:
+        props = page.get("properties", {})
+        mongo_prop = props.get("MongoDB ID", {})
+        mongo_id = ""
+        for seg in mongo_prop.get("rich_text", []):
+            mongo_id += seg.get("plain_text", "")
+        mongo_id = mongo_id.strip()
+
+        if not mongo_id:
+            orphans.append(page["id"])
+        else:
+            by_mongo_id.setdefault(mongo_id, []).append(page)
+
+    # For each group with >1 page, keep newest (by last_edited_time), archive rest
+    archived = 0
+    failed = 0
+    for mongo_id, pages in by_mongo_id.items():
+        if len(pages) <= 1:
+            continue
+        # Sort by last_edited_time descending — keep first (newest)
+        pages.sort(key=lambda p: p.get("last_edited_time", ""), reverse=True)
+        for dup in pages[1:]:
+            try:
+                await client.pages.update(page_id=dup["id"], archived=True)
+                archived += 1
+                await asyncio.sleep(0.2)
+            except Exception:
+                log.debug("Failed to archive dup page %s", dup["id"], exc_info=True)
+                failed += 1
+
+    # Archive orphans (no MongoDB ID)
+    for oid in orphans:
+        try:
+            await client.pages.update(page_id=oid, archived=True)
+            archived += 1
+            await asyncio.sleep(0.2)
+        except Exception:
+            log.debug("Failed to archive orphan page %s", oid, exc_info=True)
+            failed += 1
+
+    log.info(
+        "Notion dedup: %d total pages, %d duplicates archived, %d orphans archived, %d failed",
+        len(all_pages), archived - len(orphans), len(orphans), failed,
+    )
+    return {"total": len(all_pages), "archived": archived, "failed": failed, "orphans": len(orphans)}
+
+
 # ── Reverse sync: Notion → MongoDB ───────────────────────────────────────────
 
 # Notion select value → MongoDB status
 REVERSE_STATUS_MAP = {
-    "Triage": "triage",
+    "Shortlisted": "triage",
     "Pursue": "pursuing",
     "Watch": "watch",
     "Pass": "passed",
+    "Rejected": "auto_pass",
+    "Draft": "drafting",
+    "Submit": "submitted",
+    "Won": "won",
+    "Hold": "hold",
+    # Legacy names (backward compat if old Notion pages still have them)
+    "Triage": "triage",
     "Auto Pass": "auto_pass",
     "Drafting": "drafting",
     "Submitted": "submitted",
-    "Won": "won",
 }
 
 REVERSE_PRIORITY_MAP = {
@@ -1444,7 +1545,7 @@ async def reverse_sync_from_notion() -> dict[str, int]:
             if start_cursor:
                 query_args["start_cursor"] = start_cursor
 
-            resp = await client.databases.query(**query_args)
+            resp = await client.data_sources.query(**query_args)
             pages = resp.get("results", [])
             has_more = resp.get("has_more", False)
             start_cursor = resp.get("next_cursor")
