@@ -1,7 +1,7 @@
 """Grant Reader — fetches and parses the official grant document.
 
-Primary: Jina Reader (handles PDFs + messy HTML cleanly)
-Fallback: Firecrawl (if Jina fails or content is thin)
+Primary: Cloudflare Browser Rendering (renders JS, returns clean markdown)
+Fallback: Firecrawl (if Cloudflare BR fails or content is thin)
 Parsing: Claude Sonnet extracts structured requirements
 """
 from __future__ import annotations
@@ -68,15 +68,23 @@ DEFAULT_SECTIONS = [
 # drafter_node.py when the grant's theme is resolved. See theme_profiles.py.
 
 
-async def _fetch_with_jina(url: str, api_key: str = "") -> str:
-    jina_url = f"https://r.jina.ai/{url.strip()}"
-    headers: Dict[str, str] = {"X-Return-Format": "markdown"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
-        r = await client.get(jina_url, headers=headers)
+async def _fetch_with_cloudflare(url: str, account_id: str = "", api_token: str = "") -> str:
+    """Fetch page content as markdown via Cloudflare Browser Rendering."""
+    if not account_id or not api_token:
+        return ""
+    cf_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/browser-rendering/markdown"
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        r = await client.post(
+            cf_url,
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": "application/json",
+            },
+            json={"url": url.strip()},
+        )
         r.raise_for_status()
-        return r.text.strip()
+        data = r.json()
+        return (data.get("result") or "").strip()
 
 
 async def _fetch_with_firecrawl(url: str, api_key: str) -> str:
@@ -92,19 +100,19 @@ async def _fetch_with_firecrawl(url: str, api_key: str) -> str:
         return data.get("data", {}).get("markdown") or data.get("markdown", "")
 
 
-async def fetch_grant_document(url: str, jina_key: str = "", firecrawl_key: str = "") -> str:
-    """Fetch grant document content. Jina primary, Firecrawl fallback."""
+async def fetch_grant_document(url: str, cf_account_id: str = "", cf_token: str = "", firecrawl_key: str = "") -> str:
+    """Fetch grant document content. Cloudflare BR primary, Firecrawl fallback."""
     content = ""
 
-    if jina_key or True:  # Jina works without a key (rate-limited)
+    if cf_account_id and cf_token:
         try:
-            content = await _fetch_with_jina(url, jina_key)
+            content = await _fetch_with_cloudflare(url, cf_account_id, cf_token)
             if len(content) > 500:
-                logger.info("Grant Reader: Jina fetched %d chars from %s", len(content), url)
+                logger.info("Grant Reader: Cloudflare BR fetched %d chars from %s", len(content), url)
                 return content[:120_000]
-            logger.warning("Grant Reader: Jina returned thin content (%d chars), trying fallback", len(content))
+            logger.warning("Grant Reader: Cloudflare BR returned thin content (%d chars), trying fallback", len(content))
         except Exception as e:
-            logger.warning("Grant Reader: Jina failed for %s: %s", url, e)
+            logger.warning("Grant Reader: Cloudflare BR failed for %s: %s", url, e)
 
     if firecrawl_key:
         try:
@@ -168,7 +176,7 @@ async def grant_reader_node(state: dict) -> dict:
             "grant_requirements": {"sections_required": DEFAULT_SECTIONS},
         }
 
-    raw_doc = await fetch_grant_document(url, s.jina_api_key)
+    raw_doc = await fetch_grant_document(url, s.cloudflare_account_id, s.cloudflare_browser_token)
     requirements = await parse_grant_document(raw_doc)
 
     from datetime import datetime, timezone

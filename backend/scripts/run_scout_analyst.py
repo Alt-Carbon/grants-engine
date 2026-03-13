@@ -82,8 +82,8 @@ async def main():
     logger.info("API keys: Tavily ✓  Exa ✓  Anthropic ✓")
     if s.perplexity_api_key:
         logger.info("Perplexity: ✓ (funder enrichment enabled)")
-    if s.jina_api_key:
-        logger.info("Jina: ✓ (full-page fetch enabled)")
+    if s.cloudflare_account_id and s.cloudflare_browser_token:
+        logger.info("Cloudflare BR: ✓ (full-page fetch enabled)")
 
     # ── 2. Ensure DB indexes ──────────────────────────────────────────────────
     from backend.db.mongo import ensure_indexes, get_db
@@ -95,7 +95,8 @@ async def main():
     agent = ScoutAgent(
         tavily_api_key=s.tavily_api_key,
         exa_api_key=s.exa_api_key,
-        jina_api_key=s.jina_api_key,
+        cloudflare_account_id=s.cloudflare_account_id,
+        cloudflare_browser_token=s.cloudflare_browser_token,
         perplexity_api_key=s.perplexity_api_key,
         gateway_api_key=s.ai_gateway_api_key,
         gateway_url=s.ai_gateway_url,

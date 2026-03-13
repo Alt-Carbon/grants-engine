@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { useLastSeen } from "@/hooks/useLastSeen";
 import Link from "next/link";
+import { isHybridMode, NOTION_WORKSPACE_URL } from "@/lib/deployment";
 import {
   Sparkles,
   Search,
@@ -247,21 +248,45 @@ export function WhatsNewDigest() {
         {/* CTAs */}
         <div className="mt-4 flex flex-wrap items-center gap-3">
           {digest.newInTriage > 0 && (
-            <Link
-              href="/triage"
-              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-blue-700 transition-colors"
+            isHybridMode ? (
+              <a
+                href={NOTION_WORKSPACE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-blue-700 transition-colors"
+              >
+                Review {digest.newInTriage} new grant{digest.newInTriage !== 1 ? "s" : ""}
+                <ArrowRight className="h-3.5 w-3.5" />
+              </a>
+            ) : (
+              <Link
+                href="/triage"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white shadow-sm hover:bg-blue-700 transition-colors"
+              >
+                Review {digest.newInTriage} new grant{digest.newInTriage !== 1 ? "s" : ""}
+                <ArrowRight className="h-3.5 w-3.5" />
+              </Link>
+            )
+          )}
+          {isHybridMode ? (
+            <a
+              href={NOTION_WORKSPACE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 transition-colors"
             >
-              Review {digest.newInTriage} new grant{digest.newInTriage !== 1 ? "s" : ""}
-              <ArrowRight className="h-3.5 w-3.5" />
+              <TrendingUp className="h-3.5 w-3.5" />
+              View in Notion
+            </a>
+          ) : (
+            <Link
+              href="/pipeline?view=table&sort=scored_at&filter=new"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 transition-colors"
+            >
+              <TrendingUp className="h-3.5 w-3.5" />
+              View all new in pipeline
             </Link>
           )}
-          <Link
-            href="/pipeline?view=table&sort=scored_at&filter=new"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 transition-colors"
-          >
-            <TrendingUp className="h-3.5 w-3.5" />
-            View all new in pipeline
-          </Link>
           <button
             onClick={() => setDismissed(true)}
             className="text-xs text-gray-500 hover:text-gray-700"

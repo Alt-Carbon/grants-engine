@@ -229,9 +229,10 @@ def save_manual_grant(
     title_override: str = "",
     funder_override: str = "",
     notes: str = "",
-    jina_key: str = "",
+    cf_account_id: str = "",
+    cf_token: str = "",
 ) -> tuple:
-    """Fetch a grant URL via Jina, detect themes, and save to grants_raw.
+    """Fetch a grant URL via Cloudflare BR, detect themes, and save to grants_raw.
 
     Returns (success: bool, message: str).
     """
@@ -249,22 +250,32 @@ def save_manual_grant(
     if existing:
         return False, f"Already in database (added {existing.get('scraped_at','previously')[:10]})."
 
-    # Fetch via Jina first, fall back to plain HTTP
+    # Fetch via Cloudflare BR first, fall back to plain HTTP
     raw_content = ""
-    jina_url = f"https://r.jina.ai/{url}"
-    headers = {"X-Return-Format": "markdown", "X-With-Links-Summary": "false"}
-    if jina_key:
-        headers["Authorization"] = f"Bearer {jina_key}"
-    try:
-        r = httpx.get(jina_url, headers=headers, timeout=30.0, follow_redirects=True)
-        r.raise_for_status()
-        raw_content = r.text.strip()[:80_000]
-    except Exception as e:
+    if cf_account_id and cf_token:
+        cf_url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/browser-rendering/markdown"
+        try:
+            r = httpx.post(
+                cf_url,
+                headers={
+                    "Authorization": f"Bearer {cf_token}",
+                    "Content-Type": "application/json",
+                },
+                json={"url": url},
+                timeout=30.0,
+            )
+            r.raise_for_status()
+            data = r.json()
+            raw_content = (data.get("result") or "").strip()[:80_000]
+        except Exception:
+            pass
+
+    if len(raw_content) < 100:
         try:
             r2 = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20.0, follow_redirects=True)
             r2.raise_for_status()
             raw_content = r2.text[:60_000]
-        except Exception:
+        except Exception as e:
             return False, f"Could not fetch URL: {e}"
 
     if len(raw_content) < 100:
@@ -295,7 +306,7 @@ def save_manual_grant(
         if m:
             title = m.group(1).strip()[:120]
         else:
-            # For markdown (Jina output), use the first non-empty heading or line
+            # For markdown output, use the first non-empty heading or line
             for line in raw_content.split("\n"):
                 line = line.lstrip("#").strip()
                 if len(line) > 10:

@@ -14,19 +14,50 @@ import {
   X,
   Activity,
   LogOut,
+  Wrench,
+  ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  isHybridMode,
+  HYBRID_HIDDEN_ROUTES,
+  NOTION_WORKSPACE_URL,
+} from "@/lib/deployment";
 import { AgentControls } from "./AgentControls";
 import { NotificationBell } from "./NotificationBell";
 
-const NAV = [
+interface NavItem {
+  href: string;
+  label: string;
+  icon: React.ElementType;
+  external?: boolean;
+}
+
+const ALL_NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: BarChart3 },
   { href: "/pipeline", label: "Pipeline", icon: Kanban },
   { href: "/triage", label: "Shortlisted", icon: ListChecks },
   { href: "/drafter", label: "Drafter", icon: FileText },
   { href: "/monitoring", label: "Mission Control", icon: Activity },
+  { href: "/toolkit", label: "Toolkit", icon: Wrench },
   { href: "/knowledge", label: "Knowledge", icon: Database },
 ];
+
+const HYBRID_NAV: NavItem[] = [
+  { href: "/monitoring", label: "Mission Control", icon: Activity },
+  {
+    href: NOTION_WORKSPACE_URL,
+    label: "Grants Pipeline",
+    icon: Kanban,
+    external: true,
+  },
+  { href: "/drafter", label: "Drafter", icon: FileText },
+  { href: "/knowledge", label: "Knowledge", icon: Database },
+];
+
+const NAV = isHybridMode
+  ? HYBRID_NAV
+  : ALL_NAV.filter((n) => !HYBRID_HIDDEN_ROUTES.has(n.href));
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -58,9 +89,27 @@ export function Sidebar() {
 
       {/* Nav */}
       <nav className="flex flex-1 flex-col gap-1 p-3">
-        {NAV.map(({ href, label, icon: Icon }) => {
+        {NAV.map(({ href, label, icon: Icon, external }) => {
           const active =
-            pathname === href || pathname.startsWith(href + "/");
+            !external && (pathname === href || pathname.startsWith(href + "/"));
+
+          if (external) {
+            return (
+              <a
+                key={href}
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => setMobileOpen(false)}
+                className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-gray-400 transition-colors hover:bg-gray-800 hover:text-white"
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                {label}
+                <ExternalLink className="ml-auto h-3 w-3 opacity-50" />
+              </a>
+            );
+          }
+
           return (
             <Link
               key={href}
@@ -80,10 +129,12 @@ export function Sidebar() {
         })}
       </nav>
 
-      {/* Agent run controls */}
-      <div className="border-t border-gray-800">
-        <AgentControls />
-      </div>
+      {/* Agent run controls — full mode only (hybrid has them in Mission Control) */}
+      {!isHybridMode && (
+        <div className="border-t border-gray-800">
+          <AgentControls />
+        </div>
+      )}
 
       {/* User & Sign out */}
       <div className="border-t border-gray-800 px-4 py-3">

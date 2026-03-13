@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
+import { isHybridMode, NOTION_WORKSPACE_URL } from "@/lib/deployment";
 import {
   Play,
   Search,
@@ -55,6 +56,8 @@ import {
   Filter,
   Bot,
   ChevronUp,
+  Rocket,
+  CheckCircle2,
 } from "lucide-react";
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -131,7 +134,12 @@ interface APIHealthData {
   tavily: ServiceHealth;
   exa: ServiceHealth;
   perplexity: ServiceHealth;
-  jina: ServiceHealth;
+  cloudflare: ServiceHealth;
+}
+
+interface NotionMcpStatus {
+  status: "connected" | "disconnected" | "error" | string;
+  tools?: number;
 }
 
 interface SchedulerJob {
@@ -308,6 +316,17 @@ function CommandHeader({
         </div>
 
         <div className="flex items-center gap-4">
+          <div className="hidden items-center gap-2 lg:flex">
+            <Link
+              href="/drafter"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              Drafter
+            </Link>
+          </div>
+
+          {/* System status pill */}
           <div className="hidden items-center gap-2.5 rounded-full border border-slate-200 px-3.5 py-2 sm:flex">
             <StatusDot status={systemStatus} pulse={anyRunning} />
             <span className="text-[11px] font-semibold text-slate-600">
@@ -337,6 +356,97 @@ function CommandHeader({
         </div>
       </div>
     </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Notion Pipeline Banner (hybrid mode only)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function NotionPipelineBanner({
+  pipeline,
+  notionMcp,
+}: {
+  pipeline: PipelineSummary;
+  notionMcp: NotionMcpStatus | null;
+}) {
+  if (!isHybridMode) return null;
+
+  const notionConnected = notionMcp?.status === "connected";
+
+  return (
+    <a
+      href={NOTION_WORKSPACE_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group relative overflow-hidden rounded-2xl border border-slate-200 p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg"
+      style={{ background: "linear-gradient(to right, #0f172a, #1e293b, #0f172a)" }}
+    >
+      {/* Subtle gradient shimmer */}
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-white/[0.03] to-transparent opacity-0 transition-opacity group-hover:opacity-100" />
+
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-white/10 backdrop-blur-sm">
+            <BookOpen className="h-5 w-5 text-white" />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold text-white">
+              Grant Pipeline in Notion
+            </h2>
+            <p className="mt-0.5 text-[11px] text-slate-300">
+              {pipeline.total_discovered} grants discovered · {pipeline.pursuing} pursuing · {pipeline.drafting} drafting
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* Notion MCP status */}
+          <div className="flex items-center gap-2 rounded-full bg-white/[0.15] px-3 py-1.5">
+            {notionConnected ? (
+              <>
+                <Wifi className="h-3 w-3 text-emerald-400" />
+                <span className="text-[10px] font-semibold text-emerald-400">
+                  Notion Synced
+                </span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="h-3 w-3 text-amber-400" />
+                <span className="text-[10px] font-semibold text-amber-400">
+                  Notion Offline
+                </span>
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 text-slate-300 transition-colors group-hover:text-white">
+            <span className="text-xs font-semibold">Open in Notion</span>
+            <ArrowUpRight className="h-4 w-4" />
+          </div>
+        </div>
+      </div>
+
+      {/* Mini pipeline stages */}
+      <div className="mt-4 flex gap-2">
+        {[
+          { label: "Triage", count: pipeline.in_triage, color: "bg-blue-400" },
+          { label: "Pursuing", count: pipeline.pursuing, color: "bg-emerald-400" },
+          { label: "Drafting", count: pipeline.drafting, color: "bg-purple-400" },
+          { label: "Submitted", count: pipeline.submitted, color: "bg-cyan-400" },
+        ].map((stage) => (
+          <div
+            key={stage.label}
+            className="flex items-center gap-2 rounded-lg bg-white/[0.12] px-3 py-1.5"
+          >
+            <div className={`h-1.5 w-1.5 rounded-full ${stage.color}`} />
+            <span className="text-[10px] font-semibold text-slate-200">
+              {stage.count} {stage.label}
+            </span>
+          </div>
+        ))}
+      </div>
+    </a>
   );
 }
 
@@ -391,11 +501,27 @@ function AlertBadges({ data }: { data: PipelineSummary }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       {data.urgent > 0 && (
-        <Link href="/triage" className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-[11px] font-semibold text-rose-700 transition-colors hover:bg-rose-100">
-          <AlertTriangle className="h-3 w-3" />
-          {data.urgent} urgent deadline{data.urgent !== 1 ? "s" : ""}
-          <ArrowUpRight className="h-3 w-3" />
-        </Link>
+        isHybridMode ? (
+          <a
+            href={NOTION_WORKSPACE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-[11px] font-semibold text-rose-700 transition-colors hover:bg-rose-100"
+          >
+            <AlertTriangle className="h-3 w-3" />
+            {data.urgent} urgent deadline{data.urgent !== 1 ? "s" : ""}
+            <ArrowUpRight className="h-3 w-3" />
+          </a>
+        ) : (
+          <Link
+            href="/triage"
+            className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-[11px] font-semibold text-rose-700 transition-colors hover:bg-rose-100"
+          >
+            <AlertTriangle className="h-3 w-3" />
+            {data.urgent} urgent deadline{data.urgent !== 1 ? "s" : ""}
+            <ArrowUpRight className="h-3 w-3" />
+          </Link>
+        )
       )}
       {data.unprocessed > 0 && (
         <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] font-semibold text-amber-700">
@@ -1189,9 +1315,25 @@ function RecentDiscoveries({ grants }: { grants: Discovery[] }) {
           <h2 className="text-sm font-bold text-slate-900">Recent Discoveries</h2>
           <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-bold tabular-nums text-blue-700">{grants.length}</span>
         </div>
-        <Link href="/pipeline?view=table&sort=scored_at" className="flex items-center gap-1 text-[11px] font-semibold text-blue-600 transition-colors hover:text-blue-800">
-          View all <ArrowRight className="h-3 w-3" />
-        </Link>
+        {isHybridMode ? (
+          <a
+            href={NOTION_WORKSPACE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 text-[11px] font-semibold text-blue-600 transition-colors hover:text-blue-800"
+          >
+            View in Notion
+            <ArrowRight className="h-3 w-3" />
+          </a>
+        ) : (
+          <Link
+            href="/pipeline?view=table&sort=scored_at"
+            className="flex items-center gap-1 text-[11px] font-semibold text-blue-600 transition-colors hover:text-blue-800"
+          >
+            View all
+            <ArrowRight className="h-3 w-3" />
+          </Link>
+        )}
       </div>
       {grants.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-slate-400">
@@ -1665,6 +1807,221 @@ function ConfigPanel() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   Operations Panel (merged Toolkit — backfill, sync, reconnect, force-analyze)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+type OpsActionKey =
+  | "force_analyst"
+  | "sync_profile"
+  | "notion_backfill"
+  | "notion_backfill_views"
+  | "reconnect_notion"
+  | "notion_reverse_sync";
+
+function OperationsPanel({
+  notionMcp,
+  onRefresh,
+}: {
+  notionMcp: NotionMcpStatus | null;
+  onRefresh: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [actionLoading, setActionLoading] = useState<Record<OpsActionKey, boolean>>({
+    force_analyst: false,
+    sync_profile: false,
+    notion_backfill: false,
+    notion_backfill_views: false,
+    reconnect_notion: false,
+    notion_reverse_sync: false,
+  });
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const runOp = useCallback(
+    async (key: OpsActionKey, req: () => Promise<Response>, successMsg: string) => {
+      setActionLoading((prev) => ({ ...prev, [key]: true }));
+      setMessage(null);
+      setError(null);
+      try {
+        const res = await req();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.error || data?.detail || `Failed (${res.status})`);
+        setMessage(successMsg);
+        onRefresh();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Action failed");
+      } finally {
+        setActionLoading((prev) => ({ ...prev, [key]: false }));
+      }
+    },
+    [onRefresh]
+  );
+
+  const notionConnected = notionMcp?.status === "connected";
+
+  const OPS_ACTIONS: {
+    key: OpsActionKey;
+    title: string;
+    subtitle: string;
+    icon: React.ElementType;
+    iconColor: string;
+    run: () => void;
+    accent?: string;
+  }[] = [
+    {
+      key: "notion_reverse_sync",
+      title: "Sync from Notion",
+      subtitle: "Pull status & priority changes from Notion into dashboard",
+      icon: RefreshCw,
+      iconColor: "text-emerald-600",
+      run: () =>
+        runOp("notion_reverse_sync", () => fetch("/api/notion/reverse-sync", { method: "POST" }), "Reverse sync started — pulling changes from Notion."),
+    },
+    {
+      key: "force_analyst",
+      title: "Force Re-Analyze All",
+      subtitle: "Re-score every grant regardless of state",
+      icon: Zap,
+      iconColor: "text-amber-600",
+      run: () =>
+        runOp("force_analyst", () => fetch("/api/run/analyst?force=true", { method: "POST" }), "Force analyst started."),
+      accent: "border-amber-200",
+    },
+    {
+      key: "sync_profile",
+      title: "Sync Company Profile",
+      subtitle: "Refresh AltCarbon profile from Notion",
+      icon: Database,
+      iconColor: "text-violet-600",
+      run: () =>
+        runOp("sync_profile", () => fetch("/api/run/sync-profile", { method: "POST" }), "Profile sync started."),
+    },
+    {
+      key: "notion_backfill",
+      title: "Backfill to Notion",
+      subtitle: "Sync all scored grants to Notion pipeline",
+      icon: ArrowUpRight,
+      iconColor: "text-blue-600",
+      run: () =>
+        runOp(
+          "notion_backfill",
+          () =>
+            fetch("/api/notion/backfill", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ setup_views: false }),
+            }),
+          "Notion backfill started."
+        ),
+    },
+    {
+      key: "notion_backfill_views",
+      title: "Backfill + Setup Views",
+      subtitle: "Backfill and create Notion board/table views",
+      icon: Layers,
+      iconColor: "text-indigo-600",
+      run: () =>
+        runOp(
+          "notion_backfill_views",
+          () =>
+            fetch("/api/notion/backfill", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ setup_views: true }),
+            }),
+          "Backfill + views started."
+        ),
+    },
+    {
+      key: "reconnect_notion",
+      title: "Reconnect Notion MCP",
+      subtitle: notionConnected ? "MCP connected — reconnect if needed" : "MCP disconnected — reconnect now",
+      icon: notionConnected ? Wifi : WifiOff,
+      iconColor: notionConnected ? "text-emerald-600" : "text-rose-600",
+      run: () =>
+        runOp("reconnect_notion", () => fetch("/api/run/notion-mcp/reconnect", { method: "POST" }), "Notion MCP reconnected."),
+      accent: notionConnected ? undefined : "border-rose-200",
+    },
+  ];
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+      {/* Toggle header */}
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center justify-between px-5 py-4 text-left transition-colors hover:bg-slate-50"
+      >
+        <div className="flex items-center gap-2.5">
+          <Wrench className="h-4 w-4 text-slate-400" />
+          <h2 className="text-sm font-bold text-slate-900">Operations</h2>
+          <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+            {OPS_ACTIONS.length} actions
+          </span>
+        </div>
+        {expanded ? (
+          <ChevronUp className="h-4 w-4 text-slate-400" />
+        ) : (
+          <ChevronDown className="h-4 w-4 text-slate-400" />
+        )}
+      </button>
+
+      {expanded && (
+        <div className="border-t border-slate-100 px-5 py-4">
+          {/* Status messages */}
+          {(message || error) && (
+            <div
+              className={`mb-4 rounded-lg border px-3 py-2 text-xs ${
+                error
+                  ? "border-rose-200 bg-rose-50 text-rose-700"
+                  : "border-emerald-200 bg-emerald-50 text-emerald-700"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {error ? <AlertTriangle className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                <span>{error || message}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Action grid */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {OPS_ACTIONS.map((action) => {
+              const Icon = action.icon;
+              const loading = actionLoading[action.key];
+              return (
+                <button
+                  key={action.key}
+                  onClick={action.run}
+                  disabled={loading}
+                  className={`rounded-xl border bg-white p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60 ${
+                    action.accent || "border-slate-200"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <Icon className={`h-4 w-4 shrink-0 ${action.iconColor}`} />
+                        <p className="text-xs font-semibold text-slate-900">{action.title}</p>
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-400">{action.subtitle}</p>
+                    </div>
+                    {loading ? (
+                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />
+                    ) : (
+                      <Rocket className="h-4 w-4 shrink-0 text-slate-300" />
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    Main Component
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -1677,6 +2034,7 @@ export default function MissionControl({
   const [scout, setScout] = useState<AgentStatus | null>(null);
   const [analyst, setAnalyst] = useState<AgentStatus | null>(null);
   const [apiHealth, setApiHealth] = useState<APIHealthData | null>(null);
+  const [notionMcp, setNotionMcp] = useState<NotionMcpStatus | null>(null);
   const [triggerLoading, setTriggerLoading] = useState<string | null>(null);
   const [activity, setActivity] = useState<ActivityEvent[]>(initialActivity);
   const [discoveries, setDiscoveries] = useState<Discovery[]>(initialDiscoveries);
@@ -1685,13 +2043,14 @@ export default function MissionControl({
 
   const poll = useCallback(async () => {
     try {
-      const [s, a, act, disc, pipe, health] = await Promise.all([
+      const [s, a, act, disc, pipe, health, notion] = await Promise.all([
         fetch("/api/run/scout").then((r) => r.json()),
         fetch("/api/run/analyst").then((r) => r.json()),
         fetch("/api/activity").then((r) => r.json()),
         fetch("/api/discoveries").then((r) => r.json()),
         fetch("/api/pipeline-summary").then((r) => r.json()),
         fetch("/api/status/api-health").then((r) => r.json()).catch(() => null),
+        fetch("/api/status/notion-mcp").then((r) => r.json()).catch(() => null),
       ]);
       setScout(s);
       setAnalyst(a);
@@ -1699,6 +2058,7 @@ export default function MissionControl({
       if (Array.isArray(disc)) setDiscoveries(disc);
       if (pipe && typeof pipe.total_discovered === "number") setPipeline(pipe);
       if (health?.services) setApiHealth(health.services);
+      if (notion) setNotionMcp(notion);
       setLastRefresh(Date.now());
     } catch { /* ignore */ }
   }, []);
@@ -1737,9 +2097,15 @@ export default function MissionControl({
         apiExhaustedCount={apiExhaustedCount}
       />
 
+      {/* Notion Pipeline Banner (hybrid mode) */}
+      <NotionPipelineBanner pipeline={pipeline} notionMcp={notionMcp} />
+
       {/* KPI metrics */}
       <PipelineMetrics data={pipeline} />
       <AlertBadges data={pipeline} />
+
+      {/* Operations panel (backfill, sync, force-analyze, reconnect) */}
+      <OperationsPanel notionMcp={notionMcp} onRefresh={poll} />
 
       {/* Agent panels + Activity feed */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
