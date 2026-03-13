@@ -13,7 +13,10 @@ export default async function MonitoringPage() {
   const [activity, discoveries, pipeline, scoutRuns] = await Promise.all([
     getActivityFeed(30).catch(() => []),
     getRecentDiscoveries(20).catch(() => []),
-    getPipelineSummary().catch(() => null),
+    getPipelineSummary().catch(() => ({
+      total_discovered: 0, in_triage: 0, pursuing: 0, on_hold: 0,
+      drafting: 0, submitted: 0, rejected: 0, urgent: 0, unprocessed: 0,
+    })),
     getScoutRuns(10).catch(() => []),
   ]);
 
