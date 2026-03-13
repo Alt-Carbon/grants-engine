@@ -47,7 +47,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from backend.db.mongo import grants_raw, grants_scored, agent_config, audit_logs
+from backend.db.mongo import grants_raw, grants_scored, agent_config
+from backend.db.sqlite import audit_logs
 from backend.integrations.notion_data import (
     update_grant_page as _notion_update_grant_page,
     batch_find_url_hashes as _notion_batch_find_url_hashes,

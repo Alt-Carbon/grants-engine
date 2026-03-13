@@ -313,11 +313,93 @@ def notion_page_cache() -> _Table:
 def drafter_chat_history() -> _Table:
     return _Table("drafter_chat_history")
 
-def audit_logs() -> _Table:
-    return _Table("audit_logs")
+class _AuditTable(_Table):
+    """Audit logs table with smart insert — packs extra fields into metadata_json."""
 
-def scout_runs() -> _Table:
-    return _Table("scout_runs")
+    _KNOWN_COLS = {"node", "action", "metadata_json", "created_at"}
+
+    async def insert_one(self, doc: dict) -> None:
+        conn = await get_conn()
+        # Separate known columns from extra metadata
+        row: dict = {}
+        extra: dict = {}
+        for k, v in doc.items():
+            if k in self._KNOWN_COLS:
+                row[k] = v
+            elif k != "id":
+                extra[k] = v
+        # Merge extras into metadata_json
+        if extra:
+            existing = {}
+            if "metadata_json" in row:
+                try:
+                    existing = json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if isinstance(existing, dict):
+                existing.update(extra)
+            else:
+                existing = extra
+            row["metadata_json"] = json.dumps(existing, default=str)
+        elif "metadata_json" not in row:
+            row["metadata_json"] = "{}"
+
+        cols = list(row.keys())
+        vals = [json.dumps(v) if isinstance(v, (dict, list)) else v for v in row.values()]
+        placeholders = ",".join(["?"] * len(cols))
+        col_names = ",".join(cols)
+        await conn.execute(
+            f"INSERT INTO {self.table} ({col_names}) VALUES ({placeholders})",
+            vals,
+        )
+        await conn.commit()
+
+
+def audit_logs() -> _AuditTable:
+    return _AuditTable("audit_logs")
+
+class _ScoutRunsTable(_Table):
+    """Scout runs table — packs extra fields into run_json."""
+
+    _KNOWN_COLS = {"run_json", "run_at"}
+
+    async def insert_one(self, doc: dict) -> None:
+        conn = await get_conn()
+        row: dict = {}
+        extra: dict = {}
+        for k, v in doc.items():
+            if k in self._KNOWN_COLS:
+                row[k] = v
+            elif k != "id":
+                extra[k] = v
+        if extra:
+            existing = {}
+            if "run_json" in row:
+                try:
+                    existing = json.loads(row["run_json"]) if isinstance(row["run_json"], str) else row["run_json"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if isinstance(existing, dict):
+                existing.update(extra)
+            else:
+                existing = extra
+            row["run_json"] = json.dumps(existing, default=str)
+        elif "run_json" not in row:
+            row["run_json"] = "{}"
+
+        cols = list(row.keys())
+        vals = [json.dumps(v) if isinstance(v, (dict, list)) else v for v in row.values()]
+        placeholders = ",".join(["?"] * len(cols))
+        col_names = ",".join(cols)
+        await conn.execute(
+            f"INSERT INTO {self.table} ({col_names}) VALUES ({placeholders})",
+            vals,
+        )
+        await conn.commit()
+
+
+def scout_runs() -> _ScoutRunsTable:
+    return _ScoutRunsTable("scout_runs")
 
 def notifications() -> _Table:
     return _Table("notifications")

@@ -215,73 +215,66 @@ async def v2_pipeline_summary():
     }
 
 
-# ── Drafts (proxy to backend MongoDB during transition) ──────────────────────
+# ── Drafts (from Notion — grants with status "Draft" or "drafting") ──────────
 
 @router.get("/drafts")
 async def v2_draft_grants():
-    """Draft grants — reads from MongoDB via backend (transition period)."""
+    """Draft grants — reads from Notion (grants with drafting status) + scheduler thread info."""
     try:
-        from backend.db.mongo import grants_pipeline, grant_drafts, grants_scored
-        from bson import ObjectId
+        # Get all grants currently in drafting status from the cache
+        grants = await _cached_all_grants()
+        drafting = [g for g in grants if g.get("status") in ("drafting", "draft_complete")]
 
-        pipelines = await grants_pipeline().find(
-            {"status": {"$in": ["drafting", "draft_complete"]}}
-        ).sort("started_at", -1).to_list(100)
+        if not drafting:
+            # Also try direct query in case cache is stale
+            from backend.integrations.notion_data import query_grants_by_status
+            try:
+                drafting = await query_grants_by_status("Draft")
+            except Exception:
+                pass
+
+        # Get active drafting thread IDs from scheduler
+        from backend.jobs.scheduler import _active_drafting_page_ids
 
         result = []
-        for p in pipelines:
+        for g in drafting:
+            page_id = g.get("notion_page_id", "")
             rec = {
-                "_id": str(p["_id"]),
-                "grant_id": p.get("grant_id", ""),
-                "thread_id": p.get("thread_id", ""),
-                "status": p.get("status", ""),
-                "started_at": p.get("started_at"),
-                "draft_started_at": p.get("draft_started_at"),
-                "current_draft_version": p.get("current_draft_version"),
-                "final_draft_url": p.get("final_draft_url"),
-                "grant_title": "Unknown Grant",
-                "grant_funder": "",
-                "grant_themes": [],
+                "_id": page_id,
+                "grant_id": page_id,
+                "thread_id": f"draft-{page_id}" if page_id in _active_drafting_page_ids else "",
+                "status": g.get("status", "drafting"),
+                "started_at": None,
+                "draft_started_at": None,
+                "current_draft_version": 0,
+                "final_draft_url": None,
+                "grant_title": g.get("grant_name") or g.get("title") or "Unknown Grant",
+                "grant_funder": g.get("funder") or "",
+                "grant_themes": g.get("themes_detected") or [],
                 "latest_draft": None,
             }
 
-            # Lookup grant info
-            gid = p.get("grant_id")
-            if gid:
-                try:
-                    grant = await grants_scored().find_one({"_id": ObjectId(gid)})
-                    if grant:
-                        rec["grant_title"] = grant.get("grant_name") or grant.get("title") or "Unknown"
-                        rec["grant_funder"] = grant.get("funder", "")
-                        rec["grant_themes"] = grant.get("themes_detected", [])
-                except Exception:
-                    pass
-
-            # Lookup latest draft
-            draft = await grant_drafts().find_one(
-                {"pipeline_id": str(p["_id"])},
-                sort=[("version", -1)],
-            )
-            if draft:
-                rec["latest_draft"] = {
-                    "_id": str(draft["_id"]),
-                    "pipeline_id": draft.get("pipeline_id", ""),
-                    "version": draft.get("version", 0),
-                    "sections": draft.get("sections", {}),
-                    "created_at": draft.get("created_at"),
-                }
+            # Try to find thread info from SQLite drafter_chat_history
+            try:
+                from backend.db.sqlite import drafter_chat_history
+                chat = await drafter_chat_history().find_one({"pipeline_id": page_id})
+                if chat:
+                    rec["thread_id"] = chat.get("pipeline_id", rec["thread_id"])
+            except Exception:
+                pass
 
             result.append(rec)
 
         return result
     except Exception as exc:
-        log.warning("v2_draft_grants fallback: %s", exc)
+        log.warning("v2_draft_grants: %s", exc)
         return []
 
 
 @router.get("/drafts/{pipeline_id}/sections")
 async def v2_get_sections(pipeline_id: str):
-    """Draft sections for a pipeline (from MongoDB during transition)."""
+    """Draft sections for a pipeline — checks SQLite chat history and MongoDB fallback."""
+    # Try MongoDB first (legacy drafts may still be there)
     try:
         from backend.db.mongo import grant_drafts
 
@@ -289,12 +282,13 @@ async def v2_get_sections(pipeline_id: str):
             {"pipeline_id": pipeline_id},
             sort=[("version", -1)],
         )
-        if not draft:
-            return {}
-        return draft.get("sections", {})
-    except Exception as exc:
-        log.warning("v2_get_sections fallback: %s", exc)
-        return {}
+        if draft:
+            return draft.get("sections", {})
+    except Exception:
+        pass
+
+    # No sections found yet — pipeline may be in progress
+    return {}
 
 
 # ── Audit Logs / Activity (from SQLite) ──────────────────────────────────────

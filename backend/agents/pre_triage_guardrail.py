@@ -100,7 +100,8 @@ async def pre_triage_guardrail_node(state: GrantState) -> Dict:
     # ── Update rejected grants in MongoDB ────────────────────────────────────
     if rejected:
         try:
-            from backend.db.mongo import grants_scored, audit_logs
+            from backend.db.mongo import grants_scored
+            from backend.db.sqlite import audit_logs
             from bson import ObjectId
             col = grants_scored()
             for grant in rejected:

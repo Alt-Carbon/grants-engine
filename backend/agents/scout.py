@@ -39,7 +39,8 @@ from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 
 import httpx
 
-from backend.db.mongo import grants_raw, grants_scored, scout_runs, audit_logs
+from backend.db.mongo import grants_raw, grants_scored
+from backend.db.sqlite import scout_runs, audit_logs
 from backend.integrations.notion_data import (
     batch_find_url_hashes as _notion_batch_find_url_hashes,
     create_grant_page as _notion_create_grant_page,
@@ -49,6 +50,33 @@ from backend.utils.llm import chat, HAIKU, SCOUT_MODEL
 from backend.utils.parsing import parse_json_safe, retry_async, api_health, CreditExhaustedError
 
 logger = logging.getLogger(__name__)
+
+# ── Graceful stop mechanism ──────────────────────────────────────────────────
+# Set by main.py /run/scout/stop endpoint. Checked at key phases of _run_inner.
+_cancel_event: Optional[asyncio.Event] = None
+
+
+class ScoutStoppedError(Exception):
+    """Raised when scout is gracefully stopped by user."""
+    pass
+
+
+def set_cancel_event(event: asyncio.Event) -> None:
+    """Set the cancel event (called from main.py before starting scout)."""
+    global _cancel_event
+    _cancel_event = event
+
+
+def clear_cancel_event() -> None:
+    """Clear the cancel event (called after scout finishes)."""
+    global _cancel_event
+    _cancel_event = None
+
+
+def _check_cancelled() -> None:
+    """Raise ScoutStoppedError if cancellation was requested."""
+    if _cancel_event is not None and _cancel_event.is_set():
+        raise ScoutStoppedError("Scout stopped by user")
 
 # ── Tavily queries ─────────────────────────────────────────────────────────────
 DEFAULT_TAVILY_QUERIES: List[str] = [
@@ -1547,7 +1575,56 @@ class ScoutAgent:
         )
 
         try:
-            return await self._run_inner()
+            return await asyncio.wait_for(self._run_inner(), timeout=420)  # 7 min hard limit
+        except ScoutStoppedError:
+            elapsed = (datetime.now(timezone.utc) - _run_start).total_seconds()
+            logger.info("Scout stopped by user after %.0fs — grants already saved are kept", elapsed)
+            try:
+                from backend.integrations.notion_sync import log_agent_run
+                await log_agent_run(
+                    agent="scout",
+                    status="Stopped",
+                    trigger="Manual",
+                    started_at=_run_start,
+                    duration_seconds=elapsed,
+                    errors=0,
+                    summary=f"Scout stopped by user after {elapsed:.0f}s — partial results saved",
+                )
+            except Exception:
+                logger.debug("Notion sync skipped (scout stopped)", exc_info=True)
+            # Write audit log for the stop
+            try:
+                await audit_logs().insert_one({
+                    "node": "scout",
+                    "action": f"Scout stopped by user after {elapsed:.0f}s",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
+            return []  # Grants already written to Notion are preserved
+        except asyncio.TimeoutError:
+            elapsed = (datetime.now(timezone.utc) - _run_start).total_seconds()
+            logger.error("Scout timed out after %.0fs (7 min limit)", elapsed)
+            try:
+                from backend.integrations.notion_sync import log_error, log_agent_run
+                await log_error(
+                    agent="scout",
+                    error=TimeoutError("Scout exceeded 7-minute time limit"),
+                    tb=f"Scout timed out after {elapsed:.0f}s",
+                    severity="Warning",
+                )
+                await log_agent_run(
+                    agent="scout",
+                    status="Timeout",
+                    trigger="Manual",
+                    started_at=_run_start,
+                    duration_seconds=elapsed,
+                    errors=1,
+                    summary=f"Scout timed out after {elapsed:.0f}s — partial results may have been saved",
+                )
+            except Exception:
+                logger.debug("Notion error sync skipped (scout timeout)", exc_info=True)
+            return []  # Return empty — any grants already saved to Notion are kept
         except Exception as exc:
             elapsed = (datetime.now(timezone.utc) - _run_start).total_seconds()
             try:
@@ -1573,6 +1650,8 @@ class ScoutAgent:
 
     async def _run_inner(self) -> List[Dict]:
         """Inner scout logic, wrapped by run() for error handling."""
+
+        _check_cancelled()  # Check before starting
 
         # ── Run all searches in parallel ──────────────────────────────────────
         tavily_tasks = [self._tavily_search(q) for q in self.tavily_queries]
@@ -1619,6 +1698,7 @@ class ScoutAgent:
                     unique.append(item)
 
         logger.info("Scout: %d unique URLs after in-memory dedup (incl. hub expansions)", len(unique))
+        _check_cancelled()  # Check after search phase
 
         # ── DB dedup (3-layer) — Notion-primary + MongoDB fallback ──────────
         col = grants_raw()
@@ -1668,6 +1748,7 @@ class ScoutAgent:
             new_grants.append(item)
 
         logger.info("Scout: %d new grants not in DB", len(new_grants))
+        _check_cancelled()  # Check before enrichment (most expensive phase)
 
         # ── Enrich: fetch content + theme detect + LLM extraction ─────────────
         enrich_sem = asyncio.Semaphore(4)
@@ -1733,7 +1814,10 @@ class ScoutAgent:
         # Wrap each enrich in a per-item timeout
         async def safe_enrich(item: Dict) -> Optional[Dict]:
             try:
+                _check_cancelled()  # Stop enriching new items if cancelled
                 return await asyncio.wait_for(enrich(item), timeout=45.0)
+            except ScoutStoppedError:
+                return None
             except asyncio.TimeoutError:
                 logger.warning("Enrich timeout for %s", item.get("url"))
                 return None

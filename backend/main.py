@@ -315,9 +315,10 @@ def _build_grant_context(grant: dict) -> str:
     return "\n\n".join(parts)
 
 
-# ── Scout job state (in-process flag) ─────────────────────────────────────────
+# ── Scout job state (in-process flag + cancellation) ──────────────────────────
 _scout_running: bool = False
 _scout_started_at: Optional[str] = None
+_scout_cancel_event: Optional[asyncio.Event] = None
 
 
 @asynccontextmanager
@@ -976,15 +977,28 @@ async def api_health_status():
 @app.get("/status/scout")
 async def scout_status():
     """Current scout job state + last run info. Polled by Streamlit."""
-    from backend.db.mongo import scout_runs
-    last = await scout_runs().find_one(sort=[("run_at", -1)])
+    from backend.db.sqlite import get_conn
+    conn = await get_conn()
+    rows = await conn.execute_fetchall(
+        "SELECT * FROM scout_runs ORDER BY run_at DESC LIMIT 1"
+    )
+    last = None
+    if rows:
+        d = dict(rows[0])
+        try:
+            last = json.loads(d.get("run_json", "{}") or "{}")
+            last["run_at"] = d.get("run_at", "")
+        except (json.JSONDecodeError, TypeError):
+            last = {"run_at": d.get("run_at", "")}
+    count_r = await conn.execute_fetchall("SELECT COUNT(*) as c FROM scout_runs")
+    total = dict(count_r[0])["c"] if count_r else 0
     return {
         "running": _scout_running,
         "started_at": _scout_started_at,
         "last_run_at": last["run_at"] if last else None,
         "last_run_new_grants": last.get("new_grants", 0) if last else 0,
         "last_run_total_found": last.get("total_found", 0) if last else 0,
-        "total_runs": await scout_runs().count_documents({}),
+        "total_runs": total,
     }
 
 
@@ -1287,28 +1301,40 @@ async def manual_scout(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
 ):
-    global _scout_running, _scout_started_at
+    global _scout_running, _scout_started_at, _scout_cancel_event
     if _scout_running:
         return {"status": "scout_already_running", "started_at": _scout_started_at}
 
     _scout_running = True
     _scout_started_at = datetime.now(timezone.utc).isoformat()
+    _scout_cancel_event = asyncio.Event()
+
+    # Wire cancel event into scout module
+    from backend.agents.scout import set_cancel_event, clear_cancel_event
+    set_cancel_event(_scout_cancel_event)
 
     async def _run():
-        global _scout_running, _scout_started_at
+        global _scout_running, _scout_started_at, _scout_cancel_event
+        stopped = False
         try:
             result = await run_scout_pipeline()
-            # Emit scout completion notification
-            try:
-                from backend.notifications.hub import notify_scout_complete
-                await notify_scout_complete(
-                    new_grants=result.get("new_grants", 0) if isinstance(result, dict) else 0,
-                    total_found=result.get("total_found", 0) if isinstance(result, dict) else 0,
-                )
-            except Exception:
-                logger.debug("Scout notification failed", exc_info=True)
+            stopped = _scout_cancel_event.is_set() if _scout_cancel_event else False
+
+            if stopped:
+                logger.info("Scout was stopped by user — proceeding to Analyst")
+            else:
+                # Emit scout completion notification
+                try:
+                    from backend.notifications.hub import notify_scout_complete
+                    await notify_scout_complete(
+                        new_grants=result.get("new_grants", 0) if isinstance(result, dict) else 0,
+                        total_found=result.get("total_found", 0) if isinstance(result, dict) else 0,
+                    )
+                except Exception:
+                    logger.debug("Scout notification failed", exc_info=True)
 
             # Auto-run Analyst on any remaining Raw grants in Notion
+            # (runs even after stop — that's the point)
             try:
                 from backend.integrations.notion_data import query_grants_by_status
                 from backend.agents.analyst import AnalystAgent
@@ -1339,9 +1365,22 @@ async def manual_scout(
         finally:
             _scout_running = False
             _scout_started_at = None
+            _scout_cancel_event = None
+            clear_cancel_event()
 
     background_tasks.add_task(_run)
     return {"status": "scout_job_started", "started_at": _scout_started_at}
+
+
+@app.post("/run/scout/stop")
+async def stop_scout(_: None = Depends(verify_internal)):
+    """Gracefully stop the running scout — it finishes saving what it has, then Analyst runs."""
+    global _scout_cancel_event
+    if not _scout_running or _scout_cancel_event is None:
+        return {"status": "not_running"}
+    _scout_cancel_event.set()
+    logger.info("Scout stop requested by user")
+    return {"status": "stop_requested"}
 
 
 @app.post("/run/knowledge-sync")

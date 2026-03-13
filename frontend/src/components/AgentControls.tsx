@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Telescope, Brain, Loader2, CheckCircle, AlertCircle } from "lucide-react";
+import { Telescope, Brain, Loader2, CheckCircle, AlertCircle, Square } from "lucide-react";
 import { usePusherEvent } from "@/hooks/usePusher";
 
 interface ScoutStatus {
@@ -42,6 +42,7 @@ function AgentButton({
   meta,
   badge,
   onClick,
+  onStop,
 }: {
   label: string;
   icon: React.ElementType;
@@ -50,6 +51,7 @@ function AgentButton({
   meta: string;
   badge?: string;
   onClick: () => void;
+  onStop?: () => void;
 }) {
   const isRunning = state === "running";
 
@@ -70,38 +72,52 @@ function AgentButton({
           <p className="mt-1 text-[10px] text-gray-600">{meta}</p>
         </div>
 
-        <button
-          onClick={onClick}
-          disabled={isRunning}
-          className={`shrink-0 rounded-md px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
-            isRunning
-              ? "bg-gray-700 text-gray-500 cursor-not-allowed"
-              : state === "done"
-              ? "bg-green-700/50 text-green-300 hover:bg-green-700"
-              : state === "error"
-              ? "bg-red-700/50 text-red-300 hover:bg-red-700"
-              : "bg-indigo-600 text-white hover:bg-indigo-500"
-          }`}
-        >
-          {isRunning ? (
-            <span className="flex items-center gap-1">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Running
-            </span>
-          ) : state === "done" ? (
-            <span className="flex items-center gap-1">
-              <CheckCircle className="h-3 w-3" />
-              Done
-            </span>
-          ) : state === "error" ? (
-            <span className="flex items-center gap-1">
-              <AlertCircle className="h-3 w-3" />
-              Retry
-            </span>
-          ) : (
-            "Run"
+        <div className="flex items-center gap-1.5 shrink-0">
+          {isRunning && onStop && (
+            <button
+              onClick={onStop}
+              className="rounded-md px-2 py-1.5 text-[11px] font-medium bg-red-700/50 text-red-300 hover:bg-red-700 transition-colors"
+              title="Stop gracefully — saves progress, then runs Analyst"
+            >
+              <span className="flex items-center gap-1">
+                <Square className="h-2.5 w-2.5 fill-current" />
+                Stop
+              </span>
+            </button>
           )}
-        </button>
+          <button
+            onClick={onClick}
+            disabled={isRunning}
+            className={`rounded-md px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+              isRunning
+                ? "bg-gray-700 text-gray-500 cursor-not-allowed"
+                : state === "done"
+                ? "bg-green-700/50 text-green-300 hover:bg-green-700"
+                : state === "error"
+                ? "bg-red-700/50 text-red-300 hover:bg-red-700"
+                : "bg-indigo-600 text-white hover:bg-indigo-500"
+            }`}
+          >
+            {isRunning ? (
+              <span className="flex items-center gap-1">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Running
+              </span>
+            ) : state === "done" ? (
+              <span className="flex items-center gap-1">
+                <CheckCircle className="h-3 w-3" />
+                Done
+              </span>
+            ) : state === "error" ? (
+              <span className="flex items-center gap-1">
+                <AlertCircle className="h-3 w-3" />
+                Retry
+              </span>
+            ) : (
+              "Run"
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Running progress bar */}
@@ -179,6 +195,15 @@ export function AgentControls() {
     }
   }
 
+  async function stopScout() {
+    try {
+      await fetch("/api/run/scout", { method: "DELETE", cache: "no-store" });
+      // Don't set idle — it'll transition when the backend finishes gracefully
+    } catch {
+      // ignore
+    }
+  }
+
   async function runAnalyst() {
     setAnalystState("running");
     try {
@@ -221,6 +246,7 @@ export function AgentControls() {
         state={scoutState}
         meta={scoutMeta}
         onClick={runScout}
+        onStop={stopScout}
       />
       <AgentButton
         label="Analyst"
