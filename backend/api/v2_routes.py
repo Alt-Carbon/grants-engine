@@ -200,7 +200,7 @@ async def v2_pipeline_summary():
 
     return {
         "total_discovered": len(grants),
-        "in_triage": sum(1 for g in grants if g.get("status") in ("triage", "raw")),
+        "in_triage": sum(1 for g in grants if g.get("status") == "triage"),
         "pursuing": sum(1 for g in grants if g.get("status") in ("pursue", "pursuing")),
         "on_hold": sum(1 for g in grants if g.get("status") == "hold"),
         "drafting": sum(1 for g in grants if g.get("status") == "drafting"),
@@ -210,7 +210,7 @@ async def v2_pipeline_summary():
             1 for g in grants
             if g.get("deadline_urgent") and g.get("status") in ("triage", "pursue")
         ),
-        "unprocessed": 0,
+        "unprocessed": sum(1 for g in grants if g.get("status") == "raw"),
         "watching": sum(1 for g in grants if g.get("status") == "watch"),
     }
 

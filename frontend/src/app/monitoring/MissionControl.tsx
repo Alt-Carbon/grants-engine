@@ -430,7 +430,7 @@ function NotionPipelineBanner({
       {/* Mini pipeline stages */}
       <div className="mt-4 flex gap-2">
         {[
-          { label: "Triage", count: pipeline.in_triage, color: "bg-blue-400" },
+          { label: "Shortlisted", count: pipeline.in_triage, color: "bg-blue-400" },
           { label: "Pursuing", count: pipeline.pursuing, color: "bg-emerald-400" },
           { label: "Drafting", count: pipeline.drafting, color: "bg-purple-400" },
           { label: "Submitted", count: pipeline.submitted, color: "bg-cyan-400" },
@@ -457,7 +457,7 @@ function NotionPipelineBanner({
 function PipelineMetrics({ data }: { data: PipelineSummary }) {
   const stages = [
     { label: "Discovered", value: data.total_discovered, icon: Search, accent: "from-blue-500 to-blue-600", iconColor: "text-blue-600", iconBg: "bg-blue-50" },
-    { label: "In Triage", value: data.in_triage, icon: Inbox, accent: "from-indigo-500 to-indigo-600", iconColor: "text-indigo-600", iconBg: "bg-indigo-50" },
+    { label: "Shortlisted", value: data.in_triage, icon: Inbox, accent: "from-indigo-500 to-indigo-600", iconColor: "text-indigo-600", iconBg: "bg-indigo-50" },
     { label: "Pursuing", value: data.pursuing, icon: TrendingUp, accent: "from-emerald-500 to-emerald-600", iconColor: "text-emerald-600", iconBg: "bg-emerald-50" },
     { label: "Drafting", value: data.drafting, icon: FileText, accent: "from-purple-500 to-purple-600", iconColor: "text-purple-600", iconBg: "bg-purple-50" },
     { label: "Submitted", value: data.submitted, icon: Trophy, accent: "from-cyan-500 to-cyan-600", iconColor: "text-cyan-600", iconBg: "bg-cyan-50" },
