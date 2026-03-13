@@ -15,6 +15,14 @@ def route_triage(state: GrantState) -> str:
         return "pipeline_update"
 
 
+def route_after_guardrail(state: GrantState) -> str:
+    """After draft guardrail: route to drafter if passed, pipeline_update if failed."""
+    result = state.get("draft_guardrail_result") or {}
+    if result.get("passed", True):
+        return "drafter"
+    return "pipeline_update"
+
+
 def route_after_drafter(state: GrantState) -> str:
     """After drafter node: loop back if more sections needed, else go to reviewer."""
     sections = (state.get("grant_requirements") or {}).get("sections_required", [])

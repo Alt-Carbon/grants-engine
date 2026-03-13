@@ -9,12 +9,10 @@ import {
   Kanban,
   ListChecks,
   FileText,
-  Settings,
   Database,
   Menu,
   X,
   Activity,
-  ScrollText,
   LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -27,8 +25,6 @@ const NAV = [
   { href: "/triage", label: "Shortlisted", icon: ListChecks },
   { href: "/drafter", label: "Drafter", icon: FileText },
   { href: "/monitoring", label: "Mission Control", icon: Activity },
-  { href: "/audit", label: "Audit Log", icon: ScrollText },
-  { href: "/config", label: "Config", icon: Settings },
   { href: "/knowledge", label: "Knowledge", icon: Database },
 ];
 

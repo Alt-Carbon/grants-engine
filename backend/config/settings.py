@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     pinecone_api_key: str = ""
     pinecone_index_name: str = "grants-engine"
 
+    # Cloudflare Browser Rendering (renders JS-heavy pages)
+    cloudflare_account_id: str = ""
+    cloudflare_browser_token: str = ""
+
+    # Slack (MCP server)
+    slack_bot_token: str = ""
+    slack_team_id: str = ""
+
     # Search tools
     tavily_api_key: str = ""
     exa_api_key: str = ""

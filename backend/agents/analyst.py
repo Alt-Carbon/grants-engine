@@ -549,7 +549,7 @@ _ROLLING_TERMS = frozenset({
 })
 
 
-def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
+def parse_deadline(date_str: Optional[str]) -> Optional[datetime]:
     """Parse deadline string → timezone-aware datetime, or None if unparseable."""
     if not date_str:
         return None
@@ -727,7 +727,7 @@ def _apply_hard_rules(grant: Dict, min_funding: int = 3_000) -> Optional[str]:
     # Rule 2: deadline already passed (timezone-aware comparison)
     deadline_str = grant.get("deadline")
     if deadline_str:
-        parsed = _parse_date(deadline_str)
+        parsed = parse_deadline(deadline_str)
         if parsed is not None and parsed < datetime.now(tz=timezone.utc):
             return f"Deadline has already passed ({deadline_str})"
 
@@ -1494,7 +1494,7 @@ def _build_scored_doc(
 
     # Compute days_to_deadline and deadline_urgent for proactive alerting (fix #17).
     # deadline_urgent=True triggers a UI badge when ≤ 30 days remain.
-    _deadline_dt = _parse_date(grant.get("deadline"))
+    _deadline_dt = parse_deadline(grant.get("deadline"))
     _now = datetime.now(tz=timezone.utc)
     if _deadline_dt and _deadline_dt > _now:
         days_to_deadline: Optional[int] = (_deadline_dt - _now).days
@@ -1590,7 +1590,7 @@ class AnalystAgent:
         self.weights = weights or DEFAULT_WEIGHTS
         self.min_funding = min_funding
 
-    async def run(self, raw_grants: List[Dict]) -> List[Dict]:
+    async def run(self, raw_grants: List[Dict], company_profile: str = "") -> List[Dict]:
         if not raw_grants:
             logger.info("Analyst: no grants to score")
             return []
@@ -1600,7 +1600,7 @@ class AnalystAgent:
         _run_start = datetime.now(timezone.utc)
 
         try:
-            return await self._run_inner(raw_grants)
+            return await self._run_inner(raw_grants, company_profile=company_profile)
         except Exception as exc:
             elapsed = (datetime.now(timezone.utc) - _run_start).total_seconds()
             try:
@@ -1624,7 +1624,7 @@ class AnalystAgent:
                 logger.debug("Notion error sync skipped (analyst failure)", exc_info=True)
             raise
 
-    async def _run_inner(self, raw_grants: List[Dict]) -> List[Dict]:
+    async def _run_inner(self, raw_grants: List[Dict], company_profile: str = "") -> List[Dict]:
         logger.info("Analyst: received %d grants to process", len(raw_grants))
 
         # ── Skip already-scored grants (idempotency) ─────────────────────────
@@ -1688,29 +1688,48 @@ class AnalystAgent:
         )
 
         # ── Company knowledge (Notion/Drive) for Analyst prompts ───────────────
-        # Base context: static profile (always available, cheap)
+        # Prefer company_profile from state (loaded by company_brain_load node).
+        # Fall back to internal loading chain for backward compat (direct agent.run() calls).
         from backend.agents.company_brain import _load_static_profile
         base_company_context = ""
         _brain_agent = None
-        try:
-            from backend.agents.company_brain import CompanyBrainAgent
-            from backend.config.settings import get_settings
-            _s = get_settings()
-            _brain_agent = CompanyBrainAgent(
-                notion_token=_s.notion_token,
-                google_refresh_token=_s.google_refresh_token,
-                google_client_id=_s.google_client_id,
-                google_client_secret=_s.google_client_secret,
-            )
-            base_company_context = await _brain_agent.get_company_overview(max_chars=3000)
-            if base_company_context:
-                logger.info("Analyst: loaded %d chars base company knowledge", len(base_company_context))
-        except Exception as e:
-            logger.debug("Company knowledge load skipped: %s", e)
-        if not base_company_context:
-            base_company_context = _load_static_profile()[:3000]
-            if base_company_context:
-                logger.info("Analyst: using static AltCarbon profile (%d chars)", len(base_company_context))
+
+        if company_profile:
+            base_company_context = company_profile
+            logger.info("Analyst: using pre-loaded company profile (%d chars)", len(base_company_context))
+            # Still create brain agent for per-grant vector search
+            try:
+                from backend.agents.company_brain import CompanyBrainAgent
+                from backend.config.settings import get_settings
+                _s = get_settings()
+                _brain_agent = CompanyBrainAgent(
+                    notion_token=_s.notion_token,
+                    google_refresh_token=_s.google_refresh_token,
+                    google_client_id=_s.google_client_id,
+                    google_client_secret=_s.google_client_secret,
+                )
+            except Exception as e:
+                logger.debug("Brain agent init skipped (per-grant search unavailable): %s", e)
+        else:
+            try:
+                from backend.agents.company_brain import CompanyBrainAgent
+                from backend.config.settings import get_settings
+                _s = get_settings()
+                _brain_agent = CompanyBrainAgent(
+                    notion_token=_s.notion_token,
+                    google_refresh_token=_s.google_refresh_token,
+                    google_client_id=_s.google_client_id,
+                    google_client_secret=_s.google_client_secret,
+                )
+                base_company_context = await _brain_agent.get_company_overview(max_chars=3000)
+                if base_company_context:
+                    logger.info("Analyst: loaded %d chars base company knowledge", len(base_company_context))
+            except Exception as e:
+                logger.debug("Company knowledge load skipped: %s", e)
+            if not base_company_context:
+                base_company_context = _load_static_profile()[:3000]
+                if base_company_context:
+                    logger.info("Analyst: using static AltCarbon profile (%d chars)", len(base_company_context))
 
         async def _get_grant_knowledge(grant: Dict) -> str:
             """Get grant-specific company knowledge via vector search.
@@ -1906,7 +1925,8 @@ async def analyst_node(state: GrantState) -> Dict:
     )
 
     raw_grants = state.get("raw_grants", [])
-    scored = await agent.run(raw_grants)
+    company_profile = state.get("company_profile", "")
+    scored = await agent.run(raw_grants, company_profile=company_profile)
 
     pursue_count = sum(1 for g in scored if g["recommended_action"] == "pursue")
     audit_entry = {

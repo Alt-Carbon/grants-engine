@@ -39,86 +39,42 @@ logger = logging.getLogger(__name__)
 
 # ── Theme-specific sub-agent prompts ──────────────────────────────────────────
 
-THEME_AGENTS = {
-    "climatetech": {
-        "name": "ClimaTech Drafter",
-        "temperature": 0.4,
-        "tone": "Authoritative and evidence-driven. Convey scientific credibility with measured confidence.",
-        "voice": "Technical expert who translates complex climate science into compelling funder narratives. Precise but accessible.",
-        "expertise": """DOMAIN EXPERTISE — Climate Technology:
-- You are an expert in carbon dioxide removal (CDR), MRV frameworks, and net-zero pathways
-- Use precise climate terminology: additionality, permanence, leakage, baseline scenarios, tCO2e
-- Reference relevant frameworks: Paris Agreement, SBTi, IPCC AR6, Verra/Gold Standard methodologies
-- Emphasize measurable climate impact with quantified emissions reductions
-- Speak to funder priorities: scalability, co-benefits, technology readiness levels (TRL)
-- Address carbon accounting rigor and third-party verification""",
-    },
-    "agritech": {
-        "name": "AgriTech Drafter",
-        "temperature": 0.4,
-        "tone": "Grounded and practical. Balance scientific rigor with on-the-ground agricultural realities.",
-        "voice": "Field-aware scientist who speaks both lab and farm. Emphasize real-world outcomes for farming communities.",
-        "expertise": """DOMAIN EXPERTISE — Agricultural Technology:
-- You are an expert in soil carbon sequestration, regenerative agriculture, and precision farming
-- Use agriscience terminology: soil organic carbon (SOC), no-till, cover cropping, biochar amendment, MRV for soil
-- Reference relevant standards: FAO guidelines, 4 per 1000 initiative, VERRA VM0042
-- Emphasize food security co-benefits, farmer livelihood improvements, and scalability
-- Address measurement challenges: permanence of soil carbon, sampling protocols, remote sensing validation
-- Speak to smallholder adoption barriers and technology transfer""",
-    },
-    "ai_for_sciences": {
-        "name": "AI for Sciences Drafter",
-        "temperature": 0.3,
-        "tone": "Methodical and precise. Demonstrate computational sophistication without jargon overload.",
-        "voice": "Applied ML researcher bridging algorithms and real-world environmental impact. Data-first storytelling.",
-        "expertise": """DOMAIN EXPERTISE — AI for Scientific Applications:
-- You are an expert in applying ML/AI to environmental monitoring, earth observation, and scientific discovery
-- Use ML terminology precisely: model architectures, training data pipelines, validation metrics, inference at scale
-- Reference relevant benchmarks and datasets where applicable
-- Emphasize novel methodological contributions and reproducibility
-- Address responsible AI: bias mitigation, interpretability, open-source commitments
-- Speak to computational requirements, scalability, and real-world deployment pathways""",
-    },
-    "applied_earth_sciences": {
-        "name": "Earth Sciences Drafter",
-        "temperature": 0.3,
-        "tone": "Rigorous and data-centric. Let geospatial evidence and measurement precision speak for themselves.",
-        "voice": "Geoscientist who connects remote sensing data to actionable environmental insights. Systematic and thorough.",
-        "expertise": """DOMAIN EXPERTISE — Applied Earth Sciences:
-- You are an expert in remote sensing, geospatial analysis, and subsurface characterization
-- Use geoscience terminology: spectral bands, spatial/temporal resolution, ground truth validation, geological formations
-- Reference relevant platforms and tools: Sentinel, Landsat, SAR, LiDAR, GIS frameworks
-- Emphasize data quality, calibration procedures, and uncertainty quantification
-- Address scalability from pilot sites to regional/national coverage
-- Speak to integration with existing monitoring infrastructure and government systems""",
-    },
-    "social_impact": {
-        "name": "Social Impact Drafter",
-        "temperature": 0.5,
-        "tone": "Empathetic and compelling. Centre human stories within rigorous impact frameworks.",
-        "voice": "Development practitioner who amplifies community voices. Warm but structured, balancing narrative with metrics.",
-        "expertise": """DOMAIN EXPERTISE — Social Impact & Inclusive Climate Action:
-- You are an expert in community-centered climate adaptation, gender equity, and inclusive development
-- Use development terminology: theory of change, participatory methods, intersectionality, just transition
-- Reference relevant frameworks: SDGs, UNFCCC Local Communities platform, gender-responsive climate action
-- Emphasize community ownership, local capacity building, and sustainability beyond project timelines
-- Address safeguards: FPIC, do-no-harm principles, grievance mechanisms
-- Speak to monitoring & evaluation with both quantitative and qualitative indicators""",
-    },
-    "deeptech": {
-        "name": "Deep Tech Drafter",
-        "temperature": 0.3,
-        "tone": "Bold and technically assured. Convey frontier innovation with commercial viability.",
-        "voice": "Deep tech strategist who bridges breakthrough science and market readiness. Confident, precise, IP-aware.",
-        "expertise": """DOMAIN EXPERTISE — Deep Technology & Frontier Science:
-- You are an expert in frontier technology commercialization, advanced materials, and breakthrough engineering
-- Use precise technical terminology specific to the technology domain (biotech, quantum, nanotech, etc.)
-- Reference technology readiness levels (TRL), IP strategy, and path from lab to market
-- Emphasize scientific novelty, defensible IP, and differentiation from existing approaches
-- Address scale-up challenges, manufacturing readiness, and regulatory pathways
-- Speak to team credentials, facilities access, and strategic partnerships""",
-    },
-}
+def _build_theme_agents() -> dict:
+    """Build THEME_AGENTS from theme_profiles.py — single source of truth."""
+    from backend.agents.drafter.theme_profiles import THEME_PROFILES
+
+    _VOICE_MAP = {
+        "climatetech": "Technical expert who translates complex climate science into compelling funder narratives. Precise but accessible.",
+        "agritech": "Field-aware scientist who speaks both lab and farm. Emphasize real-world outcomes for farming communities.",
+        "ai_for_sciences": "Applied ML researcher bridging algorithms and real-world environmental impact. Data-first storytelling.",
+        "applied_earth_sciences": "Geoscientist who connects remote sensing data to actionable environmental insights. Systematic and thorough.",
+        "social_impact": "Development practitioner who amplifies community voices. Warm but structured, balancing narrative with metrics.",
+        "deeptech": "Deep tech strategist who bridges breakthrough science and market readiness. Confident, precise, IP-aware.",
+    }
+    _TEMP_MAP = {
+        "climatetech": 0.4, "agritech": 0.4, "ai_for_sciences": 0.3,
+        "applied_earth_sciences": 0.3, "social_impact": 0.5, "deeptech": 0.3,
+    }
+
+    agents = {}
+    for key, profile in THEME_PROFILES.items():
+        domain_terms_str = ", ".join(profile.get("domain_terms", [])[:8])
+        strengths_str = "\n".join(f"- {s}" for s in profile.get("strengths", []))
+        agents[key] = {
+            "name": f"{profile['display_name']} Drafter",
+            "temperature": _TEMP_MAP.get(key, 0.4),
+            "tone": profile.get("tone", ""),
+            "voice": _VOICE_MAP.get(key, ""),
+            "expertise": (
+                f"DOMAIN EXPERTISE — {profile['display_name']}:\n"
+                f"Key terminology: {domain_terms_str}\n\n"
+                f"STRENGTHS TO HIGHLIGHT:\n{strengths_str}"
+            ),
+        }
+    return agents
+
+
+THEME_AGENTS = _build_theme_agents()
 
 # ── Full grant context builder ────────────────────────────────────────────────
 
@@ -374,16 +330,14 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("Startup DB init failed (non-fatal — check MONGODB_URI): %s", exc)
 
-    # Start Notion MCP connection (non-fatal)
+    # Start all MCP servers (non-fatal)
     try:
-        from backend.integrations.notion_mcp import notion_mcp
-        connected = await notion_mcp.connect()
-        if connected:
-            logger.info("Notion MCP server connected at startup")
-        else:
-            logger.warning("Notion MCP not connected (NOTION_TOKEN missing or npx failed)")
+        from backend.integrations.mcp_hub import mcp_hub
+        results = await mcp_hub.connect_all()
+        connected = sum(1 for v in results.values() if v)
+        logger.info("MCP Hub: %d/%d servers connected", connected, len(results))
     except Exception as exc:
-        logger.warning("Notion MCP startup failed (non-fatal): %s", exc)
+        logger.warning("MCP Hub startup failed (non-fatal): %s", exc)
 
     # Start APScheduler (non-fatal)
     try:
@@ -399,10 +353,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    # Shutdown MCP
+    # Shutdown all MCP servers
     try:
-        from backend.integrations.notion_mcp import notion_mcp
-        await notion_mcp.disconnect()
+        from backend.integrations.mcp_hub import mcp_hub
+        await mcp_hub.disconnect_all()
     except Exception:
         pass
     logger.info("Backend shutting down")
@@ -455,6 +409,8 @@ class SectionReviewRequest(BaseModel):
 class StartDraftRequest(BaseModel):
     grant_id: str
     thread_id: Optional[str] = None
+    override_guardrails: bool = False
+    override_reason: Optional[str] = None
 
 
 class DrafterChatRequest(BaseModel):
@@ -463,6 +419,8 @@ class DrafterChatRequest(BaseModel):
     message: str
     chat_history: Optional[list] = None  # [{role, content}, ...]
     model: Optional[str] = None  # "gpt-5.4" | "opus-4.6" — user-selectable
+    user_email: Optional[str] = None  # authenticated user's email
+    session_id: Optional[str] = None  # UUID per drafter session
 
 
 class UpdateGrantStatusRequest(BaseModel):
@@ -557,6 +515,70 @@ async def reconnect_notion_mcp(
     connected = await notion_mcp.connect()
     return {"status": "connected" if connected else "failed"}
 
+
+# ── MCP Hub (all servers) ────────────────────────────────────────────────────
+
+@app.get("/status/mcp")
+async def mcp_hub_status():
+    """Health check for all configured MCP servers."""
+    from backend.integrations.mcp_hub import mcp_hub
+    return await mcp_hub.health()
+
+
+@app.get("/status/mcp/{server_name}/tools")
+async def mcp_server_tools(server_name: str):
+    """List all available tools for a specific MCP server."""
+    from backend.integrations.mcp_hub import mcp_hub
+    conn = mcp_hub.get_server(server_name)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
+    if not conn.connected:
+        raise HTTPException(status_code=503, detail=f"MCP server '{server_name}' not connected")
+    tools = await conn.list_tools_full()
+    return {"server": server_name, "tools": tools}
+
+
+@app.post("/run/mcp/{server_name}/reconnect")
+async def reconnect_mcp_server(
+    server_name: str,
+    _: None = Depends(verify_internal),
+):
+    """Force reconnect a specific MCP server."""
+    from backend.integrations.mcp_hub import mcp_hub
+    connected = await mcp_hub.connect_one(server_name)
+    return {"server": server_name, "status": "connected" if connected else "failed"}
+
+
+@app.post("/run/mcp/reconnect-all")
+async def reconnect_all_mcp(
+    _: None = Depends(verify_internal),
+):
+    """Force reconnect all MCP servers."""
+    from backend.integrations.mcp_hub import mcp_hub
+    await mcp_hub.disconnect_all()
+    results = await mcp_hub.connect_all()
+    return {
+        "results": {name: ("connected" if ok else "failed") for name, ok in results.items()},
+    }
+
+
+# ── Skills Registry ──────────────────────────────────────────────────────────
+
+@app.get("/status/skills")
+async def skills_status():
+    """Full skill registry status — all skills, providers, and availability."""
+    from backend.skills import skills
+    return await skills.health()
+
+
+@app.get("/status/skills/{agent_name}")
+async def agent_skills(agent_name: str):
+    """List skills available to a specific pipeline agent."""
+    from backend.skills import skills
+    manifest = skills.agent_manifest(agent_name)
+    if not manifest:
+        raise HTTPException(status_code=404, detail=f"No skills found for agent '{agent_name}'")
+    return {"agent": agent_name, "skills": manifest}
 
 
 @app.get("/status/knowledge-sources")
@@ -1299,6 +1321,28 @@ async def manual_sync_profile(
     """
     from backend.knowledge.sync_profile import sync_profile_from_notion
     result = await sync_profile_from_notion()
+    return result
+
+
+@app.post("/run/sync-past-grants")
+async def sync_past_grants(
+    _: None = Depends(verify_internal),
+):
+    """Ingest past grant PDFs from /past_grants/ into MongoDB + Pinecone.
+
+    Extracts text via pdftotext, chunks, tags with Haiku, and upserts.
+    Tagged as doc_type='past_grant_application' for drafter style examples.
+    """
+    from backend.config.settings import get_settings
+    from backend.agents.company_brain import CompanyBrainAgent
+    s = get_settings()
+    agent = CompanyBrainAgent(
+        notion_token=s.notion_token,
+        google_refresh_token=s.google_refresh_token,
+        google_client_id=s.google_client_id,
+        google_client_secret=s.google_client_secret,
+    )
+    result = await agent.sync_past_grants()
     return result
 
 
@@ -2195,19 +2239,26 @@ class ChatHistorySaveRequest(BaseModel):
     pipeline_id: str
     grant_id: str
     sections: dict  # { section_name: [ {role, content, timestamp, metadata?} ] }
+    user_email: Optional[str] = None  # authenticated user's email
+    session_id: Optional[str] = None  # UUID per drafter session
 
 
 @app.get("/drafter/chat-history/{pipeline_id}")
 async def get_chat_history(
     pipeline_id: str,
+    user_email: Optional[str] = None,
     _: None = Depends(verify_internal),
 ):
-    """Load persisted chat history for a pipeline."""
+    """Load persisted chat history for a pipeline (optionally scoped to user)."""
     from backend.db.mongo import drafter_chat_history
 
-    doc = await drafter_chat_history().find_one({"pipeline_id": pipeline_id})
+    query: dict = {"pipeline_id": pipeline_id}
+    if user_email:
+        query["user_email"] = user_email
+
+    doc = await drafter_chat_history().find_one(query)
     if not doc:
-        return {"pipeline_id": pipeline_id, "sections": {}}
+        return {"pipeline_id": pipeline_id, "sections": {}, "user_email": user_email}
     doc.pop("_id", None)
     return doc
 
@@ -2217,36 +2268,83 @@ async def save_chat_history(
     body: ChatHistorySaveRequest,
     _: None = Depends(verify_internal),
 ):
-    """Save/upsert chat history for a pipeline (all sections at once)."""
+    """Save/upsert chat history for a pipeline (scoped to user if email provided)."""
     from backend.db.mongo import drafter_chat_history
 
+    # Build query key — scoped to user if email provided
+    query: dict = {"pipeline_id": body.pipeline_id}
+    if body.user_email:
+        query["user_email"] = body.user_email
+
+    update_doc: dict = {
+        "pipeline_id": body.pipeline_id,
+        "grant_id": body.grant_id,
+        "sections": body.sections,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if body.user_email:
+        update_doc["user_email"] = body.user_email
+    if body.session_id:
+        update_doc["session_id"] = body.session_id
+
     await drafter_chat_history().update_one(
-        {"pipeline_id": body.pipeline_id},
-        {"$set": {
-            "pipeline_id": body.pipeline_id,
-            "grant_id": body.grant_id,
-            "sections": body.sections,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }},
+        query,
+        {"$set": update_doc},
         upsert=True,
     )
-    return {"status": "saved", "pipeline_id": body.pipeline_id}
+    return {"status": "saved", "pipeline_id": body.pipeline_id, "user_email": body.user_email}
 
 
 @app.delete("/drafter/chat-history/{pipeline_id}/{section_name}")
 async def clear_section_history(
     pipeline_id: str,
     section_name: str,
+    user_email: Optional[str] = None,
     _: None = Depends(verify_internal),
 ):
     """Clear chat history for a single section within a pipeline."""
     from backend.db.mongo import drafter_chat_history
 
+    query: dict = {"pipeline_id": pipeline_id}
+    if user_email:
+        query["user_email"] = user_email
+
     await drafter_chat_history().update_one(
-        {"pipeline_id": pipeline_id},
+        query,
         {"$unset": {f"sections.{section_name}": ""}},
     )
     return {"status": "cleared", "pipeline_id": pipeline_id, "section_name": section_name}
+
+
+async def _predraft_validate(grant: dict) -> dict | None:
+    """Layer 1 deterministic pre-draft checks. Returns error dict or None if OK."""
+    from backend.agents.analyst import parse_deadline
+
+    # 1. Status — reject if auto_pass, pass, or watch
+    status = (grant.get("status") or "").lower()
+    blocked_statuses = {"auto_pass", "pass", "watch"}
+    if status in blocked_statuses:
+        return {"check": "status", "reason": f"Grant status is '{status}' — not eligible for drafting"}
+
+    # 2. Deadline freshness
+    deadline_str = grant.get("deadline")
+    if deadline_str:
+        deadline_dt = parse_deadline(deadline_str)
+        if deadline_dt and deadline_dt < datetime.now(timezone.utc):
+            return {"check": "deadline", "reason": f"Grant deadline {deadline_dt.strftime('%Y-%m-%d')} has expired"}
+
+    # 3. Score floor
+    scores = grant.get("scores") or {}
+    weighted_total = grant.get("weighted_total") or scores.get("weighted_total", 0)
+    if isinstance(weighted_total, (int, float)) and weighted_total < 4.0:
+        return {"check": "score_floor", "reason": f"Weighted score {weighted_total:.1f} is below minimum 4.0"}
+
+    # 4. Theme floor
+    theme_alignment = scores.get("theme_alignment", 0)
+    if isinstance(theme_alignment, (int, float)) and theme_alignment <= 2:
+        return {"check": "theme_floor", "reason": f"Theme alignment score {theme_alignment} is too low (≤2)"}
+
+    return None
 
 
 @app.post("/resume/start-draft")
@@ -2259,16 +2357,56 @@ async def start_draft(
     from backend.db.mongo import grants_pipeline, grants_scored
     from bson import ObjectId
 
+    grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)})
+    if not grant:
+        raise HTTPException(status_code=404, detail="Grant not found")
+
+    # ── Layer 1: Deterministic pre-draft validation ──────────────────────────
+    if not body.override_guardrails:
+        validation_error = await _predraft_validate(grant)
+        if validation_error:
+            # Update grant status
+            try:
+                await grants_scored().update_one(
+                    {"_id": ObjectId(body.grant_id)},
+                    {"$set": {"status": "guardrail_rejected"}},
+                )
+            except Exception:
+                pass
+
+            # Fire notification
+            try:
+                from backend.notifications.hub import notify
+                grant_title = grant.get("title") or grant.get("grant_name") or body.grant_id
+                await notify(
+                    event_type="guardrail_rejected",
+                    title=f"Pre-draft blocked: {grant_title[:60]}",
+                    body=validation_error["reason"][:200],
+                    priority="high",
+                    metadata={"grant_id": body.grant_id, "check": validation_error["check"]},
+                )
+            except Exception:
+                pass
+
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "predraft_validation_failed",
+                    "check": validation_error["check"],
+                    "reason": validation_error["reason"],
+                    "grant_id": body.grant_id,
+                },
+            )
+    else:
+        logger.info("start_draft: guardrails overridden for grant %s — reason: %s",
+                     body.grant_id, body.override_reason or "none given")
+
     thread_id = body.thread_id or f"draft_{body.grant_id[:8]}_{uuid.uuid4().hex[:6]}"
     run_id = str(uuid.uuid4())
 
     # Create pipeline record
     pipeline_id = None
     try:
-        grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)})
-        if not grant:
-            raise HTTPException(status_code=404, detail="Grant not found")
-
         result = await grants_pipeline().insert_one({
             "grant_id": body.grant_id,
             "thread_id": thread_id,
@@ -2277,6 +2415,8 @@ async def start_draft(
             "draft_started_at": datetime.now(timezone.utc).isoformat(),
             "current_draft_version": 0,
             "final_draft_url": None,
+            "override_guardrails": body.override_guardrails,
+            "override_reason": body.override_reason,
         })
         pipeline_id = str(result.inserted_id)
     except Exception as e:
@@ -2297,9 +2437,12 @@ async def start_draft(
             "triage_notes": None,
             "grant_requirements": None,
             "grant_raw_doc": None,
+            "company_profile": None,
             "company_context": None,
             "style_examples": None,
             "style_examples_loaded": False,
+            "draft_guardrail_result": None,
+            "override_guardrails": body.override_guardrails,
             "current_section_index": 0,
             "approved_sections": {},
             "section_critiques": {},
@@ -2321,16 +2464,20 @@ async def start_draft(
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "decision": "pursue",
                 "grant_id": body.grant_id,
+                "override_guardrails": body.override_guardrails,
+                "override_reason": body.override_reason,
             }],
         }
 
         # Write state as if human_triage just completed → graph resumes at company_brain
         await graph.aupdate_state(config, triage_state, as_node="human_triage")
 
-        # First resume: runs company_brain → grant_reader → pauses at interrupt_before drafter
+        # First resume: runs company_brain → grant_reader → draft_guardrail → pauses at interrupt_before drafter
+        # (If guardrail fails, routes to pipeline_update → END instead)
         await graph.ainvoke(None, config=config)
 
         # Second resume: runs drafter (writes first section) → pauses at next interrupt_before drafter
+        # Only reaches here if guardrail passed
         await graph.ainvoke(None, config=config)
 
     background_tasks.add_task(_run_draft)

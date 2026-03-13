@@ -60,6 +60,9 @@ def funder_context_cache():
 def drafter_chat_history():
     return get_db()["drafter_chat_history"]
 
+def notion_page_cache():
+    return get_db()["notion_page_cache"]
+
 
 async def ensure_indexes():
     """Create all MongoDB indexes. Call once at startup. Skips indexes that already exist."""
@@ -127,8 +130,12 @@ async def ensure_indexes():
     await _idx("deep_research_cache", "url_hash", unique=True)
     await _idx("deep_research_cache", "cached_at", expireAfterSeconds=7 * 24 * 3600)
 
-    # drafter chat history
-    await _idx("drafter_chat_history", "pipeline_id", unique=True)
+    # drafter chat history (per-user: compound key)
+    await _idx("drafter_chat_history", [("pipeline_id", 1), ("user_email", 1)], unique=True)
+
+    # notion_page_cache (24-hour TTL for content fetcher)
+    await _idx("notion_page_cache", "source_id", unique=True)
+    await _idx("notion_page_cache", "cached_at", expireAfterSeconds=24 * 60 * 60)
 
     # notifications (30-day TTL auto-delete)
     await _idx("notifications", [("user_email", 1), ("read", 1), ("created_at", -1)])

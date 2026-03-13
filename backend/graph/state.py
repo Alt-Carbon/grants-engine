@@ -20,9 +20,18 @@ class GrantState(TypedDict):
     grant_raw_doc: Optional[str]            # Raw fetched content
 
     # ── Company Brain ─────────────────────────────────────────────────────────
+    company_profile: Optional[str]          # General company profile (loaded before analyst)
     company_context: Optional[str]          # Retrieved knowledge for this grant
     style_examples: Optional[str]           # Past grant application chunks
     style_examples_loaded: bool
+
+    # ── Draft Guardrail ───────────────────────────────────────────────────────
+    draft_guardrail_result: Optional[Dict]     # {passed, checks, reason, ...}
+    override_guardrails: bool
+
+    # ── Drafter: Theme + Outline ────────────────────────────────────────────────
+    grant_theme: Optional[str]             # Resolved theme key (e.g. "climatetech")
+    draft_outline: Optional[str]           # Narrative outline for cross-section coherence
 
     # ── Drafter: Section Loop ─────────────────────────────────────────────────
     current_section_index: int

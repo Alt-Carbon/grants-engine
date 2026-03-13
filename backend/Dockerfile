@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Pre-install the Notion MCP server globally so npx doesn't download each time
+# Pre-install MCP servers globally so npx doesn't re-download each time
+# Add new servers here as they are enabled in backend/config/mcp_servers.yaml
 RUN npm install -g @notionhq/notion-mcp-server
 
 # Build context is the project root so backend.* imports resolve correctly

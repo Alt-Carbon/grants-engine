@@ -1,0 +1,392 @@
+# ── Skills Registry ───────────────────────────────────────────────────────────
+#
+# Each skill is a high-level capability that agents use. Skills abstract away
+# the underlying provider (MCP server, REST API, local function) and define
+# a fallback chain so the pipeline degrades gracefully.
+#
+# Fields:
+#   description:  What this skill does (shown in /status/skills)
+#   category:     Grouping — discovery | research | knowledge | writing | communication | sync
+#   agents:       Which pipeline agents can invoke this skill
+#   providers:    Ordered list — try first provider, fall back to next on failure
+#     - type:     "mcp" | "api" | "internal" | "static"
+#     - server:   MCP server name (from mcp_servers.yaml) — only for type=mcp
+#     - tool:     MCP tool name — only for type=mcp
+#     - function: Python dotted path — for type=api or type=internal
+#     - fallback_message: Log message when this provider fails
+#   required_env: Env vars needed (at least one provider must be usable)
+#   enabled:      true | false
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DISCOVERY — Scout agent finds grants
+# ═══════════════════════════════════════════════════════════════════════════════
+
+skills:
+
+  # ── Web search for grant opportunities ───────────────────────────────────
+  web_search:
+    description: "Search the web for grant opportunities using multiple search engines"
+    category: discovery
+    agents: [scout]
+    providers:
+      - type: api
+        name: tavily
+        function: "backend.agents.scout:_tavily_search"
+        fallback_message: "Tavily search unavailable"
+      - type: api
+        name: exa
+        function: "backend.agents.scout:_exa_search"
+        fallback_message: "Exa search unavailable"
+      - type: api
+        name: perplexity
+        function: "backend.agents.scout:_perplexity_direct"
+        fallback_message: "Perplexity search unavailable"
+    required_env: []  # At least one search key should be set
+    enabled: true
+
+  # ── Fetch and extract content from a URL ─────────────────────────────────
+  fetch_page:
+    description: "Fetch a web page and extract readable content (markdown)"
+    category: discovery
+    agents: [scout, analyst, grant_reader]
+    providers:
+      - type: mcp
+        name: fetch_mcp
+        server: fetch
+        tool: "fetch"
+        fallback_message: "Fetch MCP not connected"
+      - type: api
+        name: jina
+        function: "backend.agents.scout:_fetch_content"
+        fallback_message: "Jina Reader unavailable"
+      - type: api
+        name: plain_http
+        function: "backend.agents.scout:_fetch_plain"
+        fallback_message: "Plain HTTP fetch failed"
+    required_env: []
+    enabled: true
+
+  # ── Extract structured fields from raw grant text ────────────────────────
+  extract_fields:
+    description: "Extract structured grant fields (title, funder, deadline, etc.) from raw text"
+    category: discovery
+    agents: [scout]
+    providers:
+      - type: internal
+        name: llm_extract
+        function: "backend.agents.scout:_extract_grant_fields"
+    required_env: []
+    enabled: true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # RESEARCH — Analyst agent scores and enriches grants
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── Research funder background ───────────────────────────────────────────
+  enrich_funder:
+    description: "Research funder organization history, priorities, and past grantees"
+    category: research
+    agents: [analyst]
+    providers:
+      - type: api
+        name: perplexity_direct
+        function: "backend.agents.analyst:_get_funder_context"
+        fallback_message: "Perplexity funder research unavailable"
+      - type: api
+        name: perplexity_gateway
+        function: "backend.agents.analyst:_get_funder_context"
+        fallback_message: "Gateway funder research unavailable"
+    required_env: []
+    enabled: true
+
+  # ── Score a grant against company profile ────────────────────────────────
+  score_grant:
+    description: "Score a grant across 6 dimensions using LLM with company context"
+    category: research
+    agents: [analyst]
+    providers:
+      - type: internal
+        name: llm_scoring
+        function: "backend.agents.analyst:_score_grant"
+    required_env: []
+    enabled: true
+
+  # ── Deep research on promising grants ────────────────────────────────────
+  deep_research:
+    description: "Second-pass deep analysis: strategic angle, application tips, past winners"
+    category: research
+    agents: [analyst]
+    providers:
+      - type: internal
+        name: llm_deep_research
+        function: "backend.agents.analyst:_deep_research_grant"
+    required_env: []
+    enabled: true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # KNOWLEDGE — Company Brain loads and queries company knowledge
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── Search Notion workspace for pages ────────────────────────────────────
+  search_workspace:
+    description: "Search the Notion workspace for relevant company knowledge pages"
+    category: knowledge
+    agents: [company_brain, company_brain_load, knowledge_sync]
+    providers:
+      - type: mcp
+        name: notion_mcp
+        server: notion
+        tool: "API-post-search"
+        fallback_message: "Notion MCP search unavailable"
+      - type: api
+        name: notion_rest
+        function: "backend.integrations.notion_sync:_search_pages"
+        fallback_message: "Notion REST API search unavailable"
+    required_env: [NOTION_TOKEN]
+    enabled: true
+
+  # ── Fetch a document (Notion page or Google Drive doc) ───────────────────
+  fetch_document:
+    description: "Fetch full content of a Notion page or Google Drive document"
+    category: knowledge
+    agents: [company_brain, company_brain_load, knowledge_sync]
+    providers:
+      - type: mcp
+        name: notion_mcp
+        server: notion
+        tool: "API-retrieve-a-page"
+        fallback_message: "Notion MCP page fetch unavailable"
+      - type: mcp
+        name: gdrive_mcp
+        server: google_drive
+        tool: "read_file"
+        fallback_message: "Google Drive MCP unavailable"
+      - type: api
+        name: notion_rest
+        function: "backend.integrations.notion_mcp:NotionMCPClient.fetch_page"
+        fallback_message: "Notion REST page fetch unavailable"
+      - type: api
+        name: gdrive_api
+        function: "backend.agents.company_brain:CompanyBrainAgent._fetch_google_doc_by_id"
+        fallback_message: "Google Drive API unavailable"
+    required_env: []
+    enabled: true
+
+  # ── Vector search in Pinecone ────────────────────────────────────────────
+  vector_search:
+    description: "Query Pinecone for semantically relevant company knowledge chunks"
+    category: knowledge
+    agents: [company_brain, company_brain_load, analyst]
+    providers:
+      - type: api
+        name: pinecone
+        function: "backend.agents.company_brain:CompanyBrainAgent.query"
+    required_env: [PINECONE_API_KEY]
+    enabled: true
+
+  # ── Upsert chunks to Pinecone ───────────────────────────────────────────
+  vector_upsert:
+    description: "Store tagged document chunks in Pinecone with server-side embedding"
+    category: knowledge
+    agents: [company_brain, knowledge_sync]
+    providers:
+      - type: api
+        name: pinecone
+        function: "backend.agents.company_brain:CompanyBrainAgent.upsert_chunks"
+    required_env: [PINECONE_API_KEY]
+    enabled: true
+
+  # ── Load company profile (general overview) ──────────────────────────────
+  load_company_profile:
+    description: "Load general company profile from vector store or static fallback"
+    category: knowledge
+    agents: [company_brain_load, analyst]
+    providers:
+      - type: api
+        name: vector_overview
+        function: "backend.agents.company_brain:CompanyBrainAgent.get_company_overview"
+        fallback_message: "Vector company overview unavailable"
+      - type: static
+        name: static_profile
+        function: "backend.agents.company_brain:_load_static_profile"
+        fallback_message: "Static profile not found"
+    required_env: []
+    enabled: true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # WRITING — Drafter and Reviewer produce grant applications
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── Fetch official grant document ────────────────────────────────────────
+  fetch_grant_doc:
+    description: "Fetch the official grant document/RFP from the grant URL"
+    category: writing
+    agents: [grant_reader]
+    providers:
+      - type: mcp
+        name: fetch_mcp
+        server: fetch
+        tool: "fetch"
+        fallback_message: "Fetch MCP not connected"
+      - type: api
+        name: jina
+        function: "backend.agents.drafter.grant_reader:_fetch_with_jina"
+        fallback_message: "Jina grant doc fetch failed"
+      - type: api
+        name: firecrawl
+        function: "backend.agents.drafter.grant_reader:_fetch_with_firecrawl"
+        fallback_message: "Firecrawl grant doc fetch failed"
+    required_env: []
+    enabled: true
+
+  # ── Parse grant document into sections ───────────────────────────────────
+  parse_grant_doc:
+    description: "Parse raw grant document into structured sections, criteria, and budget"
+    category: writing
+    agents: [grant_reader]
+    providers:
+      - type: internal
+        name: llm_parse
+        function: "backend.agents.drafter.grant_reader:parse_grant_document"
+    required_env: []
+    enabled: true
+
+  # ── Write a single grant section ─────────────────────────────────────────
+  write_section:
+    description: "Draft a single grant application section with company context and style"
+    category: writing
+    agents: [drafter]
+    providers:
+      - type: internal
+        name: llm_write
+        function: "backend.agents.drafter.section_writer:write_section"
+    required_env: []
+    enabled: true
+
+  # ── Review complete draft ────────────────────────────────────────────────
+  review_draft:
+    description: "Review a complete grant application draft and score quality"
+    category: writing
+    agents: [reviewer]
+    providers:
+      - type: internal
+        name: llm_review
+        function: "backend.agents.reviewer:reviewer_node"
+    required_env: []
+    enabled: true
+
+  # ── Export draft to file ─────────────────────────────────────────────────
+  export_draft:
+    description: "Export final draft as markdown file and store in MongoDB"
+    category: writing
+    agents: [export]
+    providers:
+      - type: mcp
+        name: filesystem_mcp
+        server: filesystem
+        tool: "write_file"
+        fallback_message: "Filesystem MCP not connected"
+      - type: internal
+        name: local_write
+        function: "backend.agents.drafter.exporter:exporter_node"
+    required_env: []
+    enabled: true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # COMMUNICATION — Notifications and alerts
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── Send notification (MongoDB + Pusher) ─────────────────────────────────
+  send_notification:
+    description: "Push notification to frontend via MongoDB + Pusher real-time"
+    category: communication
+    agents: [scout, analyst, pre_triage_guardrail, drafter, reviewer, export]
+    providers:
+      - type: internal
+        name: pusher
+        function: "backend.notifications.hub:notify"
+    required_env: []
+    enabled: true
+
+  # ── Send Slack message ───────────────────────────────────────────────────
+  send_slack_message:
+    description: "Post a message to a Slack channel (triage alerts, draft ready, etc.)"
+    category: communication
+    agents: [analyst, pre_triage_guardrail, drafter, reviewer, export]
+    providers:
+      - type: mcp
+        name: slack_mcp
+        server: slack
+        tool: "send_message"
+        fallback_message: "Slack MCP not connected"
+    required_env: [SLACK_BOT_TOKEN]
+    enabled: false
+
+  # ── Alert team about triage queue ────────────────────────────────────────
+  alert_triage:
+    description: "Notify team that grants are ready for human triage review"
+    category: communication
+    agents: [analyst, pre_triage_guardrail, notify_triage]
+    providers:
+      - type: internal
+        name: notify_hub
+        function: "backend.notifications.hub:notify_triage_needed"
+      - type: mcp
+        name: slack_mcp
+        server: slack
+        tool: "send_message"
+        fallback_message: "Slack triage alert unavailable"
+    required_env: []
+    enabled: true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # SYNC — Notion bi-directional sync
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── Sync scored grant to Notion Grant Pipeline ──────────────────────────
+  sync_grant:
+    description: "Upsert a scored grant to Notion Grant Pipeline database"
+    category: sync
+    agents: [analyst]
+    providers:
+      - type: api
+        name: notion_sdk
+        function: "backend.integrations.notion_sync:sync_scored_grant"
+    required_env: [NOTION_TOKEN]
+    enabled: true
+
+  # ── Log agent run to Notion ──────────────────────────────────────────────
+  log_agent_run:
+    description: "Write agent execution record to Notion Agent Runs database"
+    category: sync
+    agents: [scout, analyst, company_brain, company_brain_load, drafter, reviewer, pre_triage_guardrail]
+    providers:
+      - type: api
+        name: notion_sdk
+        function: "backend.integrations.notion_sync:log_agent_run"
+    required_env: [NOTION_TOKEN]
+    enabled: true
+
+  # ── Log error to Notion ──────────────────────────────────────────────────
+  log_error:
+    description: "Write error record to Notion Error Logs database"
+    category: sync
+    agents: [scout, analyst, company_brain, drafter, reviewer]
+    providers:
+      - type: api
+        name: notion_sdk
+        function: "backend.integrations.notion_sync:log_error"
+    required_env: [NOTION_TOKEN]
+    enabled: true
+
+  # ── Sync draft section to Notion ─────────────────────────────────────────
+  sync_draft:
+    description: "Sync draft section progress to Notion Draft Sections database"
+    category: sync
+    agents: [drafter]
+    providers:
+      - type: api
+        name: notion_sdk
+        function: "backend.integrations.notion_sync:sync_draft_section"
+    required_env: [NOTION_TOKEN]
+    enabled: true

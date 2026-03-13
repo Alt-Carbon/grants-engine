@@ -372,12 +372,14 @@ function serializeHistories(
   return out;
 }
 
-/** Save chat histories to backend */
+/** Save chat histories to backend (scoped to user) */
 async function saveChatHistories(
   pipelineId: string,
   grantId: string,
   tiles: Tile[],
-  chatHistories: Record<string, ChatMessage[]>
+  chatHistories: Record<string, ChatMessage[]>,
+  userEmail?: string,
+  sessionId?: string
 ): Promise<boolean> {
   try {
     const sections = serializeHistories(tiles, pipelineId, chatHistories);
@@ -388,6 +390,8 @@ async function saveChatHistories(
         pipeline_id: pipelineId,
         grant_id: grantId,
         sections,
+        user_email: userEmail || undefined,
+        session_id: sessionId || undefined,
       }),
     });
     return true;
@@ -396,14 +400,15 @@ async function saveChatHistories(
   }
 }
 
-/** Load chat histories from backend */
+/** Load chat histories from backend (scoped to user) */
 async function loadChatHistories(
-  pipelineId: string
+  pipelineId: string,
+  userEmail?: string
 ): Promise<Record<string, ChatMessage[]> | null> {
   try {
-    const res = await fetch(
-      `/api/drafter/chat-history?pipeline_id=${encodeURIComponent(pipelineId)}`
-    );
+    let url = `/api/drafter/chat-history?pipeline_id=${encodeURIComponent(pipelineId)}`;
+    if (userEmail) url += `&user_email=${encodeURIComponent(userEmail)}`;
+    const res = await fetch(url);
     if (!res.ok) return null;
     const data = await res.json();
     return data.sections ?? null;
@@ -415,13 +420,13 @@ async function loadChatHistories(
 /** Clear a single section's chat history */
 async function clearSectionHistory(
   pipelineId: string,
-  sectionName: string
+  sectionName: string,
+  userEmail?: string
 ): Promise<boolean> {
   try {
-    const res = await fetch(
-      `/api/drafter/chat-history?pipeline_id=${encodeURIComponent(pipelineId)}&section_name=${encodeURIComponent(sectionName)}`,
-      { method: "DELETE" }
-    );
+    let url = `/api/drafter/chat-history?pipeline_id=${encodeURIComponent(pipelineId)}&section_name=${encodeURIComponent(sectionName)}`;
+    if (userEmail) url += `&user_email=${encodeURIComponent(userEmail)}`;
+    const res = await fetch(url, { method: "DELETE" });
     return res.ok;
   } catch {
     return false;
@@ -469,6 +474,7 @@ interface DrafterCache {
   approvedSections: string[]; // serializable version of Set
   agentInfo: Record<string, { name: string; theme: string }>;
   historyLoaded: string[];
+  sessionId: string; // UUID per drafter session
 }
 
 const _cache: { current: DrafterCache | null } = { current: null };
@@ -487,7 +493,11 @@ function loadFromCache(): DrafterCache | null {
 
 export function DrafterView({ pipelines }: DrafterViewProps) {
   const { data: session } = useSession();
+  const userEmail = session?.user?.email ?? undefined;
   const cached = loadFromCache();
+  const [sessionId] = useState(
+    () => cached?.sessionId ?? crypto.randomUUID()
+  );
   const [selectedId, setSelectedId] = useState(
     cached?.selectedId ?? pipelines[0]?._id ?? ""
   );
@@ -642,7 +652,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
 
     let cancelled = false;
     (async () => {
-      const savedSections = await loadChatHistories(selectedId);
+      const savedSections = await loadChatHistories(selectedId, userEmail);
       if (cancelled || !savedSections) {
         setHistoryLoaded((prev) => new Set(prev).add(selectedId));
         return;
@@ -682,8 +692,9 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       approvedSections: Array.from(approvedSections),
       agentInfo,
       historyLoaded: Array.from(historyLoaded),
+      sessionId,
     });
-  }, [selectedId, activeTileId, tilesMap, chatHistories, approvedSections, agentInfo, historyLoaded]);
+  }, [selectedId, activeTileId, tilesMap, chatHistories, approvedSections, agentInfo, historyLoaded, sessionId]);
 
   // -- Flush pending save on unmount ------------------------------------------
   useEffect(() => {
@@ -696,12 +707,14 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           selectedId,
           pipeline.grant_id,
           tilesRef.current,
-          chatHistoriesRef.current
+          chatHistoriesRef.current,
+          userEmail,
+          sessionId
         );
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId]);
+  }, [selectedId, userEmail, sessionId]);
 
   // -- Debounced auto-save (uses refs for latest state) ----------------------
   const triggerSave = useCallback(() => {
@@ -714,12 +727,14 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         selectedId,
         selectedPipeline.grant_id,
         tilesRef.current,
-        chatHistoriesRef.current
+        chatHistoriesRef.current,
+        userEmail,
+        sessionId
       );
       setSaveStatus(ok ? "saved" : "error");
       setTimeout(() => setSaveStatus("idle"), 2000);
     }, 800);
-  }, [selectedId, selectedPipeline]);
+  }, [selectedId, selectedPipeline, userEmail, sessionId]);
 
   // -- Non-streaming fallback -------------------------------------------------
   const chatFallback = useCallback(
@@ -739,6 +754,8 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           grant_id: pipeline.grant_id,
           chat_history: chatHistory,
           model: drafterModel,
+          user_email: userEmail,
+          session_id: sessionId,
         }),
       });
 
@@ -777,7 +794,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       }));
       setTimeout(() => triggerSave(), 50);
     },
-    [selectedId, triggerSave]
+    [selectedId, triggerSave, userEmail, sessionId]
   );
 
   // -- Streaming SSE helper (per-key, falls back to non-streaming) ----------
@@ -812,6 +829,8 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
               grant_id: pipeline.grant_id,
               chat_history: chatHistory,
               model: drafterModel,
+              user_email: userEmail,
+              session_id: sessionId,
             }),
             signal: controller.signal,
           });
@@ -927,7 +946,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         textareaRef.current?.focus();
       }
     },
-    [selectedId, triggerSave, chatFallback]
+    [selectedId, triggerSave, chatFallback, userEmail, sessionId]
   );
 
   // -- Auto-scroll -----------------------------------------------------------
@@ -1087,7 +1106,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     if (!activeKey || !activeTile || !selectedPipeline) return;
     setClearingSection(true);
     try {
-      await clearSectionHistory(selectedId, activeTile.label);
+      await clearSectionHistory(selectedId, activeTile.label, userEmail);
       const pipelineTheme = getThemeForPipeline(selectedPipeline as { grant_themes?: string[] });
       setChatHistories((prev) => ({
         ...prev,

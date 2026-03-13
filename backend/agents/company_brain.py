@@ -676,7 +676,12 @@ class CompanyBrainAgent:
     # ── Full sync ──────────────────────────────────────────────────────────────
 
     async def sync(self) -> Dict:
-        """Sync Documents List + Notion + Drive → chunk → tag → upsert (Pinecone embeds server-side)."""
+        """Sync Table of Content + supplementary Notion/Drive → chunk → tag → upsert.
+
+        Primary path: Table of Content (unified fetcher handles all content types).
+        Supplementary: MCP-discovered Notion pages + Drive files (deduplicated).
+        Pinecone embeds server-side via multilingual-e5-large.
+        """
         from backend.db.pinecone_store import is_pinecone_configured, upsert_chunks as pc_upsert
 
         start = datetime.now(timezone.utc)
@@ -685,23 +690,35 @@ class CompanyBrainAgent:
         if use_pinecone:
             logger.info("Pinecone configured — dual-writing vectors")
 
-        # Phase 1: High-priority Documents List content
-        docs_list_pages = await self._fetch_from_table_of_content()
+        # Phase 1: Table of Content — primary source (all content types)
+        google_creds = {
+            "google_refresh_token": self.google_refresh_token,
+            "google_client_id": self.google_client_id,
+            "google_client_secret": self.google_client_secret,
+        }
+        try:
+            from backend.agents.content_fetcher import fetch_all_from_toc
+            docs_list_pages = await fetch_all_from_toc(
+                use_cache=True, google_creds=google_creds,
+            )
+        except Exception as e:
+            logger.warning("Unified ToC fetch failed, falling back to legacy: %s", e)
+            docs_list_pages = await self._fetch_from_table_of_content()
 
-        # Phase 2: Core Notion pages + generic Drive files
+        # Phase 2: Supplementary Notion pages + generic Drive files
         notion_pages, drive_files = await asyncio.gather(
             self._fetch_notion_pages(),
             self._fetch_drive_files(),
         )
 
-        # Deduplicate: Documents List pages may overlap with MCP-discovered pages
+        # Deduplicate: ToC pages take priority over supplementary sources
         seen_ids = {d["id"] for d in docs_list_pages}
         notion_pages = [p for p in notion_pages if p["id"] not in seen_ids]
         drive_files = [d for d in drive_files if d["id"] not in seen_ids]
 
         all_docs = docs_list_pages + notion_pages + drive_files
         logger.info(
-            "Company Brain: %d docs (%d docs-list, %d notion, %d drive)",
+            "Company Brain: %d docs (%d toc, %d notion-supplementary, %d drive-supplementary)",
             len(all_docs), len(docs_list_pages), len(notion_pages), len(drive_files),
         )
 
@@ -1172,12 +1189,29 @@ class CompanyBrainAgent:
         results.sort(key=lambda c: priority_rank.get(c.get("priority", "low"), 2))
         return results[:top_k]
 
-    async def get_style_examples(self) -> List[Dict]:
-        """Get past grant application chunks as style examples."""
+    async def get_style_examples(
+        self,
+        themes: Optional[List[str]] = None,
+        section_name: str = "",
+    ) -> List[Dict]:
+        """Get past grant application chunks as style examples.
+
+        Theme-aware: prefers past grants matching the grant's theme.
+        Section-aware: tailors query to find examples of similar sections.
+        """
+        # Build a targeted query
+        query_parts = ["grant application proposal"]
+        if section_name:
+            query_parts.append(section_name)
+        if themes:
+            query_parts.extend(themes[:2])
+        query_parts.append("writing methodology approach")
+
         return await self.query(
-            "grant application proposal writing style",
+            " ".join(query_parts),
+            themes=themes,
             doc_types=["past_grant_application"],
-            top_k=4,
+            top_k=6,
         )
 
     async def get_company_overview(
@@ -1225,6 +1259,165 @@ class CompanyBrainAgent:
             return profile[:max_chars]
         return ""
 
+    # ── Past grants ingestion ────────────────────────────────────────────────
+
+    async def sync_past_grants(self) -> Dict:
+        """Ingest past grant PDFs from /past_grants/ into MongoDB + Pinecone.
+
+        Uses pdftotext for extraction, then follows the standard chunk → tag → upsert
+        pipeline. Tags with doc_type='past_grant_application' so they're retrievable
+        as style examples by the drafter.
+        """
+        import subprocess
+        from pathlib import Path
+        from backend.db.pinecone_store import is_pinecone_configured, upsert_chunks as pc_upsert
+        from backend.knowledge.past_grants_config import PAST_GRANTS
+
+        col = knowledge_chunks()
+        use_pinecone = is_pinecone_configured()
+        grants_dir = Path(__file__).resolve().parent.parent.parent / "past_grants"
+
+        if not grants_dir.exists():
+            return {"error": "past_grants/ directory not found", "chunks": 0}
+
+        chunks_saved = 0
+        chunks_skipped = 0
+        pinecone_vectors: List[Dict] = []
+        grant_results: List[Dict] = []
+        sem = asyncio.Semaphore(5)
+
+        for grant_meta in PAST_GRANTS:
+            pdf_path = grants_dir / grant_meta["filename"]
+            if not pdf_path.exists():
+                logger.warning("Past grant PDF not found: %s", pdf_path)
+                grant_results.append({"title": grant_meta["title"], "status": "file_not_found"})
+                continue
+
+            # Extract text via pdftotext
+            try:
+                result = subprocess.run(
+                    ["pdftotext", str(pdf_path), "-"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                text = result.stdout.strip()
+            except Exception as e:
+                logger.warning("pdftotext failed for %s: %s", grant_meta["filename"], e)
+                grant_results.append({"title": grant_meta["title"], "status": f"extract_failed: {e}"})
+                continue
+
+            if len(text.split()) < MIN_CHUNK_WORDS:
+                grant_results.append({"title": grant_meta["title"], "status": "too_short", "words": len(text.split())})
+                continue
+
+            # Source ID: stable identifier based on filename
+            source_id = f"past_grant:{grant_meta['filename']}"
+            content_hash = hashlib.sha256(text.encode()).hexdigest()
+
+            # Check if already synced with same content
+            existing = await col.find_one(
+                {"source_id": source_id, "chunk_index": 0},
+                {"content_hash": 1},
+            )
+            if existing and existing.get("content_hash") == content_hash:
+                old_count = await col.count_documents({"source_id": source_id})
+                chunks_skipped += old_count
+                grant_results.append({
+                    "title": grant_meta["title"],
+                    "status": "unchanged",
+                    "chunks": old_count,
+                })
+                continue
+
+            # Chunk the text
+            chunks = _chunk_text(text)
+            logger.info(
+                "Past grant: %s — %d words → %d chunks",
+                grant_meta["title"][:50], len(text.split()), len(chunks),
+            )
+
+            for i, chunk in enumerate(chunks):
+                async with sem:
+                    tag = await self._tag_chunk(chunk)
+
+                    # Override doc_type to past_grant_application
+                    doc_record = {
+                        "source": "past_grant",
+                        "source_id": source_id,
+                        "source_title": grant_meta["title"],
+                        "chunk_index": i,
+                        "content": chunk,
+                        "content_hash": content_hash,
+                        "doc_type": "past_grant_application",
+                        "themes": grant_meta.get("themes", tag.get("themes", [])),
+                        "key_topics": tag.get("key_topics", []),
+                        "contains_data": tag.get("contains_data", False),
+                        "is_useful_for_grants": True,
+                        "confidence": "high",
+                        "priority": "high",
+                        "last_synced": datetime.now(timezone.utc).isoformat(),
+                        # Past grant metadata
+                        "grant_funder": grant_meta.get("funder", ""),
+                        "grant_scheme": grant_meta.get("scheme", ""),
+                        "grant_year": grant_meta.get("year"),
+                        "grant_pi": grant_meta.get("pi", ""),
+                        "grant_institution": grant_meta.get("institution", ""),
+                    }
+
+                    await col.update_one(
+                        {"source_id": source_id, "chunk_index": i},
+                        {"$set": doc_record},
+                        upsert=True,
+                    )
+                    chunks_saved += 1
+
+                    if use_pinecone:
+                        pinecone_vectors.append({
+                            "_id": f"{source_id}#{i}",
+                            "content": chunk,
+                            "source": "past_grant",
+                            "source_id": source_id,
+                            "source_title": grant_meta["title"],
+                            "doc_type": "past_grant_application",
+                            "themes": grant_meta.get("themes", []),
+                            "key_topics": tag.get("key_topics", []),
+                            "contains_data": tag.get("contains_data", False),
+                            "is_useful_for_grants": True,
+                            "priority": "high",
+                        })
+
+            # Clean stale chunks if doc shrank
+            await col.delete_many({
+                "source_id": source_id,
+                "chunk_index": {"$gte": len(chunks)},
+            })
+
+            grant_results.append({
+                "title": grant_meta["title"],
+                "status": "synced",
+                "words": len(text.split()),
+                "chunks": len(chunks),
+            })
+
+        # Batch upsert to Pinecone
+        pinecone_count = 0
+        if use_pinecone and pinecone_vectors:
+            try:
+                pinecone_count = pc_upsert(pinecone_vectors)
+                logger.info("Pinecone: upserted %d past grant vectors", pinecone_count)
+            except Exception as e:
+                logger.error("Pinecone upsert for past grants failed: %s", e)
+
+        logger.info(
+            "Past grants sync: %d chunks saved, %d skipped, %d pinecone vectors",
+            chunks_saved, chunks_skipped, pinecone_count,
+        )
+        return {
+            "chunks_saved": chunks_saved,
+            "chunks_skipped": chunks_skipped,
+            "pinecone_vectors": pinecone_count,
+            "grants": grant_results,
+        }
+
     async def health(self) -> Dict:
         col = knowledge_chunks()
         total = await col.count_documents({})
@@ -1267,10 +1460,10 @@ async def company_brain_node(state: GrantState) -> Dict:
     themes = grant.get("themes_detected", [])
     query_text = f"{grant.get('title', '')} {grant.get('reasoning', '')} {' '.join(themes)}"
 
-    # Load style examples once
+    # Load style examples once (theme-aware)
     style_examples = []
     if not state.get("style_examples_loaded"):
-        style_examples = await agent.get_style_examples()
+        style_examples = await agent.get_style_examples(themes=themes)
 
     context_chunks = await agent.query(query_text, themes=themes, top_k=8)
 
@@ -1300,5 +1493,58 @@ async def company_brain_node(state: GrantState) -> Dict:
         "company_context": company_context,
         "style_examples": style_text or state.get("style_examples", ""),
         "style_examples_loaded": True,
+        "audit_log": state.get("audit_log", []) + [audit_entry],
+    }
+
+
+async def company_brain_load_node(state: GrantState) -> Dict:
+    """LangGraph node: load general company profile BEFORE analyst scoring.
+
+    Writes state.company_profile (general overview, ~3 000 chars).
+    Does NOT touch state.company_context (that's grant-specific, loaded post-triage).
+    """
+    from backend.config.settings import get_settings
+    s = get_settings()
+
+    profile = ""
+    try:
+        agent = CompanyBrainAgent(
+            notion_token=s.notion_token,
+            google_refresh_token=s.google_refresh_token,
+            google_client_id=s.google_client_id,
+            google_client_secret=s.google_client_secret,
+        )
+        profile = await agent.get_company_overview(max_chars=3000)
+    except Exception as e:
+        logger.debug("company_brain_load: vector overview failed: %s", e)
+
+    if not profile:
+        profile = _load_static_profile()[:3000]
+        if profile:
+            logger.info("company_brain_load: using static profile (%d chars)", len(profile))
+
+    audit_entry = {
+        "node": "company_brain_load",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "profile_chars": len(profile),
+        "source": "vector" if profile and "STATIC PROFILE" not in profile else "static",
+    }
+
+    try:
+        from backend.integrations.notion_sync import log_agent_run
+        await log_agent_run(
+            agent="company_brain_load",
+            status="Success" if profile else "Warning",
+            trigger="Pipeline",
+            started_at=datetime.now(timezone.utc),
+            duration_seconds=0,
+            errors=0,
+            summary=f"Loaded {len(profile)} chars company profile for analyst",
+        )
+    except Exception:
+        logger.debug("Notion sync skipped (company_brain_load)", exc_info=True)
+
+    return {
+        "company_profile": profile,
         "audit_log": state.get("audit_log", []) + [audit_entry],
     }

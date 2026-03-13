@@ -9,15 +9,16 @@ import { NextRequest, NextResponse } from "next/server";
 export async function GET(req: NextRequest) {
   try {
     const pipelineId = req.nextUrl.searchParams.get("pipeline_id");
+    const userEmail = req.nextUrl.searchParams.get("user_email");
     if (!pipelineId) {
       return NextResponse.json(
         { error: "pipeline_id is required" },
         { status: 400 }
       );
     }
-    const data = await apiGet(
-      `/drafter/chat-history/${encodeURIComponent(pipelineId)}`
-    );
+    let path = `/drafter/chat-history/${encodeURIComponent(pipelineId)}`;
+    if (userEmail) path += `?user_email=${encodeURIComponent(userEmail)}`;
+    const data = await apiGet(path);
     return NextResponse.json(data);
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -65,6 +66,7 @@ export async function DELETE(req: NextRequest) {
   try {
     const pipelineId = req.nextUrl.searchParams.get("pipeline_id");
     const sectionName = req.nextUrl.searchParams.get("section_name");
+    const userEmail = req.nextUrl.searchParams.get("user_email");
     if (!pipelineId || !sectionName) {
       return NextResponse.json(
         { error: "pipeline_id and section_name are required" },
@@ -72,7 +74,8 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
-    const url = `${(process.env.FASTAPI_URL ?? "").replace(/\/+$/, "")}/drafter/chat-history/${encodeURIComponent(pipelineId)}/${encodeURIComponent(sectionName)}`;
+    let url = `${(process.env.FASTAPI_URL ?? "").replace(/\/+$/, "")}/drafter/chat-history/${encodeURIComponent(pipelineId)}/${encodeURIComponent(sectionName)}`;
+    if (userEmail) url += `?user_email=${encodeURIComponent(userEmail)}`;
     const res = await fetch(url, {
       method: "DELETE",
       headers: {

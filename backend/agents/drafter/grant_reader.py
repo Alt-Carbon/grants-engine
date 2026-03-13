@@ -64,6 +64,9 @@ DEFAULT_SECTIONS = [
     {"name": "Impact & Outcomes", "description": "Expected results and broader impact", "word_limit": 400, "required": True, "order": 5},
 ]
 
+# NOTE: These generic defaults are replaced by theme-specific sections in
+# drafter_node.py when the grant's theme is resolved. See theme_profiles.py.
+
 
 async def _fetch_with_jina(url: str, api_key: str = "") -> str:
     jina_url = f"https://r.jina.ai/{url.strip()}"

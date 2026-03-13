@@ -1,14 +1,18 @@
 """Drafter Node — LangGraph node that manages the section-by-section loop.
 
+Theme-aware: resolves grant theme, generates a narrative outline for coherence,
+then writes each section with targeted Pinecone knowledge retrieval.
+
 Flow:
   1. Called after grant_reader + company_brain
-  2. Checks current_section_index — if 0, first section
+  2. On first call (index 0): resolve theme, generate outline
   3. Checks section_review_decision (from interrupt resume):
      - "approve": save current section, advance index
      - "revise": rewrite current section with instructions
-  4. Writes next section
-  5. Interrupts — waits for human review via /resume/section-review
-  6. When all sections approved → move to reviewer
+  4. Retrieves section-specific context from Pinecone
+  5. Writes next section with theme profile + outline + targeted knowledge
+  6. Interrupts — waits for human review via /resume/section-review
+  7. When all sections approved → move to reviewer
 """
 from __future__ import annotations
 
@@ -16,10 +20,60 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from backend.agents.drafter.section_writer import write_section
+from backend.agents.drafter.section_writer import get_section_context, write_section
 from backend.graph.state import GrantState
 
 logger = logging.getLogger(__name__)
+
+
+async def _generate_outline(
+    grant: Dict,
+    theme_key: str,
+    sections: List[Dict],
+    company_context: str,
+) -> str:
+    """Generate a narrative outline that ties all sections together.
+
+    This outline is passed to each section writer so sections tell a coherent story.
+    """
+    from backend.agents.drafter.theme_profiles import get_theme_profile
+    from backend.utils.llm import chat, DRAFTER_DEFAULT
+
+    profile = get_theme_profile(theme_key)
+
+    section_list = "\n".join(
+        f"  {i+1}. {s.get('name', f'Section {i+1}')}: {s.get('description', '')}"
+        for i, s in enumerate(sections)
+    )
+
+    prompt = f"""You are planning a grant application for AltCarbon ({profile.get('display_name', 'Climate Tech')}).
+
+GRANT: {grant.get('title', 'Unknown')}
+FUNDER: {grant.get('funder', 'Unknown')}
+
+SECTIONS TO WRITE:
+{section_list}
+
+COMPANY STRENGTHS:
+{chr(10).join('- ' + s for s in profile.get('strengths', []))}
+
+COMPANY CONTEXT (key knowledge):
+{company_context[:3000]}
+
+Generate a brief NARRATIVE OUTLINE (150-200 words) that:
+1. Identifies the core narrative thread connecting all sections
+2. Lists 3-5 key claims/arguments to weave through the application
+3. Notes which AltCarbon strengths to emphasize in which sections
+4. Identifies the "so what" — why should the funder care?
+
+Keep it concise — this will be provided as context to each section writer."""
+
+    try:
+        outline = await chat(prompt, model=DRAFTER_DEFAULT, max_tokens=512)
+        return outline.strip()
+    except Exception as e:
+        logger.warning("Outline generation failed: %s", e)
+        return ""
 
 
 async def drafter_node(state: GrantState) -> Dict:
@@ -46,6 +100,7 @@ async def drafter_node(state: GrantState) -> Dict:
 
 async def _drafter_node_inner(state: GrantState) -> Dict:
     """Inner drafter logic, wrapped by drafter_node() for error handling."""
+    from backend.agents.drafter.theme_profiles import resolve_theme, get_theme_profile
     from backend.db.mongo import grants_scored
     from bson import ObjectId
 
@@ -73,6 +128,32 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
 
     company_context = state.get("company_context", "")
     style_examples = state.get("style_examples", "")
+
+    # ── Theme resolution (once, on first call) ────────────────────────────────
+    grant_theme = state.get("grant_theme", "")
+    draft_outline = state.get("draft_outline", "")
+
+    if not grant_theme:
+        themes_detected = grant.get("themes_detected", [])
+        grant_theme = resolve_theme(themes_detected)
+        logger.info("Drafter: resolved theme → %s (from %s)", grant_theme, themes_detected)
+
+    # ── Outline generation (once, on first section) ───────────────────────────
+    if not draft_outline and current_idx == 0 and review_decision is None:
+        profile = get_theme_profile(grant_theme)
+        # Use theme-specific default sections if grant_reader returned generic ones
+        if _sections_are_generic(sections):
+            theme_sections = profile.get("default_sections", [])
+            if theme_sections:
+                sections = theme_sections
+                grant_requirements = dict(grant_requirements)
+                grant_requirements["sections_required"] = sections
+                total_sections = len(sections)
+                logger.info("Drafter: using theme-specific sections for %s (%d sections)", grant_theme, total_sections)
+
+        draft_outline = await _generate_outline(grant, grant_theme, sections, company_context)
+        if draft_outline:
+            logger.info("Drafter: generated outline (%d chars)", len(draft_outline))
 
     # Handle review decision from previous interrupt
     if review_decision == "approve" and current_idx > 0:
@@ -114,6 +195,12 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         instructions = state.get("section_revision_instructions", {}).get(section.get("name", ""), "")
         critique = state.get("section_critiques", {}).get(section.get("name", ""), "")
 
+        # Get fresh section-specific context for the revision
+        grant_themes = grant.get("themes_detected", [])
+        section_ctx = await get_section_context(
+            grant_theme, section.get("name", ""), grant.get("title", ""), grant_themes, company_context,
+        )
+
         logger.info("Drafter: rewriting section '%s'", section.get("name"))
         result = await write_section(
             section=section,
@@ -125,6 +212,9 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
             previous_content=prev_interrupt.get("content", ""),
             critique=critique,
             revision_instructions=instructions,
+            theme_key=grant_theme,
+            section_context=section_ctx,
+            draft_outline=draft_outline,
         )
         # Return interrupt for the rewritten section
         return {
@@ -132,11 +222,15 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
             "approved_sections": approved_sections,
             "section_review_decision": None,
             "section_edited_content": None,
+            "grant_theme": grant_theme,
+            "draft_outline": draft_outline,
+            "grant_requirements": grant_requirements,
             "audit_log": state.get("audit_log", []) + [{
                 "node": "drafter",
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "action": "section_rewritten",
                 "section": result["section_name"],
+                "theme": grant_theme,
             }],
         }
 
@@ -147,16 +241,27 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
             "approved_sections": approved_sections,
             "pending_interrupt": None,
             "current_section_index": total_sections,
+            "grant_theme": grant_theme,
+            "draft_outline": draft_outline,
+            "grant_requirements": grant_requirements,
             "audit_log": state.get("audit_log", []) + [{
                 "node": "drafter",
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "action": "all_sections_approved",
+                "theme": grant_theme,
             }],
         }
 
-    # Write the next section
+    # ── Write the next section with section-specific RAG ──────────────────────
     section = sections[current_idx]
-    logger.info("Drafter: writing section %d/%d: %s", current_idx + 1, total_sections, section.get("name"))
+    section_name = section.get("name", f"Section {current_idx + 1}")
+    logger.info("Drafter: writing section %d/%d: %s (theme=%s)", current_idx + 1, total_sections, section_name, grant_theme)
+
+    # Retrieve section-specific context from Pinecone
+    grant_themes = grant.get("themes_detected", [])
+    section_ctx = await get_section_context(
+        grant_theme, section_name, grant.get("title", ""), grant_themes, company_context,
+    )
 
     result = await write_section(
         section=section,
@@ -165,9 +270,12 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         grant=grant,
         company_context=company_context,
         style_examples=style_examples,
+        theme_key=grant_theme,
+        section_context=section_ctx,
+        draft_outline=draft_outline,
     )
 
-    # ── Notion Mission Control sync ──────────────────────────────────
+    # ── Notion Mission Control sync ──────────────────────────────────────────
     try:
         from backend.integrations.notion_sync import sync_draft_section
         grant_name = grant.get("grant_name") or grant.get("title") or "Unknown"
@@ -191,6 +299,9 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         "pending_interrupt": result,
         "section_review_decision": None,
         "section_edited_content": None,
+        "grant_theme": grant_theme,
+        "draft_outline": draft_outline,
+        "grant_requirements": grant_requirements,
         "audit_log": state.get("audit_log", []) + [{
             "node": "drafter",
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -198,8 +309,16 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
             "section": result["section_name"],
             "word_count": result["word_count"],
             "within_limit": result["within_limit"],
+            "theme": grant_theme,
         }],
     }
+
+
+def _sections_are_generic(sections: List[Dict]) -> bool:
+    """Check if sections are the generic defaults from grant_reader."""
+    generic_names = {"Project Overview", "Technical Approach", "Team & Capabilities", "Budget Justification", "Impact & Outcomes"}
+    section_names = {s.get("name", "") for s in sections}
+    return section_names == generic_names
 
 
 def should_continue_drafting(state: GrantState) -> str:

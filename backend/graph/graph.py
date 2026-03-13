@@ -1,13 +1,13 @@
 """Full LangGraph grant pipeline.
 
 Graph structure:
-  START → scout → analyst → notify_triage
-       → [INTERRUPT: human_triage]
-       → company_brain → grant_reader
+  START → scout → company_brain_load → analyst → pre_triage_guardrail
+       → notify_triage → [INTERRUPT: human_triage]
+       → company_brain → grant_reader → draft_guardrail
        → [INTERRUPT: drafter] (loops per section)
        → reviewer → export → END
 
-  [watch/pass] → pipeline_update → END
+  [watch/pass/guardrail_rejected] → pipeline_update → END
 """
 from __future__ import annotations
 
@@ -18,14 +18,16 @@ from typing import Dict
 from langgraph.graph import END, START, StateGraph
 
 from backend.agents.analyst import analyst_node, notify_triage_node
-from backend.agents.company_brain import company_brain_node
+from backend.agents.company_brain import company_brain_node, company_brain_load_node
+from backend.agents.pre_triage_guardrail import pre_triage_guardrail_node
 from backend.agents.drafter.drafter_node import drafter_node
 from backend.agents.drafter.exporter import exporter_node
+from backend.agents.drafter.draft_guardrail import draft_guardrail_node
 from backend.agents.drafter.grant_reader import grant_reader_node
 from backend.agents.reviewer import reviewer_node
 from backend.agents.scout import scout_node
 from backend.graph.checkpointer import MongoCheckpointSaver
-from backend.graph.router import route_after_drafter, route_triage
+from backend.graph.router import route_after_drafter, route_after_guardrail, route_triage
 from backend.graph.state import GrantState
 
 logger = logging.getLogger(__name__)
@@ -45,10 +47,17 @@ async def human_triage_node(state: GrantState) -> Dict:
 
 
 async def pipeline_update_node(state: GrantState) -> Dict:
-    """Update pipeline status for watch/pass decisions."""
+    """Update pipeline status for watch/pass/guardrail_rejected decisions."""
     from backend.db.mongo import grants_scored
     grant_id = state.get("selected_grant_id")
-    decision = state.get("human_triage_decision", "pass")
+
+    # Determine status: guardrail rejection takes precedence over triage decision
+    guardrail_result = state.get("draft_guardrail_result")
+    if guardrail_result and not guardrail_result.get("passed", True):
+        decision = "guardrail_rejected"
+    else:
+        decision = state.get("human_triage_decision", "pass")
+
     if grant_id:
         try:
             from bson import ObjectId
@@ -74,11 +83,14 @@ def build_graph() -> StateGraph:
 
     # ── Add nodes ─────────────────────────────────────────────────────────────
     builder.add_node("scout", scout_node)
+    builder.add_node("company_brain_load", company_brain_load_node)
     builder.add_node("analyst", analyst_node)
+    builder.add_node("pre_triage_guardrail", pre_triage_guardrail_node)
     builder.add_node("notify_triage", notify_triage_node)
     builder.add_node("human_triage", human_triage_node)
     builder.add_node("company_brain", company_brain_node)
     builder.add_node("grant_reader", grant_reader_node)
+    builder.add_node("draft_guardrail", draft_guardrail_node)
     builder.add_node("drafter", drafter_node)
     builder.add_node("reviewer", reviewer_node)
     builder.add_node("export", exporter_node)
@@ -86,8 +98,10 @@ def build_graph() -> StateGraph:
 
     # ── Edges ──────────────────────────────────────────────────────────────────
     builder.add_edge(START, "scout")
-    builder.add_edge("scout", "analyst")
-    builder.add_edge("analyst", "notify_triage")
+    builder.add_edge("scout", "company_brain_load")
+    builder.add_edge("company_brain_load", "analyst")
+    builder.add_edge("analyst", "pre_triage_guardrail")
+    builder.add_edge("pre_triage_guardrail", "notify_triage")
     builder.add_edge("notify_triage", "human_triage")
 
     # Gate 1: triage decision routes to either company_brain or pipeline_update
@@ -101,7 +115,17 @@ def build_graph() -> StateGraph:
     )
 
     builder.add_edge("company_brain", "grant_reader")
-    builder.add_edge("grant_reader", "drafter")
+    builder.add_edge("grant_reader", "draft_guardrail")
+
+    # Gate: guardrail routes to drafter (passed) or pipeline_update (failed)
+    builder.add_conditional_edges(
+        "draft_guardrail",
+        route_after_guardrail,
+        {
+            "drafter": "drafter",
+            "pipeline_update": "pipeline_update",
+        },
+    )
 
     # Gate 2: drafter loops until all sections approved, then goes to reviewer
     builder.add_conditional_edges(

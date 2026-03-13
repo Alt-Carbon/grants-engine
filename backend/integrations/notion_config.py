@@ -99,4 +99,7 @@ AGENT_DISPLAY = {
     "drafter": "Drafter",
     "knowledge_sync": "Knowledge Sync",
     "company_brain": "Knowledge Sync",
+    "company_brain_load": "Company Brain Load",
+    "draft_guardrail": "Draft Guardrail",
+    "pre_triage_guardrail": "Pre-Triage Guardrail",
 }

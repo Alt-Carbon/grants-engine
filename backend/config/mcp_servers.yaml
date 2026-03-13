@@ -1,0 +1,92 @@
+# ── MCP Server Registry ──────────────────────────────────────────────────────
+#
+# Declarative config for all MCP servers the grants engine can connect to.
+# Each server is spawned as a stdio subprocess at app startup.
+#
+# Fields:
+#   command:    Binary to run (global install preferred, npx fallback auto)
+#   args:       CLI args passed to the command
+#   npm_package: npm package name — used for npx fallback & Dockerfile install
+#   env_map:    Maps required env vars: { MCP_ENV_VAR: SETTINGS_FIELD_OR_ENV_VAR }
+#   required_env: List of env vars that MUST be set for the server to start
+#   enabled:    true | false — skip disabled servers at startup
+#   description: Human-readable label for logs & status endpoints
+#   tags:       Which pipeline agents can use this server (for discoverability)
+
+servers:
+  notion:
+    description: "Notion workspace (read/write pages, databases, comments)"
+    command: "notion-mcp-server"
+    npm_package: "@notionhq/notion-mcp-server"
+    args: []
+    env_map:
+      NOTION_TOKEN: "NOTION_TOKEN"
+    required_env:
+      - NOTION_TOKEN
+    enabled: true
+    tags:
+      - company_brain
+      - knowledge_sync
+      - drafter
+      - export
+
+  slack:
+    description: "Slack messaging (notifications, triage alerts, draft reviews)"
+    command: "slack-mcp-server"
+    npm_package: "@anthropic/slack-mcp-server"
+    args: []
+    env_map:
+      SLACK_BOT_TOKEN: "SLACK_BOT_TOKEN"
+      SLACK_TEAM_ID: "SLACK_TEAM_ID"
+    required_env:
+      - SLACK_BOT_TOKEN
+    enabled: false
+    tags:
+      - notifications
+      - triage
+      - drafter
+
+  google_drive:
+    description: "Google Drive (read docs, sheets for knowledge sync)"
+    command: "google-drive-mcp-server"
+    npm_package: "@anthropic/google-drive-mcp-server"
+    args: []
+    env_map:
+      GOOGLE_CLIENT_ID: "GOOGLE_CLIENT_ID"
+      GOOGLE_CLIENT_SECRET: "GOOGLE_CLIENT_SECRET"
+      GOOGLE_REFRESH_TOKEN: "GOOGLE_REFRESH_TOKEN"
+    required_env:
+      - GOOGLE_CLIENT_ID
+      - GOOGLE_CLIENT_SECRET
+      - GOOGLE_REFRESH_TOKEN
+    enabled: false
+    tags:
+      - company_brain
+      - knowledge_sync
+
+  filesystem:
+    description: "Local filesystem (read/write drafts, exports, knowledge cache)"
+    command: "filesystem-mcp-server"
+    npm_package: "@anthropic/filesystem-mcp-server"
+    args:
+      - "/app/exports"
+      - "/app/backend/knowledge"
+    env_map: {}
+    required_env: []
+    enabled: false
+    tags:
+      - drafter
+      - export
+
+  fetch:
+    description: "HTTP fetch (grant pages, funder sites, web scraping)"
+    command: "fetch-mcp-server"
+    npm_package: "@anthropic/fetch-mcp-server"
+    args: []
+    env_map: {}
+    required_env: []
+    enabled: false
+    tags:
+      - scout
+      - analyst
+      - grant_reader

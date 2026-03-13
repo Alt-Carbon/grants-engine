@@ -2,6 +2,9 @@
 
 Reads all approved sections as a complete document, scores each section
 against the grant's evaluation criteria, and produces a change log.
+
+If any section scores below the revision threshold (< 6), produces structured
+critique that can be fed back to the drafter for auto-revision.
 """
 from __future__ import annotations
 
@@ -15,10 +18,13 @@ from backend.utils.llm import chat, DRAFTER_DEFAULT
 
 logger = logging.getLogger(__name__)
 
+REVISION_THRESHOLD = 6  # Sections scoring below this get flagged for revision
+
 REVIEW_PROMPT = """You are a senior grant reviewer performing a final quality check on a grant application for AltCarbon.
 
 GRANT: {grant_title}
 FUNDER: {funder}
+THEME: {theme}
 
 EVALUATION CRITERIA:
 {criteria}
@@ -36,7 +42,8 @@ Respond ONLY with valid JSON:
       "score": <int 1-10>,
       "strengths": ["<specific strength>"],
       "issues": ["<specific issue>"],
-      "suggestions": ["<actionable fix>"]
+      "suggestions": ["<actionable fix>"],
+      "revision_instructions": "<if score < 6, specific instructions for rewriting this section; null otherwise>"
     }}
   }},
   "top_3_fixes": [
@@ -45,14 +52,15 @@ Respond ONLY with valid JSON:
     "<most impactful fix 3>"
   ],
   "evidence_gaps_critical": ["<any [EVIDENCE NEEDED] items that are critical to fix>"],
-  "ready_for_export": <true if score >= 6.5 else false>,
+  "coherence_score": <int 1-10>,
+  "coherence_notes": "<do sections tell a consistent story? any contradictions or gaps between sections?>",
+  "ready_for_export": <true if overall_score >= 6.5 else false>,
   "summary": "<2-3 sentence overall assessment>"
 }}"""
 
 
 async def reviewer_node(state: GrantState) -> Dict:
     """LangGraph node: critique the full draft and produce a review report."""
-    from backend.config.settings import get_settings
     from backend.db.mongo import grants_scored
     from bson import ObjectId
 
@@ -66,6 +74,7 @@ async def reviewer_node(state: GrantState) -> Dict:
 
     requirements = state.get("grant_requirements") or {}
     approved_sections = state.get("approved_sections") or {}
+    grant_theme = state.get("grant_theme", "climatetech")
 
     # Assemble full draft text for review
     sections_text = "\n\n".join(
@@ -79,11 +88,20 @@ async def reviewer_node(state: GrantState) -> Dict:
         for c in criteria
     ) or "No explicit criteria provided — evaluate for clarity, evidence, and impact."
 
+    # Get theme display name
+    theme_display = grant_theme
+    try:
+        from backend.agents.drafter.theme_profiles import get_theme_profile
+        theme_display = get_theme_profile(grant_theme).get("display_name", grant_theme)
+    except Exception:
+        pass
+
     prompt = REVIEW_PROMPT.format(
         grant_title=grant.get("title", ""),
         funder=grant.get("funder", ""),
+        theme=theme_display,
         criteria=criteria_text,
-        draft=sections_text[:10000],
+        draft=sections_text[:12000],
     )
 
     try:
@@ -101,21 +119,47 @@ async def reviewer_node(state: GrantState) -> Dict:
             "section_critiques": {},
             "top_3_fixes": [],
             "evidence_gaps_critical": [],
+            "coherence_score": 7,
+            "coherence_notes": "",
             "ready_for_export": True,
             "summary": f"Automated review failed ({e}). Proceeding to export.",
         }
 
+    # Extract sections that need revision (score < threshold)
+    sections_needing_revision = []
+    section_critiques = review.get("section_critiques", {})
+    for sec_name, critique in section_critiques.items():
+        if isinstance(critique, dict) and critique.get("score", 10) < REVISION_THRESHOLD:
+            sections_needing_revision.append({
+                "section_name": sec_name,
+                "score": critique.get("score"),
+                "issues": critique.get("issues", []),
+                "revision_instructions": critique.get("revision_instructions", ""),
+            })
+
+    if sections_needing_revision:
+        logger.info(
+            "Reviewer: %d sections below threshold (<%d): %s",
+            len(sections_needing_revision),
+            REVISION_THRESHOLD,
+            [s["section_name"] for s in sections_needing_revision],
+        )
+
     logger.info(
-        "Reviewer: overall score=%.1f, ready_for_export=%s",
+        "Reviewer: overall=%.1f, coherence=%s, ready=%s, revisions_needed=%d",
         review.get("overall_score", 0),
+        review.get("coherence_score", "?"),
         review.get("ready_for_export", True),
+        len(sections_needing_revision),
     )
 
     audit_entry = {
         "node": "reviewer",
         "ts": datetime.now(timezone.utc).isoformat(),
         "overall_score": review.get("overall_score"),
+        "coherence_score": review.get("coherence_score"),
         "ready_for_export": review.get("ready_for_export"),
+        "sections_flagged": [s["section_name"] for s in sections_needing_revision],
     }
     return {
         "reviewer_output": review,
