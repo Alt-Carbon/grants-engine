@@ -20,17 +20,27 @@ router = APIRouter(tags=["v2"])
 # ── In-memory cache for Notion grants (avoid 40s+ queries on every page load) ─
 _grants_cache: list | None = None
 _grants_cache_ts: float = 0
-_GRANTS_CACHE_TTL = 60  # seconds
+_GRANTS_CACHE_TTL = 300  # 5 minutes — avoid Notion 429 rate limits
 
 
 async def _cached_all_grants() -> list:
-    """Return all grants from Notion with a 60s in-memory cache."""
+    """Return all grants from Notion with a 5-min in-memory cache."""
     global _grants_cache, _grants_cache_ts
     now = time.monotonic()
     if _grants_cache is not None and (now - _grants_cache_ts) < _GRANTS_CACHE_TTL:
         return _grants_cache
     from backend.integrations.notion_data import query_all_grants
-    _grants_cache = await query_all_grants()
+    try:
+        grants = await query_all_grants()
+    except Exception as e:
+        log.error("Failed to fetch grants from Notion: %s", e)
+        # Return stale cache if available, otherwise empty
+        return _grants_cache if _grants_cache is not None else []
+    # Don't cache empty results if we previously had data (likely a transient error)
+    if not grants and _grants_cache and len(_grants_cache) > 0:
+        log.warning("Notion returned 0 grants but cache has %d — keeping stale cache", len(_grants_cache))
+        return _grants_cache
+    _grants_cache = grants
     _grants_cache_ts = now
     return _grants_cache
 

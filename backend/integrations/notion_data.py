@@ -30,14 +30,23 @@ log = logging.getLogger(__name__)
 _rate_sem = asyncio.Semaphore(3)
 
 
-async def _rate_limited(coro):
-    """Execute a coroutine under the Notion rate limiter."""
-    async with _rate_sem:
-        try:
-            return await coro
-        finally:
-            # Sliding window: wait 350ms after each request
-            await asyncio.sleep(0.35)
+async def _rate_limited(coro, retries: int = 3):
+    """Execute a coroutine under the Notion rate limiter with 429 retry."""
+    for attempt in range(retries):
+        async with _rate_sem:
+            try:
+                result = await coro
+                await asyncio.sleep(0.35)
+                return result
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "rate limit" in err_str.lower():
+                    wait = 2 ** attempt + 1  # 2s, 3s, 5s
+                    log.warning("Notion 429 — retrying in %ds (attempt %d/%d)", wait, attempt + 1, retries)
+                    await asyncio.sleep(wait)
+                    if attempt < retries - 1:
+                        continue
+                raise
 
 
 # ── Client singleton ────────────────────────────────────────────────────────
