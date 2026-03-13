@@ -9,11 +9,12 @@ import MissionControl from "./MissionControl";
 export const revalidate = 0;
 
 export default async function MonitoringPage() {
+  // Fetch in parallel with individual error boundaries — never block page render
   const [activity, discoveries, pipeline, scoutRuns] = await Promise.all([
-    getActivityFeed(30),
-    getRecentDiscoveries(20),
-    getPipelineSummary(),
-    getScoutRuns(10),
+    getActivityFeed(30).catch(() => []),
+    getRecentDiscoveries(20).catch(() => []),
+    getPipelineSummary().catch(() => null),
+    getScoutRuns(10).catch(() => []),
   ]);
 
   return (

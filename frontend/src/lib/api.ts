@@ -14,6 +14,7 @@ export async function apiPost<T = unknown>(path: string, body: unknown): Promise
     },
     body: JSON.stringify(body),
     cache: "no-store",
+    signal: AbortSignal.timeout(60_000),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -26,6 +27,7 @@ export async function apiGet<T = unknown>(path: string): Promise<T> {
   const res = await fetch(`${getUrl()}${path}`, {
     headers: { "x-internal-secret": getSecret() },
     cache: "no-store",
+    signal: AbortSignal.timeout(60_000),
   });
   if (!res.ok) {
     const text = await res.text();
