@@ -4,7 +4,7 @@ import { DrafterView } from "./DrafterView";
 export const revalidate = 0;
 
 export default async function DrafterPage() {
-  const pipelines = await getDraftGrants();
+  const pipelines = await getDraftGrants().catch(() => []);
 
   return (
     <div className="flex h-full flex-col">

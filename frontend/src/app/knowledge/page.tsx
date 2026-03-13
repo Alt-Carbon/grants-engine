@@ -25,7 +25,13 @@ function StatusChip({ status }: { status: "healthy" | "thin" | "critical" }) {
 }
 
 export default async function KnowledgePage() {
-  const [health, logs] = await Promise.all([getKnowledgeStatus(), getSyncLogs(5)]);
+  const [health, logs] = await Promise.all([
+    getKnowledgeStatus().catch(() => ({
+      status: "critical" as const, total_chunks: 0, notion_chunks: 0,
+      drive_chunks: 0, past_grant_chunks: 0, last_synced: null, by_type: {},
+    })),
+    getSyncLogs(5).catch(() => []),
+  ]);
 
   return (
     <div className="flex flex-col gap-6 p-6">
