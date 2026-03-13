@@ -1307,6 +1307,29 @@ async def manual_scout(
                 )
             except Exception:
                 logger.debug("Scout notification failed", exc_info=True)
+
+            # Auto-run Analyst on any remaining Raw grants in Notion
+            try:
+                from backend.integrations.notion_data import query_grants_by_status
+                from backend.agents.analyst import AnalystAgent
+                from backend.config.settings import get_settings
+
+                raw_grants = await query_grants_by_status("Raw")
+                if raw_grants:
+                    logger.info("Post-scout: %d Raw grants in Notion, running Analyst", len(raw_grants))
+                    s = get_settings()
+                    agent = AnalystAgent(
+                        perplexity_api_key=s.perplexity_api_key,
+                        gateway_api_key=s.ai_gateway_api_key,
+                        gateway_url=s.ai_gateway_url,
+                    )
+                    scored = await agent.run(raw_grants)
+                    logger.info("Post-scout Analyst: scored %d grants", len(scored))
+                else:
+                    logger.info("Post-scout: no Raw grants remaining in Notion")
+            except Exception as e:
+                logger.error("Post-scout Analyst failed: %s", e)
+
         except Exception as e:
             try:
                 from backend.notifications.hub import notify_agent_error
@@ -1374,18 +1397,36 @@ _analyst_started_at: Optional[str] = None
 @app.get("/status/analyst")
 async def analyst_status():
     """Current analyst job state + last run info."""
-    from backend.db.mongo import get_db
-    db = get_db()
-    last = await db["audit_logs"].find_one(
-        {"event": "analyst_run_complete"},
-        sort=[("created_at", -1)],
-    )
-    pending = await db["grants_raw"].count_documents({"processed": False})
+    # Last run from SQLite audit logs
+    last_run_at = None
+    last_run_scored = 0
+    try:
+        from backend.db.sqlite import audit_logs
+        tbl = audit_logs()
+        last = await tbl.find_one(
+            {"node": "analyst"},
+            sort=[("created_at", -1)],
+        )
+        if last:
+            last_run_at = last.get("created_at")
+            last_run_scored = last.get("grants_scored", 0)
+    except Exception:
+        pass
+
+    # Pending: Raw grants in Notion waiting for scoring
+    pending = 0
+    try:
+        from backend.integrations.notion_data import query_grants_by_status
+        raw_grants = await query_grants_by_status("Raw")
+        pending = len(raw_grants)
+    except Exception:
+        pass
+
     return {
         "running": _analyst_running,
         "started_at": _analyst_started_at,
-        "last_run_at": last["created_at"] if last else None,
-        "last_run_scored": last.get("scored_count", 0) if last else 0,
+        "last_run_at": last_run_at,
+        "last_run_scored": last_run_scored,
         "pending_unprocessed": pending,
     }
 

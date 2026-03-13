@@ -194,19 +194,22 @@ async def _safe_weekly_pipeline() -> None:
         scout_result = await run_scout_pipeline()
         logger.info("Weekly scout complete: %s", scout_result.get("status"))
 
-        # Step 2: Analyst on new grants
-        from backend.agents.analyst import analyst_node
-        from backend.graph.state import GrantsState
+        # Step 2: Analyst on remaining Raw grants from Notion
         from backend.integrations.notion_data import query_grants_by_status
         raw_grants = await query_grants_by_status("Raw")
         if raw_grants:
-            state = GrantsState(
-                raw_grants=raw_grants,
-                scored=[],
-                run_config={},
+            from backend.agents.analyst import AnalystAgent
+            from backend.config.settings import get_settings
+            s = get_settings()
+            agent = AnalystAgent(
+                perplexity_api_key=s.perplexity_api_key,
+                gateway_api_key=s.ai_gateway_api_key,
+                gateway_url=s.ai_gateway_url,
             )
-            await analyst_node(state)
-            logger.info("Weekly analyst scored %d raw grants", len(raw_grants))
+            scored = await agent.run(raw_grants)
+            logger.info("Weekly analyst scored %d raw grants", len(scored))
+        else:
+            raw_grants = []
 
         # Notify
         try:
