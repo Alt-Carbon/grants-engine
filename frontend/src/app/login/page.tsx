@@ -2,10 +2,6 @@ import { auth, signIn } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import Image from "next/image";
 import {
-  Search,
-  BarChart3,
-  FileText,
-  Brain,
   ShieldCheck,
   ArrowRight,
 } from "lucide-react";
@@ -49,37 +45,6 @@ export default async function LoginPage({
           </span>
         </div>
 
-        {/* Bottom: Text overlay on the image */}
-        <div className="absolute bottom-0 left-0 right-0 z-10 p-10">
-          <h1 className="max-w-md text-4xl font-extrabold leading-[1.15] tracking-tight text-white drop-shadow-2xl">
-            Grants{" "}
-            <span className="bg-gradient-to-r from-green-300 via-emerald-300 to-teal-200 bg-clip-text text-transparent">
-              Engine
-            </span>
-          </h1>
-          <p className="mt-3 max-w-sm text-sm leading-relaxed text-white/60">
-            AI-powered discovery, scoring, and drafting — built for the team
-            removing carbon at gigaton scale.
-          </p>
-
-          {/* Agent badges — semi-transparent row on the image */}
-          <div className="mt-6 flex flex-wrap gap-2">
-            {[
-              { icon: Search, label: "Scout" },
-              { icon: BarChart3, label: "Analyst" },
-              { icon: FileText, label: "Drafter" },
-              { icon: Brain, label: "Company Brain" },
-            ].map(({ icon: Icon, label }) => (
-              <span
-                key={label}
-                className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md ring-1 ring-white/10"
-              >
-                <Icon className="h-3 w-3 text-green-300/80" />
-                {label}
-              </span>
-            ))}
-          </div>
-        </div>
       </div>
 
       {/* ── Right: Login panel ──────────────────────────────────────── */}
@@ -122,9 +87,9 @@ export default async function LoginPage({
 
           {/* Desktop: Welcome text (above lg) */}
           <div className="mb-8 hidden lg:block">
-            <h2 className="text-2xl font-bold text-white">Welcome back</h2>
+            <h2 className="text-2xl font-bold text-white">Log in</h2>
             <p className="mt-1.5 text-[15px] text-gray-500">
-              Sign in to your grants workspace
+              Access your account
             </p>
           </div>
 
@@ -174,20 +139,6 @@ export default async function LoginPage({
             </button>
           </form>
 
-          {/* Domain badge */}
-          <div className="mt-8 flex items-center gap-3">
-            <div className="h-px flex-1 bg-gray-800/60" />
-            <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-600">
-              <ShieldCheck className="h-3 w-3 text-green-600/60" />
-              @altcarbon.com only
-            </span>
-            <div className="h-px flex-1 bg-gray-800/60" />
-          </div>
-
-          {/* Footer */}
-          <p className="mt-8 text-center text-[11px] text-gray-700">
-            Alt Carbon Grants Engine &middot; Internal use only
-          </p>
         </div>
       </div>
     </div>

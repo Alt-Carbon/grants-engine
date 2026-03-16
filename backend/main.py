@@ -2404,7 +2404,7 @@ async def start_draft(
     thread_id = body.thread_id or f"draft_{body.grant_id[:8]}_{uuid.uuid4().hex[:6]}"
     run_id = str(uuid.uuid4())
 
-    # Create pipeline record
+    # Create pipeline record and sync grants_scored status
     pipeline_id = None
     try:
         result = await grants_pipeline().insert_one({
@@ -2419,6 +2419,11 @@ async def start_draft(
             "override_reason": body.override_reason,
         })
         pipeline_id = str(result.inserted_id)
+        # Keep grants_scored status in sync so dashboard/pipeline views reflect drafting
+        await grants_scored().update_one(
+            {"_id": ObjectId(body.grant_id)},
+            {"$set": {"status": "drafting"}},
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2484,6 +2489,69 @@ async def start_draft(
     return {"status": "draft_started", "thread_id": thread_id, "pipeline_id": pipeline_id}
 
 
+# ── Dual Reviewer endpoints ───────────────────────────────────────────────────
+
+class RunReviewRequest(BaseModel):
+    grant_id: str
+
+
+@app.post("/review/run")
+async def run_review(
+    body: RunReviewRequest,
+    background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
+):
+    """Trigger funder + scientific review for a draft-complete grant."""
+    from backend.db.mongo import grants_scored, grant_drafts
+    from bson import ObjectId
+
+    # Validate grant exists
+    grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)})
+    if not grant:
+        raise HTTPException(status_code=404, detail="Grant not found")
+
+    # Validate draft exists
+    draft = await grant_drafts().find_one(
+        {"grant_id": body.grant_id},
+        sort=[("version", -1)],
+    )
+    if not draft:
+        raise HTTPException(status_code=404, detail="No draft found for this grant")
+
+    async def _run():
+        try:
+            from backend.agents.dual_reviewer import run_dual_review
+            await run_dual_review(body.grant_id)
+        except Exception as exc:
+            logger.error("Dual review failed for %s: %s", body.grant_id, exc)
+
+    background_tasks.add_task(_run)
+    return {
+        "status": "review_started",
+        "grant_id": body.grant_id,
+        "draft_version": draft.get("version", 0),
+    }
+
+
+@app.get("/review/{grant_id}")
+async def get_reviews(grant_id: str, _: None = Depends(verify_internal)):
+    """Return all reviews for a grant, grouped by perspective."""
+    from backend.db.mongo import draft_reviews
+
+    docs = await draft_reviews().find(
+        {"grant_id": grant_id}
+    ).sort("created_at", -1).to_list(20)
+
+    result = {"funder": None, "scientific": None}
+    for doc in docs:
+        doc["_id"] = str(doc["_id"])
+        perspective = doc.get("perspective")
+        if perspective in result and result[perspective] is None:
+            result[perspective] = doc
+
+    return result
+
+
 # ── Status endpoints ───────────────────────────────────────────────────────────
 
 @app.get("/status/pipeline")
@@ -2498,8 +2566,8 @@ async def pipeline_status():
     deadline_urgent_count = await db["grants_scored"].count_documents(
         {"deadline_urgent": True, "status": {"$in": ["triage", "pursue", "watch"]}}
     )
-    drafting  = await db["grants_pipeline"].count_documents({"status": "drafting"})
-    complete  = await db["grants_pipeline"].count_documents({"status": "draft_complete"})
+    drafting  = await db["grants_scored"].count_documents({"status": "drafting"})
+    complete  = await db["grants_scored"].count_documents({"status": {"$in": ["draft_complete", "submitted", "won"]}})
 
     # Build actionable warnings (fix #18)
     warnings: list = []

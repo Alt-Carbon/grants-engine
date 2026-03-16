@@ -39,6 +39,9 @@ def grants_pipeline():
 def grant_drafts():
     return get_db()["grant_drafts"]
 
+def draft_reviews():
+    return get_db()["draft_reviews"]
+
 def knowledge_chunks():
     return get_db()["knowledge_chunks"]
 
@@ -105,6 +108,11 @@ async def ensure_indexes():
     await _idx("grant_drafts", "pipeline_id")
     await _idx("grant_drafts", "grant_id")
     await _idx("grant_drafts", [("pipeline_id", 1), ("version", -1)])
+
+    # draft_reviews
+    await _idx("draft_reviews", "grant_id")
+    await _idx("draft_reviews", [("grant_id", 1), ("perspective", 1)])
+    await _idx("draft_reviews", [("created_at", -1)])
 
     # knowledge_chunks
     await _idx("knowledge_chunks", "source_id")

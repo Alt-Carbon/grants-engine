@@ -23,6 +23,7 @@ import {
   MessageSquare,
   History,
   Maximize2,
+  PlayCircle,
 } from "lucide-react";
 
 interface GrantDetailSheetProps {
@@ -145,6 +146,8 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
   const [grant, setGrant] = useState<GrantFull | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [draftLoading, setDraftLoading] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
 
   const fetchGrant = useCallback(async (id: string) => {
     setLoading(true);
@@ -220,7 +223,54 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                 {grant.deadline_urgent && (
                   <DeadlineChip deadline={grant.deadline} daysLeft={grant.days_to_deadline} />
                 )}
+                {(grant.status === "pursue" || grant.status === "pursuing") && (
+                  <button
+                    onClick={async () => {
+                      setDraftLoading(true);
+                      setDraftError(null);
+                      try {
+                        const res = await fetch("/api/drafter/trigger", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ grant_id: grant._id }),
+                        });
+                        const data = await res.json();
+                        if (!res.ok) {
+                          setDraftError(data?.detail?.reason || data?.detail || data?.error || "Failed to start draft");
+                          return;
+                        }
+                        onClose();
+                        router.push("/drafter");
+                      } catch {
+                        setDraftError("Network error");
+                      } finally {
+                        setDraftLoading(false);
+                      }
+                    }}
+                    disabled={draftLoading}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-purple-700 disabled:opacity-50"
+                  >
+                    {draftLoading ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <PlayCircle className="h-3 w-3" />
+                    )}
+                    {draftLoading ? "Starting..." : "Start Draft"}
+                  </button>
+                )}
+                {grant.status === "drafting" && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-purple-100 px-2.5 py-0.5 text-xs font-semibold text-purple-700">
+                    <FileText className="h-3 w-3" />
+                    Drafting
+                  </span>
+                )}
               </div>
+              {draftError && (
+                <div className="mt-2 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-500" />
+                  <p className="text-xs text-red-700">{draftError}</p>
+                </div>
+              )}
             </div>
           ) : null}
           <div className="flex shrink-0 items-center gap-1">

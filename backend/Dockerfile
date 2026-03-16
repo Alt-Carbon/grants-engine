@@ -17,6 +17,9 @@ RUN npm install -g @notionhq/notion-mcp-server
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install Playwright Chromium + OS deps for headless browser fetching
+RUN playwright install --with-deps chromium
+
 COPY . .
 
 EXPOSE 8000

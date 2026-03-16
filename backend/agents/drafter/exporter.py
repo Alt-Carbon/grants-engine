@@ -167,6 +167,16 @@ async def exporter_node(state: GrantState) -> Dict:
             {"$set": {"status": "draft_complete", "current_draft_version": version}},
         )
 
+    # Keep grants_scored status in sync so dashboard reflects draft completion
+    if grant_id:
+        try:
+            await grants_scored().update_one(
+                {"_id": ObjectId(grant_id)},
+                {"$set": {"status": "draft_complete"}},
+            )
+        except Exception as e:
+            logger.warning("exporter: failed to sync grants_scored status: %s", e)
+
     audit_entry = {
         "node": "exporter",
         "ts": datetime.now(timezone.utc).isoformat(),

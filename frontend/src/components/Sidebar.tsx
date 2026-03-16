@@ -7,13 +7,13 @@ import { useSession, signOut } from "next-auth/react";
 import {
   BarChart3,
   Kanban,
-  ListChecks,
   FileText,
   Database,
   Menu,
   X,
   Activity,
   LogOut,
+  ClipboardCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AgentControls } from "./AgentControls";
@@ -22,8 +22,8 @@ import { NotificationBell } from "./NotificationBell";
 const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: BarChart3 },
   { href: "/pipeline", label: "Pipeline", icon: Kanban },
-  { href: "/triage", label: "Shortlisted", icon: ListChecks },
   { href: "/drafter", label: "Drafter", icon: FileText },
+  { href: "/reviewers", label: "Reviewers", icon: ClipboardCheck },
   { href: "/monitoring", label: "Mission Control", icon: Activity },
   { href: "/knowledge", label: "Knowledge", icon: Database },
 ];

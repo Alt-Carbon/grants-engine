@@ -98,8 +98,8 @@ export async function getDashboardStats() {
       db.collection("grants_scored").countDocuments({ status: "triage" }),
       db.collection("grants_scored").countDocuments({ status: { $in: ["pursue", "pursuing"] } }),
       db.collection("grants_scored").countDocuments({ status: "hold" }),
-      db.collection("grants_pipeline").countDocuments({ status: "drafting" }),
-      db.collection("grants_pipeline").countDocuments({ status: "draft_complete" }),
+      db.collection("grants_scored").countDocuments({ status: "drafting" }),
+      db.collection("grants_scored").countDocuments({ status: { $in: ["draft_complete", "submitted", "won"] } }),
       db.collection("grants_scored").countDocuments({
         deadline_urgent: true,
         status: { $in: ["triage", "pursue"] },
@@ -709,8 +709,8 @@ export async function getPipelineSummary(): Promise<PipelineSummary> {
       db.collection("grants_scored").countDocuments({ status: "triage" }),
       db.collection("grants_scored").countDocuments({ status: { $in: ["pursue", "pursuing"] } }),
       db.collection("grants_scored").countDocuments({ status: "hold" }),
-      db.collection("grants_pipeline").countDocuments({ status: "drafting" }),
-      db.collection("grants_pipeline").countDocuments({ status: { $in: ["draft_complete", "submitted", "won"] } }),
+      db.collection("grants_scored").countDocuments({ status: "drafting" }),
+      db.collection("grants_scored").countDocuments({ status: { $in: ["draft_complete", "submitted", "won"] } }),
       db.collection("grants_scored").countDocuments({ status: { $in: ["passed", "auto_pass", "human_passed"] } }),
       db.collection("grants_scored").countDocuments({ deadline_urgent: true, status: { $in: ["triage", "pursue"] } }),
       db.collection("grants_raw").countDocuments({ processed: false }),
@@ -904,4 +904,62 @@ export async function markAllNotificationsRead(): Promise<void> {
     { read: false },
     { $set: { read: true, read_at: new Date().toISOString() } },
   );
+}
+
+// ── Reviewers ─────────────────────────────────────────────────────────────────
+
+export interface SectionReview {
+  score: number;
+  strengths: string[];
+  issues: string[];
+  suggestions: string[];
+}
+
+export interface DraftReview {
+  _id: string;
+  grant_id: string;
+  draft_id: string;
+  draft_version: number;
+  perspective: "funder" | "scientific";
+  overall_score: number;
+  section_reviews: Record<string, SectionReview>;
+  top_issues: string[];
+  strengths: string[];
+  verdict: string;
+  summary: string;
+  created_at: string;
+}
+
+export async function getReviewableGrants(): Promise<Grant[]> {
+  const db = await getDb();
+  const docs = await db
+    .collection("grants_scored")
+    .find({ status: { $in: ["draft_complete", "submitted", "won"] } })
+    .sort({ scored_at: -1 })
+    .limit(100)
+    .toArray();
+
+  return docs.map((doc) => {
+    const g = serializeId(doc as Record<string, unknown>) as unknown as Grant;
+    if (!g.grant_name && g.title) g.grant_name = g.title;
+    return g;
+  });
+}
+
+export async function getReviewsForGrant(grantId: string): Promise<{ funder: DraftReview | null; scientific: DraftReview | null }> {
+  const db = await getDb();
+  const docs = await db
+    .collection("draft_reviews")
+    .find({ grant_id: grantId })
+    .sort({ created_at: -1 })
+    .limit(10)
+    .toArray();
+
+  const result: { funder: DraftReview | null; scientific: DraftReview | null } = { funder: null, scientific: null };
+  for (const doc of docs) {
+    const r = serializeId(doc as Record<string, unknown>) as unknown as DraftReview;
+    if (r.perspective === "funder" && !result.funder) result.funder = r;
+    if (r.perspective === "scientific" && !result.scientific) result.scientific = r;
+  }
+  return result;
 }
