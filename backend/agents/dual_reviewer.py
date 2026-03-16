@@ -1,5 +1,12 @@
 """Dual-Perspective Reviewer — Funder + Scientific review of completed drafts.
 
+Each reviewer agent is configurable via agent_config (agent: "reviewer"):
+  - strictness: how harsh the scoring is (lenient / balanced / strict)
+  - focus_areas: what to prioritize in the review
+  - custom_criteria: additional evaluation criteria beyond the grant's own
+  - temperature: LLM creativity for the review
+  - custom_instructions: extra reviewer-specific guidance
+
 Standalone module (not a LangGraph node). Reads the latest draft from MongoDB,
 runs two independent LLM reviews in parallel, and stores results in draft_reviews.
 
@@ -13,36 +20,79 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from backend.utils.llm import chat, ANALYST_HEAVY
 
 logger = logging.getLogger(__name__)
 
-# ── Prompts ─────────────────────────────────────────────────────────────────
+# ── Default reviewer profiles ─────────────────────────────────────────────────
 
-FUNDER_PROMPT = """You are a senior grant program officer evaluating a grant application.
-You represent the funder and must decide whether this application deserves funding.
+REVIEWER_PROFILES: Dict[str, Dict] = {
+    "funder": {
+        "display_name": "Funder Perspective",
+        "role": "senior grant program officer",
+        "focus_areas": [
+            "Alignment with funder priorities",
+            "Budget justification and value for money",
+            "Measurable objectives and impact claims",
+            "Team credibility for the proposed scope",
+            "Competitiveness vs. typical winning applications",
+            "Compliance with submission requirements",
+        ],
+        "scoring_guidance": {
+            "lenient": "Be encouraging. Score generously — focus on potential. Flag only critical issues.",
+            "balanced": "Be fair and constructive. Acknowledge strengths before issues. Score based on realistic competitiveness.",
+            "strict": "Be demanding. Score as a skeptical program officer with limited funding. Every weakness matters.",
+        },
+        "default_temperature": 0.3,
+    },
+    "scientific": {
+        "display_name": "Scientific Perspective",
+        "role": "peer reviewer and domain scientist",
+        "focus_areas": [
+            "Methodology soundness and reproducibility",
+            "MRV rigor and data quality",
+            "Scientific novelty vs. incremental work",
+            "Scalability evidence and pathway",
+            "Uncertainties honestly acknowledged",
+            "Claims supported by data or citations",
+            "Technical feasibility of proposed approach",
+        ],
+        "scoring_guidance": {
+            "lenient": "Be supportive of emerging approaches. Accept preliminary data. Focus on scientific promise.",
+            "balanced": "Expect solid methodology but accept reasonable assumptions. Flag unsupported claims.",
+            "strict": "Peer-review standard. Every claim needs evidence. Methodology must be reproducible. No hand-waving.",
+        },
+        "default_temperature": 0.25,
+    },
+}
+
+# ── Prompt templates ──────────────────────────────────────────────────────────
+
+REVIEW_PROMPT = """You are a {role} evaluating a grant application.
+{role_context}
+
+SCORING APPROACH: {scoring_guidance}
 
 GRANT: {grant_title}
 FUNDER: {funder}
-FUNDING AMOUNT: {funding}
-DEADLINE: {deadline}
+{extra_context}
 
 EVALUATION CRITERIA (from the funder):
 {criteria}
 
+{custom_criteria_block}
+
+FOCUS YOUR REVIEW ON:
+{focus_areas}
+
+{custom_instructions_block}
+
 COMPLETE DRAFT APPLICATION:
 {draft}
 
-Review this application AS A FUNDER. Be rigorous and specific. Consider:
-1. Does the proposal clearly address the funder's stated priorities?
-2. Are the objectives measurable and achievable within the timeline?
-3. Is the budget justified and reasonable for the proposed work?
-4. How competitive is this vs. typical winning applications?
-5. Are impact claims backed by evidence or just aspirational?
-6. Does it follow submission requirements (word limits, sections)?
-7. Is the team credible for this scope of work?
+Review this application thoroughly. Be specific and constructive. {perspective_guidance}
 
 Respond ONLY with valid JSON:
 {{
@@ -50,53 +100,32 @@ Respond ONLY with valid JSON:
   "section_reviews": {{
     "<section_name>": {{
       "score": <int 1-10>,
-      "strengths": ["<specific strength from funder view>"],
-      "issues": ["<specific issue a funder would flag>"],
-      "suggestions": ["<actionable fix to improve competitiveness>"]
+      "strengths": ["<specific strength>"],
+      "issues": ["<specific issue>"],
+      "suggestions": ["<actionable fix>"]
     }}
   }},
   "top_issues": ["<most critical issue 1>", "<issue 2>", "<issue 3>"],
   "strengths": ["<key strength 1>", "<strength 2>", "<strength 3>"],
   "verdict": "<one of: strong_submit | submit_with_revisions | major_revisions | reconsider>",
-  "summary": "<2-3 sentence funder assessment — would you fund this? why or why not?>"
+  "summary": "<2-3 sentence assessment>"
 }}"""
 
-SCIENTIFIC_PROMPT = """You are a peer reviewer and domain scientist evaluating a grant application
-for scientific and technical rigor.
+PERSPECTIVE_GUIDANCE = {
+    "funder": (
+        "Consider: Would you fund this? Is the money well-spent? "
+        "Does this stand out from competing proposals? Is the team credible?"
+    ),
+    "scientific": (
+        "Consider: Is the science solid? Are methods reproducible? "
+        "Are claims evidence-based? What's missing from a technical standpoint?"
+    ),
+}
 
-GRANT: {grant_title}
-FUNDER: {funder}
-THEMES: {themes}
-
-COMPLETE DRAFT APPLICATION:
-{draft}
-
-Review this application AS A SCIENTIST. Be thorough and technical. Evaluate:
-1. Is the methodology scientifically sound and well-described?
-2. Are MRV (Measurement, Reporting, Verification) approaches rigorous?
-3. Are data quality claims and baselines credible?
-4. Is the scalability pathway realistic given the evidence?
-5. Does it demonstrate scientific novelty or just incremental work?
-6. Are uncertainties and limitations honestly acknowledged?
-7. Are claims properly supported by data, citations, or preliminary results?
-8. Is the technical approach appropriate for the stated objectives?
-
-Respond ONLY with valid JSON:
-{{
-  "overall_score": <float 1-10>,
-  "section_reviews": {{
-    "<section_name>": {{
-      "score": <int 1-10>,
-      "strengths": ["<specific technical strength>"],
-      "issues": ["<scientific concern or gap>"],
-      "suggestions": ["<specific technical improvement>"]
-    }}
-  }},
-  "top_issues": ["<most critical scientific issue 1>", "<issue 2>", "<issue 3>"],
-  "strengths": ["<key technical strength 1>", "<strength 2>", "<strength 3>"],
-  "verdict": "<one of: strong_submit | submit_with_revisions | major_revisions | reconsider>",
-  "summary": "<2-3 sentence scientific assessment — is the science solid? what's missing?>"
-}}"""
+ROLE_CONTEXT = {
+    "funder": "You represent the funder and must decide whether this application deserves funding over other proposals.",
+    "scientific": "You are evaluating the scientific and technical rigor of this proposal for a funding body.",
+}
 
 
 # ── Core logic ──────────────────────────────────────────────────────────────
@@ -115,13 +144,15 @@ async def _run_single_review(
     grant: Dict,
     draft_text: str,
     perspective: str,
-    prompt_template: str,
+    settings: Dict,
 ) -> Dict:
-    """Run a single review perspective and return structured result."""
-    # Build context
-    criteria = ""
+    """Run a single review perspective with configurable settings."""
+    profile = REVIEWER_PROFILES.get(perspective, REVIEWER_PROFILES["funder"])
+
+    # Build grant context
     deep = grant.get("deep_analysis") or {}
     eval_criteria = deep.get("evaluation_criteria") or grant.get("evaluation_criteria") or []
+    criteria = ""
     if eval_criteria:
         criteria = "\n".join(
             f"- {c.get('criterion', '')}: {c.get('what_they_look_for', c.get('description', ''))} "
@@ -131,23 +162,61 @@ async def _run_single_review(
     else:
         criteria = "No explicit criteria provided — evaluate based on standard grant review practices."
 
-    themes = ", ".join(grant.get("themes_detected", [])) or "Not specified"
-    funding = grant.get("max_funding_usd") or grant.get("max_funding") or grant.get("amount") or "Not specified"
-    if isinstance(funding, (int, float)):
-        funding = f"${funding:,.0f}"
+    # Extra context varies by perspective
+    extra_parts = []
+    if perspective == "funder":
+        funding = grant.get("max_funding_usd") or grant.get("max_funding") or grant.get("amount") or "Not specified"
+        if isinstance(funding, (int, float)):
+            funding = f"${funding:,.0f}"
+        extra_parts.append(f"FUNDING AMOUNT: {funding}")
+        extra_parts.append(f"DEADLINE: {grant.get('deadline') or 'Not specified'}")
+    else:
+        themes = ", ".join(grant.get("themes_detected", [])) or "Not specified"
+        extra_parts.append(f"THEMES: {themes}")
+    extra_context = "\n".join(extra_parts)
 
-    prompt = prompt_template.format(
+    # Settings
+    strictness = settings.get("strictness", "balanced")
+    scoring_guidance = profile["scoring_guidance"].get(strictness, profile["scoring_guidance"]["balanced"])
+
+    # Focus areas: user overrides + defaults
+    user_focus = settings.get("focus_areas", [])
+    focus_list = user_focus if user_focus else profile["focus_areas"]
+    focus_areas = "\n".join(f"- {f}" for f in focus_list)
+
+    # Custom criteria
+    custom_criteria = settings.get("custom_criteria", [])
+    custom_criteria_block = ""
+    if custom_criteria:
+        custom_criteria_block = "ADDITIONAL EVALUATION CRITERIA (weight these equally):\n" + "\n".join(
+            f"- {c}" for c in custom_criteria
+        )
+
+    # Custom instructions
+    custom_instructions = settings.get("custom_instructions", "")
+    custom_instructions_block = ""
+    if custom_instructions:
+        custom_instructions_block = f"REVIEWER INSTRUCTIONS:\n{custom_instructions}"
+
+    temperature = settings.get("temperature") or profile.get("default_temperature", 0.3)
+
+    prompt = REVIEW_PROMPT.format(
+        role=profile["role"],
+        role_context=ROLE_CONTEXT.get(perspective, ""),
+        scoring_guidance=scoring_guidance,
         grant_title=grant.get("title") or grant.get("grant_name") or "Untitled",
         funder=grant.get("funder") or "Unknown",
-        funding=funding,
-        deadline=grant.get("deadline") or "Not specified",
-        themes=themes,
+        extra_context=extra_context,
         criteria=criteria,
+        custom_criteria_block=custom_criteria_block,
+        focus_areas=focus_areas,
+        custom_instructions_block=custom_instructions_block,
         draft=draft_text[:30000],
+        perspective_guidance=PERSPECTIVE_GUIDANCE.get(perspective, ""),
     )
 
     try:
-        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=3000)
+        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=3000, temperature=temperature)
         review = _parse_json_response(raw)
     except json.JSONDecodeError as e:
         logger.error("Review JSON parse failed (%s): %s", perspective, e)
@@ -182,10 +251,11 @@ def _fallback_review(perspective: str, error: str) -> Dict:
 async def run_dual_review(grant_id: str) -> Dict:
     """Run funder + scientific reviews on the latest draft for a grant.
 
+    Loads reviewer settings from agent_config, then runs both perspectives in parallel.
     Returns {"funder": {...}, "scientific": {...}} with full review data.
     Stores both reviews in the draft_reviews collection.
     """
-    from backend.db.mongo import grant_drafts, grants_scored, draft_reviews
+    from backend.db.mongo import grant_drafts, grants_scored, draft_reviews, agent_config
     from bson import ObjectId
 
     # Load grant
@@ -211,16 +281,23 @@ async def run_dual_review(grant_id: str) -> Dict:
     if not draft_text.strip():
         raise ValueError("Draft has no content")
 
+    # Load reviewer settings
+    reviewer_cfg = await agent_config().find_one({"agent": "reviewer"}) or {}
+    funder_settings = reviewer_cfg.get("funder", {})
+    scientific_settings = reviewer_cfg.get("scientific", {})
+
     grant_title = grant.get("title") or grant.get("grant_name") or "Untitled"
     logger.info(
-        "Starting dual review for '%s' (grant_id=%s, draft v%d)",
+        "Starting dual review for '%s' (grant_id=%s, draft v%d, funder_strictness=%s, sci_strictness=%s)",
         grant_title, grant_id, draft_doc.get("version", 0),
+        funder_settings.get("strictness", "balanced"),
+        scientific_settings.get("strictness", "balanced"),
     )
 
     # Run both perspectives in parallel
     funder_result, scientific_result = await asyncio.gather(
-        _run_single_review(grant, draft_text, "funder", FUNDER_PROMPT),
-        _run_single_review(grant, draft_text, "scientific", SCIENTIFIC_PROMPT),
+        _run_single_review(grant, draft_text, "funder", funder_settings),
+        _run_single_review(grant, draft_text, "scientific", scientific_settings),
     )
 
     now = datetime.now(timezone.utc).isoformat()

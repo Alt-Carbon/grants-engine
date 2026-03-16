@@ -263,6 +263,11 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         grant_theme, section_name, grant.get("title", ""), grant_themes, company_context,
     )
 
+    # Load drafter settings from agent_config
+    from backend.db.mongo import agent_config
+    drafter_cfg = await agent_config().find_one({"agent": "drafter"}) or {}
+    theme_settings = (drafter_cfg.get("theme_settings") or {}).get(grant_theme) or {}
+
     result = await write_section(
         section=section,
         section_num=current_idx + 1,
@@ -273,6 +278,14 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         theme_key=grant_theme,
         section_context=section_ctx,
         draft_outline=draft_outline,
+        writing_style=drafter_cfg.get("writing_style", "professional"),
+        custom_instructions=drafter_cfg.get("custom_instructions", ""),
+        temperature=theme_settings.get("temperature") or drafter_cfg.get("temperature"),
+        tone_override=theme_settings.get("tone", ""),
+        voice_override=theme_settings.get("voice", ""),
+        strengths_override=theme_settings.get("strengths") or None,
+        domain_terms_override=theme_settings.get("domain_terms") or None,
+        theme_instructions=theme_settings.get("custom_instructions", ""),
     )
 
     # ── Notion Mission Control sync ──────────────────────────────────────────

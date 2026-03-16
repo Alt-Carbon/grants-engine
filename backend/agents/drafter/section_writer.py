@@ -25,8 +25,10 @@ logger = logging.getLogger(__name__)
 
 WRITE_PROMPT = """You are writing a section of a grant application for AltCarbon.
 
+WRITING STYLE: {writing_style}
 THEME CONTEXT: {theme_display}
 {tone_guidance}
+{voice_guidance}
 
 DOMAIN TERMINOLOGY (use these terms naturally where relevant):
 {domain_terms}
@@ -51,6 +53,8 @@ COMPANY KNOWLEDGE FOR THIS SECTION (use as primary evidence base):
 STYLE EXAMPLES (match this voice and tone — these are AltCarbon's past applications):
 {style_examples}
 
+{custom_instructions_block}
+
 {revision_block}
 
 INSTRUCTIONS:
@@ -58,7 +62,7 @@ INSTRUCTIONS:
 - Stay within the word limit
 - Ground every claim in the company knowledge provided
 - Use the domain terminology naturally — don't force it, but prefer precise terms
-- Follow the tone guidance for this theme
+- Follow the tone and voice guidance consistently
 - If an outline was provided, ensure this section aligns with the overall narrative
 - Match AltCarbon's voice from the style examples
 - For any required claim you cannot support with the provided knowledge, write exactly: [EVIDENCE NEEDED: <brief description of what's missing>]
@@ -168,6 +172,15 @@ async def write_section(
     theme_key: str = "",
     section_context: str = "",
     draft_outline: str = "",
+    # Drafter settings overrides
+    writing_style: str = "professional",
+    custom_instructions: str = "",
+    temperature: Optional[float] = None,
+    tone_override: str = "",
+    voice_override: str = "",
+    strengths_override: Optional[List[str]] = None,
+    domain_terms_override: Optional[List[str]] = None,
+    theme_instructions: str = "",
 ) -> Dict:
     """Write or rewrite a single section. Returns section dict with content + metadata."""
     from backend.agents.drafter.theme_profiles import get_theme_profile
@@ -179,9 +192,37 @@ async def write_section(
     # Load theme profile
     profile = get_theme_profile(theme_key) if theme_key else {}
     theme_display = profile.get("display_name", "Climate Tech / CDR")
-    tone_guidance = f"TONE: {profile['tone']}" if profile.get("tone") else ""
-    domain_terms = ", ".join(profile.get("domain_terms", [])[:12]) if profile.get("domain_terms") else "CDR, ERW, biochar, MRV, carbon credits"
-    strengths = "\n".join(f"- {s}" for s in profile.get("strengths", [])) if profile.get("strengths") else ""
+
+    # Tone: user override > theme profile
+    tone_text = tone_override or profile.get("tone", "")
+    tone_guidance = f"TONE: {tone_text}" if tone_text else ""
+
+    # Voice: user override
+    voice_guidance = f"VOICE: {voice_override}" if voice_override else ""
+
+    # Domain terms: user override > theme profile
+    terms_list = domain_terms_override if domain_terms_override else profile.get("domain_terms", [])
+    domain_terms = ", ".join(terms_list[:12]) if terms_list else "CDR, ERW, biochar, MRV, carbon credits"
+
+    # Strengths: user override > theme profile
+    strengths_list = strengths_override if strengths_override else profile.get("strengths", [])
+    strengths = "\n".join(f"- {s}" for s in strengths_list) if strengths_list else ""
+
+    # Writing style description
+    style_desc = {
+        "professional": "Professional & Corporate — clear, formal, confident. Use strong assertions, structured arguments, and business-oriented language.",
+        "scientific": "Scientific & Academic — rigorous, precise, evidence-driven. Use technical terminology, cite methodologies, and maintain scholarly tone.",
+    }.get(writing_style, writing_style)
+
+    # Custom instructions block — merge global + theme-specific
+    all_instructions = []
+    if custom_instructions:
+        all_instructions.append(custom_instructions)
+    if theme_instructions:
+        all_instructions.append(theme_instructions)
+    custom_instructions_block = ""
+    if all_instructions:
+        custom_instructions_block = f"CUSTOM INSTRUCTIONS (follow these closely):\n" + "\n".join(all_instructions)
 
     criteria_text = ""
     eval_criteria = grant.get("evaluation_criteria", [])
@@ -210,8 +251,10 @@ async def write_section(
     effective_context = section_context if section_context else (company_context[:6000] if company_context else "No company context available.")
 
     prompt = WRITE_PROMPT.format(
+        writing_style=style_desc,
         theme_display=theme_display,
         tone_guidance=tone_guidance,
+        voice_guidance=voice_guidance,
         domain_terms=domain_terms,
         strengths=strengths,
         grant_title=grant.get("title", ""),
@@ -226,11 +269,15 @@ async def write_section(
         criteria=criteria_text,
         section_context=effective_context,
         style_examples=style_examples[:2000] if style_examples else "No style examples available.",
+        custom_instructions_block=custom_instructions_block,
         revision_block=revision_block,
     )
 
     try:
-        content = await chat(prompt, model=model or DRAFTER_DEFAULT, max_tokens=2048)
+        content = await chat(
+            prompt, model=model or DRAFTER_DEFAULT, max_tokens=2048,
+            temperature=temperature,
+        )
         content = content.strip()
     except Exception as e:
         logger.error("Section writer failed for %s: %s", section_name, e)

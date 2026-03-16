@@ -14,6 +14,7 @@ import {
   Activity,
   LogOut,
   ClipboardCheck,
+  Settings2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AgentControls } from "./AgentControls";
@@ -22,8 +23,8 @@ import { NotificationBell } from "./NotificationBell";
 const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: BarChart3 },
   { href: "/pipeline", label: "Pipeline", icon: Kanban },
-  { href: "/drafter", label: "Drafter", icon: FileText },
-  { href: "/reviewers", label: "Reviewers", icon: ClipboardCheck },
+  { href: "/drafter", label: "Drafter", icon: FileText, settingsHref: "/drafter/settings" },
+  { href: "/reviewers", label: "Reviewers", icon: ClipboardCheck, settingsHref: "/reviewers/settings" },
   { href: "/monitoring", label: "Mission Control", icon: Activity },
   { href: "/knowledge", label: "Knowledge", icon: Database },
 ];
@@ -58,24 +59,40 @@ export function Sidebar() {
 
       {/* Nav */}
       <nav className="flex flex-1 flex-col gap-1 p-3">
-        {NAV.map(({ href, label, icon: Icon }) => {
+        {NAV.map(({ href, label, icon: Icon, settingsHref }) => {
           const active =
             pathname === href || pathname.startsWith(href + "/");
           return (
-            <Link
-              key={href}
-              href={href}
-              onClick={() => setMobileOpen(false)}
-              className={cn(
-                "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                active
-                  ? "bg-blue-700 text-white"
-                  : "text-gray-400 hover:bg-gray-800 hover:text-white"
+            <div key={href} className="flex items-center gap-0.5">
+              <Link
+                href={href}
+                onClick={() => setMobileOpen(false)}
+                className={cn(
+                  "flex flex-1 items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                  active
+                    ? "bg-blue-700 text-white"
+                    : "text-gray-400 hover:bg-gray-800 hover:text-white"
+                )}
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                {label}
+              </Link>
+              {settingsHref && (
+                <Link
+                  href={settingsHref}
+                  onClick={() => setMobileOpen(false)}
+                  className={cn(
+                    "shrink-0 rounded-lg p-1.5 transition-colors",
+                    pathname === settingsHref
+                      ? "text-white bg-blue-700"
+                      : "text-gray-600 hover:bg-gray-800 hover:text-gray-300"
+                  )}
+                  title={`${label} settings`}
+                >
+                  <Settings2 className="h-3.5 w-3.5" />
+                </Link>
               )}
-            >
-              <Icon className="h-4 w-4 shrink-0" />
-              {label}
-            </Link>
+            </div>
           );
         })}
       </nav>
