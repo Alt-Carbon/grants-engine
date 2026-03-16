@@ -2552,6 +2552,64 @@ async def get_reviews(grant_id: str, _: None = Depends(verify_internal)):
     return result
 
 
+# ── Feedback Learning endpoints ───────────────────────────────────────────────
+
+class RecordOutcomeRequest(BaseModel):
+    grant_id: str
+    outcome: str  # "won" | "rejected" | "shortlisted" | "withdrawn"
+    feedback: str = ""
+    section_feedback: Optional[Dict] = None
+    lessons_learned: Optional[List[str]] = None
+    what_worked: Optional[List[str]] = None
+    what_failed: Optional[List[str]] = None
+
+
+@app.post("/outcomes/record")
+async def record_grant_outcome(
+    body: RecordOutcomeRequest,
+    _: None = Depends(verify_internal),
+):
+    """Record the real-world outcome of a grant application for feedback learning."""
+    from backend.agents.feedback_learner import record_outcome
+
+    try:
+        doc = await record_outcome(
+            grant_id=body.grant_id,
+            outcome=body.outcome,
+            feedback=body.feedback,
+            section_feedback=body.section_feedback,
+            lessons_learned=body.lessons_learned,
+            what_worked=body.what_worked,
+            what_failed=body.what_failed,
+        )
+        return {"status": "recorded", "grant_id": body.grant_id, "outcome": body.outcome, "lessons": len(doc.get("lessons_learned", []))}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Record outcome failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/outcomes/{grant_id}")
+async def get_grant_outcome(grant_id: str, _: None = Depends(verify_internal)):
+    """Get the recorded outcome for a grant."""
+    from backend.db.mongo import grant_outcomes
+
+    doc = await grant_outcomes().find_one({"grant_id": grant_id})
+    if not doc:
+        return {"grant_id": grant_id, "outcome": None}
+    doc["_id"] = str(doc["_id"])
+    return doc
+
+
+@app.get("/outcomes/funder/{funder_name}")
+async def get_funder_insights_endpoint(funder_name: str, _: None = Depends(verify_internal)):
+    """Get aggregated insights for a funder based on past outcomes."""
+    from backend.agents.feedback_learner import get_funder_insights
+
+    return await get_funder_insights(funder_name)
+
+
 # ── Status endpoints ───────────────────────────────────────────────────────────
 
 @app.get("/status/pipeline")

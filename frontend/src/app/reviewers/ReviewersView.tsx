@@ -12,6 +12,10 @@ import {
   ChevronUp,
   Banknote,
   FlaskConical,
+  Trophy,
+  Ban,
+  Save,
+  BookOpen,
 } from "lucide-react";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -409,9 +413,174 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
                 )}
               </div>
             )}
+
+            {/* Outcome Recorder */}
+            {selectedId && (
+              <OutcomeRecorder grantId={selectedId} />
+            )}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Outcome Recorder ─────────────────────────────────────────────────────────
+
+const OUTCOMES = [
+  { value: "won", label: "Won", icon: Trophy, color: "emerald" },
+  { value: "rejected", label: "Rejected", icon: Ban, color: "red" },
+  { value: "shortlisted", label: "Shortlisted", icon: BookOpen, color: "amber" },
+];
+
+function OutcomeRecorder({ grantId }: { grantId: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [outcome, setOutcome] = useState<string>("");
+  const [feedback, setFeedback] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [existing, setExisting] = useState<string | null>(null);
+
+  // Load existing outcome
+  useEffect(() => {
+    setOutcome("");
+    setFeedback("");
+    setSaved(false);
+    setExisting(null);
+    fetch(`/api/outcomes/${grantId}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.outcome) {
+          setExisting(data.outcome);
+          setOutcome(data.outcome);
+          setFeedback(data.feedback || "");
+        }
+      })
+      .catch(() => {});
+  }, [grantId]);
+
+  const handleSave = async () => {
+    if (!outcome) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/outcomes/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          grant_id: grantId,
+          outcome,
+          feedback,
+        }),
+      });
+      if (res.ok) {
+        setSaved(true);
+        setExisting(outcome);
+      }
+    } catch {
+      // silent
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <button
+        onClick={() => setExpanded((o) => !o)}
+        className="flex w-full items-center gap-3 px-5 py-4 text-left hover:bg-gray-50 transition-colors"
+      >
+        <BookOpen className="h-5 w-5 text-gray-400" />
+        <span className="flex-1 text-sm font-semibold text-gray-800">
+          Record Outcome
+          {existing && (
+            <span className={`ml-2 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+              existing === "won" ? "bg-emerald-100 text-emerald-700" :
+              existing === "rejected" ? "bg-red-100 text-red-700" :
+              "bg-amber-100 text-amber-700"
+            }`}>
+              {existing}
+            </span>
+          )}
+        </span>
+        <span className="text-[10px] text-gray-400">Feedback helps the drafter learn</span>
+        {expanded ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+      </button>
+
+      {expanded && (
+        <div className="border-t border-gray-100 px-5 py-5 space-y-4">
+          {/* Outcome selection */}
+          <div>
+            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-2 block">
+              What happened?
+            </label>
+            <div className="flex gap-2">
+              {OUTCOMES.map((o) => {
+                const selected = outcome === o.value;
+                const Icon = o.icon;
+                return (
+                  <button
+                    key={o.value}
+                    onClick={() => setOutcome(o.value)}
+                    className={`flex items-center gap-2 rounded-lg border-2 px-4 py-2 text-sm font-semibold transition-all ${
+                      selected
+                        ? o.color === "emerald"
+                          ? "border-emerald-600 bg-emerald-50 text-emerald-700"
+                          : o.color === "red"
+                          ? "border-red-600 bg-red-50 text-red-700"
+                          : "border-amber-600 bg-amber-50 text-amber-700"
+                        : "border-gray-200 text-gray-600 hover:border-gray-300"
+                    }`}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {o.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Feedback */}
+          <div>
+            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-1.5 block">
+              Funder Feedback
+            </label>
+            <p className="text-[10px] text-gray-400 mb-2">
+              Paste the funder&apos;s rejection/acceptance feedback. The system will extract lessons automatically.
+            </p>
+            <textarea
+              value={feedback}
+              onChange={(e) => { setFeedback(e.target.value); setSaved(false); }}
+              rows={5}
+              className="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+              placeholder={
+                outcome === "rejected"
+                  ? "e.g., MRV section lacked specificity. Budget was not justified for the proposed scope. Team section did not demonstrate relevant experience in tropical deployments..."
+                  : outcome === "won"
+                  ? "e.g., Strong technical approach. MRV methodology was particularly compelling. Budget was well-justified..."
+                  : "Paste any feedback from the funder..."
+              }
+            />
+          </div>
+
+          {/* Save */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSave}
+              disabled={!outcome || saving}
+              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:opacity-50"
+            >
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {saving ? "Saving..." : "Save & Extract Lessons"}
+            </button>
+            {saved && (
+              <span className="flex items-center gap-1.5 text-sm font-medium text-green-600">
+                <CheckCircle className="h-4 w-4" />
+                Saved — lessons will be used in future drafts
+              </span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

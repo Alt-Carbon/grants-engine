@@ -55,6 +55,8 @@ STYLE EXAMPLES (match this voice and tone — these are AltCarbon's past applica
 
 {custom_instructions_block}
 
+{past_outcomes_block}
+
 {revision_block}
 
 INSTRUCTIONS:
@@ -181,6 +183,7 @@ async def write_section(
     strengths_override: Optional[List[str]] = None,
     domain_terms_override: Optional[List[str]] = None,
     theme_instructions: str = "",
+    past_outcomes: str = "",
 ) -> Dict:
     """Write or rewrite a single section. Returns section dict with content + metadata."""
     from backend.agents.drafter.theme_profiles import get_theme_profile
@@ -223,6 +226,9 @@ async def write_section(
     custom_instructions_block = ""
     if all_instructions:
         custom_instructions_block = f"CUSTOM INSTRUCTIONS (follow these closely):\n" + "\n".join(all_instructions)
+
+    # Past outcomes block — lessons from previous applications
+    past_outcomes_block = past_outcomes if past_outcomes else ""
 
     criteria_text = ""
     eval_criteria = grant.get("evaluation_criteria", [])
@@ -270,6 +276,7 @@ async def write_section(
         section_context=effective_context,
         style_examples=style_examples[:2000] if style_examples else "No style examples available.",
         custom_instructions_block=custom_instructions_block,
+        past_outcomes_block=past_outcomes_block,
         revision_block=revision_block,
     )
 

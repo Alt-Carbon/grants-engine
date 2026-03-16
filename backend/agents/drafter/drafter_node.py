@@ -268,6 +268,18 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
     drafter_cfg = await agent_config().find_one({"agent": "drafter"}) or {}
     theme_settings = (drafter_cfg.get("theme_settings") or {}).get(grant_theme) or {}
 
+    # Retrieve lessons from past grant outcomes (feedback learning)
+    past_outcomes = ""
+    try:
+        from backend.agents.feedback_learner import get_lessons_for_grant
+        funder = grant.get("funder", "")
+        grant_themes = grant.get("themes_detected", [])
+        past_outcomes = await get_lessons_for_grant(funder=funder, themes=grant_themes)
+        if past_outcomes:
+            logger.info("Drafter: loaded past outcome lessons for funder=%s (%d chars)", funder, len(past_outcomes))
+    except Exception as e:
+        logger.debug("Drafter: feedback learner unavailable: %s", e)
+
     result = await write_section(
         section=section,
         section_num=current_idx + 1,
@@ -286,6 +298,7 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         strengths_override=theme_settings.get("strengths") or None,
         domain_terms_override=theme_settings.get("domain_terms") or None,
         theme_instructions=theme_settings.get("custom_instructions", ""),
+        past_outcomes=past_outcomes,
     )
 
     # ── Notion Mission Control sync ──────────────────────────────────────────

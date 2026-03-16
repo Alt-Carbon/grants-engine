@@ -42,6 +42,9 @@ def grant_drafts():
 def draft_reviews():
     return get_db()["draft_reviews"]
 
+def grant_outcomes():
+    return get_db()["grant_outcomes"]
+
 def knowledge_chunks():
     return get_db()["knowledge_chunks"]
 
@@ -113,6 +116,12 @@ async def ensure_indexes():
     await _idx("draft_reviews", "grant_id")
     await _idx("draft_reviews", [("grant_id", 1), ("perspective", 1)])
     await _idx("draft_reviews", [("created_at", -1)])
+
+    # grant_outcomes (feedback learning)
+    await _idx("grant_outcomes", "grant_id", unique=True)
+    await _idx("grant_outcomes", "funder")
+    await _idx("grant_outcomes", [("themes", 1)])
+    await _idx("grant_outcomes", [("outcome", 1), ("created_at", -1)])
 
     # knowledge_chunks
     await _idx("knowledge_chunks", "source_id")
