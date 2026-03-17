@@ -34,12 +34,12 @@ def setup_scheduler() -> None:
         logger.info("APScheduler disabled via DISABLE_SCHEDULER env var")
         return
 
-    # Scout: Mon & Thu at 2 AM UTC (replaces IntervalTrigger(hours=48))
+    # Scout: Monday 8 AM IST (= 2:30 AM UTC) — weekly
     scheduler.add_job(
         _safe_scout,
-        trigger=CronTrigger(day_of_week="mon,thu", hour=2, minute=0),
+        trigger=CronTrigger(day_of_week="mon", hour=2, minute=30),
         id="scout_cron",
-        name="Scout Discovery (Mon/Thu 2AM UTC)",
+        name="Scout Discovery (Mon 8AM IST / 2:30AM UTC)",
         replace_existing=True,
         misfire_grace_time=3600,
     )
