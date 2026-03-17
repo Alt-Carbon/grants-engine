@@ -18,18 +18,30 @@ scheduler = AsyncIOScheduler()
 
 
 def setup_scheduler() -> None:
-    """Register all recurring jobs. Called during FastAPI lifespan startup."""
-    from backend.jobs.scout_job import run_scout_pipeline
-    from backend.jobs.knowledge_job import run_knowledge_sync
+    """Register all recurring jobs. Called during FastAPI lifespan startup.
 
-    # Scout: every 48 hours
+    Uses CronTrigger for predictable schedules instead of IntervalTrigger
+    (which resets on every deploy). This means:
+    - Scout runs at 2 AM UTC on Mon/Thu (twice per week)
+    - Knowledge sync runs at 3 AM UTC daily
+    - Profile rebuild runs at 4 AM UTC on Sundays
+    - Notion polling runs every 30 minutes
+    """
+    import os
+
+    # Skip scheduler in test/dev if DISABLE_SCHEDULER is set
+    if os.getenv("DISABLE_SCHEDULER", "").lower() in ("1", "true", "yes"):
+        logger.info("APScheduler disabled via DISABLE_SCHEDULER env var")
+        return
+
+    # Scout: Mon & Thu at 2 AM UTC (replaces IntervalTrigger(hours=48))
     scheduler.add_job(
         _safe_scout,
-        trigger=IntervalTrigger(hours=48),
+        trigger=CronTrigger(day_of_week="mon,thu", hour=2, minute=0),
         id="scout_cron",
-        name="Scout Discovery (48h)",
+        name="Scout Discovery (Mon/Thu 2AM UTC)",
         replace_existing=True,
-        misfire_grace_time=3600,  # 1h grace for missed runs
+        misfire_grace_time=3600,
     )
 
     # Knowledge sync: daily at 3 AM UTC
@@ -52,7 +64,7 @@ def setup_scheduler() -> None:
         misfire_grace_time=7200,
     )
 
-    # Notion change detection: every 30 min (polling fallback for webhooks)
+    # Notion change detection: every 30 min
     scheduler.add_job(
         _safe_check_notion_changes,
         trigger=IntervalTrigger(minutes=30),
@@ -68,6 +80,11 @@ def setup_scheduler() -> None:
         len(scheduler.get_jobs()),
         ", ".join(j.id for j in scheduler.get_jobs()),
     )
+
+    # Log next run times
+    for job in scheduler.get_jobs():
+        next_run = job.next_run_time.isoformat() if job.next_run_time else "none"
+        logger.info("  %s → next run: %s", job.name, next_run)
 
 
 def teardown_scheduler() -> None:
