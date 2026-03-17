@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { Sidebar } from "@/components/Sidebar";
 import { SessionProvider } from "@/components/SessionProvider";
+import { ToastProvider } from "@/components/Toast";
 import { auth } from "@/lib/auth";
 
 export const metadata: Metadata = {
@@ -21,16 +22,18 @@ export default async function RootLayout({
     <html lang="en">
       <body>
         <SessionProvider>
-          {isLoginPage ? (
-            children
-          ) : (
-            <div className="flex h-screen overflow-hidden">
-              <Sidebar />
-              <main className="flex flex-1 flex-col overflow-y-auto pt-14 lg:pt-0">
-                {children}
-              </main>
-            </div>
-          )}
+          <ToastProvider>
+            {isLoginPage ? (
+              children
+            ) : (
+              <div className="flex h-screen overflow-hidden">
+                <Sidebar />
+                <main className="flex flex-1 flex-col overflow-y-auto pt-14 lg:pt-0">
+                  {children}
+                </main>
+              </div>
+            )}
+          </ToastProvider>
         </SessionProvider>
       </body>
     </html>

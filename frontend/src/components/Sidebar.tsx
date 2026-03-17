@@ -15,6 +15,7 @@ import {
   LogOut,
   ClipboardCheck,
   Settings2,
+  ScrollText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AgentControls } from "./AgentControls";
@@ -27,6 +28,7 @@ const NAV = [
   { href: "/reviewers", label: "Reviewers", icon: ClipboardCheck, settingsHref: "/reviewers/settings" },
   { href: "/monitoring", label: "Mission Control", icon: Activity },
   { href: "/knowledge", label: "Knowledge", icon: Database },
+  { href: "/audit", label: "Audit Log", icon: ScrollText },
 ];
 
 export function Sidebar() {

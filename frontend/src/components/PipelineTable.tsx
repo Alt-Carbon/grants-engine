@@ -4,6 +4,7 @@ import { useState, useMemo } from "react";
 import { StatusPicker } from "./StatusPicker";
 import { DeadlineChip } from "./DeadlineChip";
 import { GrantDetailSheet } from "./GrantDetailSheet";
+import { Pagination } from "./Pagination";
 import { getPriority, getThemeLabel } from "@/lib/utils";
 import { useLastSeen, isNewSince } from "@/hooks/useLastSeen";
 import { useGrantUrl } from "@/hooks/useGrantUrl";
@@ -99,6 +100,8 @@ export function PipelineTable({
   const [statusFilter, setStatusFilter] = useState<string>(defaultFilter);
   const [sortField, setSortField] = useState<SortField>("weighted_total");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
   const [selectedGrantId, setSelectedGrantId] = useGrantUrl();
   const { lastSeenAt } = useLastSeen();
 
@@ -276,6 +279,7 @@ export function PipelineTable({
               key={tab.id}
               onClick={() => {
                 setStatusFilter(tab.id);
+                setPage(1);
                 // Auto-sort by date when clicking "New"
                 if (isNewTab) {
                   setSortField("scored_at");
@@ -341,7 +345,7 @@ export function PipelineTable({
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {sorted.map((grant, i) => {
+              {sorted.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map((grant, i) => {
                 const name = grant.grant_name || grant.title || "Unnamed";
                 const funding = grant.max_funding_usd || grant.max_funding;
                 const addedDate = grant.scored_at || grant.scraped_at;
@@ -478,6 +482,13 @@ export function PipelineTable({
           </table>
         )}
       </div>
+
+      <Pagination
+        page={page}
+        pageSize={PAGE_SIZE}
+        total={sorted.length}
+        onPageChange={setPage}
+      />
 
       <p className="text-xs text-gray-400">
         {sorted.length} grant{sorted.length !== 1 ? "s" : ""}
