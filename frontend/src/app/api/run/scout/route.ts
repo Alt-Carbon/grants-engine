@@ -1,7 +1,9 @@
 /**
- * POST /api/run/scout   — trigger a manual scout run
+ * POST /api/run/scout   — trigger a manual scout run (forwards user identity)
  * GET  /api/run/scout   — poll scout job status
  */
+import { proxyHeaders } from "@/lib/api";
+
 function env() {
   return {
     url: (process.env.FASTAPI_URL ?? "").replace(/\/+$/, ""),
@@ -10,14 +12,11 @@ function env() {
 }
 
 export async function POST() {
-  const { url, secret } = env();
+  const { url } = env();
   try {
     const res = await fetch(`${url}/run/scout`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-internal-secret": secret,
-      },
+      headers: await proxyHeaders(),
       cache: "no-store",
     });
     const data = await res.json();

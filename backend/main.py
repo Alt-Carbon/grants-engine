@@ -381,10 +381,18 @@ def verify_cron(x_cron_secret: Optional[str] = Header(default=None)):
         raise HTTPException(status_code=401, detail="Invalid cron secret")
 
 
-def verify_internal(x_internal_secret: Optional[str] = Header(default=None)):
+def verify_internal(
+    x_internal_secret: Optional[str] = Header(default=None),
+    x_user_email: Optional[str] = Header(default=None),
+):
     expected = os.environ.get("INTERNAL_SECRET", "dev-internal-secret")
     if x_internal_secret != expected:
         raise HTTPException(status_code=401, detail="Invalid internal secret")
+
+
+def get_user_email(x_user_email: Optional[str] = Header(default=None)) -> str:
+    """Extract user email from request headers. Use as a Depends()."""
+    return x_user_email or "system"
 
 
 # ── Request/Response models ────────────────────────────────────────────────────
@@ -1478,6 +1486,7 @@ async def resume_triage(
     body: TriageResumeRequest,
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
     """Human made triage decision. Resume graph from human_triage node.
 
@@ -1503,13 +1512,9 @@ async def resume_triage(
                 "Failed to persist human_override for grant %s: %s", body.grant_id, exc
             )
 
-    # ── Notion Mission Control sync — log triage decision ──────────────
+    # ── Audit log — record who triaged ──────────────────────────────────
     try:
-        from backend.integrations.notion_sync import (
-            log_triage_decision,
-            update_grant_status,
-        )
-        from backend.db.mongo import grants_scored as _gs
+        from backend.db.mongo import audit_logs, grants_scored as _gs
         from bson import ObjectId as _ObjId
         _grant_doc = await _gs().find_one({"_id": _ObjId(body.grant_id)})
         _grant_name = ""
@@ -1517,6 +1522,27 @@ async def resume_triage(
         if _grant_doc:
             _grant_name = _grant_doc.get("grant_name") or _grant_doc.get("title") or ""
             _ai_rec = _grant_doc.get("recommended_action")
+        await audit_logs().insert_one({
+            "node": "triage",
+            "action": f"human_triage_{body.decision}",
+            "grant_id": body.grant_id,
+            "grant_name": _grant_name,
+            "decision": body.decision,
+            "user_email": user_email,
+            "human_override": body.human_override,
+            "override_reason": body.override_reason,
+            "ai_recommendation": _ai_rec,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        logger.debug("Audit log insert failed (triage)", exc_info=True)
+
+    # ── Notion Mission Control sync — log triage decision ──────────────
+    try:
+        from backend.integrations.notion_sync import (
+            log_triage_decision,
+            update_grant_status,
+        )
         background_tasks.add_task(
             log_triage_decision,
             grant_id=body.grant_id,
@@ -2353,9 +2379,10 @@ async def start_draft(
     body: StartDraftRequest,
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
     """Start a new draft pipeline for an already-triaged grant."""
-    from backend.db.mongo import grants_pipeline, grants_scored
+    from backend.db.mongo import grants_pipeline, grants_scored, audit_logs
     from bson import ObjectId
 
     grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)})
@@ -2418,6 +2445,7 @@ async def start_draft(
             "final_draft_url": None,
             "override_guardrails": body.override_guardrails,
             "override_reason": body.override_reason,
+            "started_by": user_email,
         })
         pipeline_id = str(result.inserted_id)
         # Keep grants_scored status in sync so dashboard/pipeline views reflect drafting
@@ -2425,6 +2453,16 @@ async def start_draft(
             {"_id": ObjectId(body.grant_id)},
             {"$set": {"status": "drafting"}},
         )
+        # Audit log
+        await audit_logs().insert_one({
+            "node": "drafter",
+            "action": "draft_started",
+            "grant_id": body.grant_id,
+            "grant_name": grant.get("title") or grant.get("grant_name") or "",
+            "user_email": user_email,
+            "thread_id": thread_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2501,9 +2539,10 @@ async def run_review(
     body: RunReviewRequest,
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
     """Trigger funder + scientific review for a draft-complete grant."""
-    from backend.db.mongo import grants_scored, grant_drafts
+    from backend.db.mongo import grants_scored, grant_drafts, audit_logs
     from bson import ObjectId
 
     # Validate grant exists
@@ -2527,6 +2566,20 @@ async def run_review(
             logger.error("Dual review failed for %s: %s", body.grant_id, exc)
 
     background_tasks.add_task(_run)
+
+    # Audit log
+    try:
+        await audit_logs().insert_one({
+            "node": "reviewer",
+            "action": "review_triggered",
+            "grant_id": body.grant_id,
+            "grant_name": grant.get("title") or grant.get("grant_name") or "",
+            "user_email": user_email,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        pass
+
     return {
         "status": "review_started",
         "grant_id": body.grant_id,
@@ -2569,6 +2622,7 @@ class RecordOutcomeRequest(BaseModel):
 async def record_grant_outcome(
     body: RecordOutcomeRequest,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
     """Record the real-world outcome of a grant application for feedback learning."""
     from backend.agents.feedback_learner import record_outcome

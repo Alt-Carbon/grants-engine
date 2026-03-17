@@ -1,17 +1,16 @@
 /**
  * POST /api/outcomes/record
- * Proxy to FastAPI POST /outcomes/record — record grant outcome for feedback learning.
+ * Proxy to FastAPI POST /outcomes/record — forwards user identity.
  */
+import { proxyHeaders } from "@/lib/api";
+
 export async function POST(req: Request) {
   const url = (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
   try {
     const body = await req.json();
     const res = await fetch(`${url}/outcomes/record`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-internal-secret": process.env.INTERNAL_SECRET ?? "",
-      },
+      headers: await proxyHeaders(),
       body: JSON.stringify(body),
       cache: "no-store",
     });
