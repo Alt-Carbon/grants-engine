@@ -159,6 +159,9 @@ async def ensure_indexes():
     await _idx("notifications", "created_at", expireAfterSeconds=30 * 24 * 3600)
     await _idx("notifications", [("type", 1), ("created_at", -1)])
 
+    # knowledge_sync_logs
+    await _idx("knowledge_sync_logs", [("synced_at", -1)])
+
     # grant_comments (if not already covered)
     await _idx("grant_comments", "grant_id")
     await _idx("grant_comments", [("created_at", -1)])
