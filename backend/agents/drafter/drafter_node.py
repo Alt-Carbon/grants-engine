@@ -81,9 +81,32 @@ async def drafter_node(state: GrantState) -> Dict:
     import traceback as _tb
 
     try:
-        return await _drafter_node_inner(state)
+        result = await _drafter_node_inner(state)
+        # Update heartbeat on success
+        try:
+            from backend.agents.agent_context import update_heartbeat
+            section = (result.get("pending_interrupt") or {}).get("section_name", "")
+            await update_heartbeat("drafter", {
+                "status": "success",
+                "action": result.get("audit_log", [{}])[-1].get("action", "section_written") if result.get("audit_log") else "section_written",
+                "section": section,
+                "theme": state.get("grant_theme", ""),
+                "grant_id": state.get("selected_grant_id", ""),
+            })
+        except Exception:
+            logger.debug("Heartbeat update skipped (drafter)", exc_info=True)
+        return result
     except Exception as exc:
         grant_id = state.get("selected_grant_id", "")
+        try:
+            from backend.agents.agent_context import update_heartbeat
+            await update_heartbeat("drafter", {
+                "status": "error",
+                "error": str(exc)[:200],
+                "grant_id": grant_id,
+            })
+        except Exception:
+            pass
         try:
             from backend.integrations.notion_sync import log_error
             await log_error(

@@ -330,4 +330,18 @@ async def run_dual_review(grant_id: str) -> Dict:
         scientific_result.get("verdict", "?"),
     )
 
+    # Update heartbeat
+    try:
+        from backend.agents.agent_context import update_heartbeat
+        await update_heartbeat("reviewer", {
+            "status": "success",
+            "grant_title": grant_title[:50],
+            "funder_score": funder_result.get("overall_score", 0),
+            "scientific_score": scientific_result.get("overall_score", 0),
+            "funder_verdict": funder_result.get("verdict", ""),
+            "scientific_verdict": scientific_result.get("verdict", ""),
+        })
+    except Exception:
+        logger.debug("Heartbeat update skipped (reviewer)", exc_info=True)
+
     return {"funder": funder_result, "scientific": scientific_result}

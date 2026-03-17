@@ -1515,9 +1515,33 @@ class ScoutAgent:
         )
 
         try:
-            return await self._run_inner()
+            result = await self._run_inner()
+            # Update heartbeat on success
+            elapsed = (datetime.now(timezone.utc) - _run_start).total_seconds()
+            try:
+                from backend.agents.agent_context import update_heartbeat
+                await update_heartbeat("scout", {
+                    "status": "success",
+                    "grants_found": len(result),
+                    "duration_seconds": round(elapsed, 1),
+                    "tavily_queries": len(self.tavily_queries),
+                    "exa_queries": len(self.exa_queries),
+                })
+            except Exception:
+                logger.debug("Heartbeat update skipped (scout)", exc_info=True)
+            return result
         except Exception as exc:
             elapsed = (datetime.now(timezone.utc) - _run_start).total_seconds()
+            # Update heartbeat on error
+            try:
+                from backend.agents.agent_context import update_heartbeat
+                await update_heartbeat("scout", {
+                    "status": "error",
+                    "error": str(exc)[:200],
+                    "duration_seconds": round(elapsed, 1),
+                })
+            except Exception:
+                pass
             try:
                 from backend.integrations.notion_sync import log_error, log_agent_run
                 await log_error(
