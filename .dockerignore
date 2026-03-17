@@ -1,0 +1,40 @@
+# Frontend (separate deploy)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Data files (runtime only)
+backend/data/*.db
+backend/data/*.db-shm
+backend/data/*.db-wal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Env files (secrets — set via Railway)
+.env
+.env.local
+
+# Docs
+*.md
+!backend/knowledge/altcarbon_profile.md
+!backend/agents/*/skills.md
+
+# Misc
+past_grants/
+scripts/
+backend/benchmarks/results_*.json
+backend/evals/results/
