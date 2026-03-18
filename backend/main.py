@@ -1479,6 +1479,131 @@ async def manual_analyst(
     return {"status": "analyst_job_started", "started_at": _analyst_started_at}
 
 
+@app.post("/run/analyst/rescore")
+async def rescore_analyst(
+    background_tasks: BackgroundTasks,
+    min_score: float = 3.0,
+    _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
+):
+    """Re-run deep analysis + scoring on all grants with weighted_total >= min_score.
+
+    This re-enriches with Perplexity (funder context), re-scores on all 6 dimensions,
+    and updates the grants_scored collection in place. Grants keep their current status
+    unless the new score triggers a status change.
+    """
+    global _analyst_running, _analyst_started_at
+    if _analyst_running:
+        return {"status": "analyst_already_running", "started_at": _analyst_started_at}
+
+    _analyst_running = True
+    _analyst_started_at = datetime.now(timezone.utc).isoformat()
+
+    async def _run():
+        global _analyst_running, _analyst_started_at
+        try:
+            from backend.agents.analyst import AnalystAgent
+            from backend.config.settings import get_settings
+            from backend.db.mongo import grants_scored, grants_raw, agent_config, get_db
+
+            s = get_settings()
+            cfg_doc = await agent_config().find_one({"agent": "analyst"}) or {}
+            from backend.agents.analyst import DEFAULT_WEIGHTS
+            weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
+            min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
+
+            # 1. Fetch all grants to rescore
+            rescore_grants = await grants_scored().find(
+                {"weighted_total": {"$gte": min_score}}
+            ).to_list(2000)
+            logger.info("Rescore: %d grants with score >= %.1f", len(rescore_grants), min_score)
+
+            if not rescore_grants:
+                logger.info("Rescore: no grants to process")
+                return
+
+            # 2. Convert scored grants back to raw-like format for the analyst
+            raw_like = []
+            for g in rescore_grants:
+                raw_doc = {
+                    "_id": g["_id"],
+                    "title": g.get("title") or g.get("grant_name") or "",
+                    "url": g.get("url") or g.get("source_url") or "",
+                    "url_hash": g.get("url_hash", ""),
+                    "content_hash": g.get("content_hash", ""),
+                    "funder": g.get("funder", ""),
+                    "deadline": g.get("deadline", ""),
+                    "amount": g.get("amount") or g.get("max_funding") or "",
+                    "eligibility": g.get("eligibility", ""),
+                    "geography": g.get("geography", ""),
+                    "grant_type": g.get("grant_type", ""),
+                    "themes_detected": g.get("themes_detected", []),
+                    "about_opportunity": g.get("about_opportunity", ""),
+                    "application_process": g.get("application_process", ""),
+                    "scraped_at": g.get("scraped_at", ""),
+                }
+                raw_like.append(raw_doc)
+
+            # 3. Delete existing scored records so analyst doesn't skip them
+            scored_ids = [g["_id"] for g in rescore_grants]
+            delete_result = await grants_scored().delete_many({"_id": {"$in": scored_ids}})
+            logger.info("Rescore: deleted %d existing scored records", delete_result.deleted_count)
+
+            # 4. Run analyst on raw-like grants
+            agent = AnalystAgent(
+                perplexity_api_key=s.perplexity_api_key,
+                gateway_api_key=s.ai_gateway_api_key,
+                gateway_url=s.ai_gateway_url,
+                weights=weights,
+                min_funding=min_funding,
+            )
+            scored = await agent.run(raw_like)
+            logger.info("Rescore: %d grants re-scored", len(scored))
+
+            # 5. Log the run
+            db = get_db()
+            await db["audit_logs"].insert_one({
+                "event": "analyst_rescore_complete",
+                "scored_count": len(scored),
+                "input_count": len(rescore_grants),
+                "min_score_filter": min_score,
+                "triggered_by": user_email,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+            # 6. Notify
+            try:
+                from backend.notifications.hub import notify_analyst_complete
+                triage_count = sum(1 for g in scored if g.get("status") == "triage")
+                pursue_count = sum(1 for g in scored if g.get("recommended_action") == "pursue")
+                await notify_analyst_complete(
+                    scored_count=len(scored),
+                    triage_count=triage_count,
+                    pursue_count=pursue_count,
+                )
+            except Exception:
+                logger.debug("Rescore notification failed", exc_info=True)
+
+        except Exception as e:
+            logger.error("Rescore failed: %s", e)
+            try:
+                import traceback as _tb
+                from backend.integrations.notion_sync import log_error
+                await log_error(agent="analyst", error=e, tb=_tb.format_exc(), severity="Critical")
+            except Exception:
+                pass
+        finally:
+            _analyst_running = False
+            _analyst_started_at = None
+
+    background_tasks.add_task(_run)
+    return {
+        "status": "rescore_job_started",
+        "min_score": min_score,
+        "started_at": _analyst_started_at,
+    }
+
+
 # ── Resume endpoints ───────────────────────────────────────────────────────────
 
 @app.post("/resume/triage")
