@@ -678,16 +678,74 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         return;
       }
 
+      const savedNames = Object.keys(savedSections);
+      if (savedNames.length === 0) {
+        setHistoryLoaded((prev) => new Set(prev).add(historyKey));
+        return;
+      }
+
+      // Restore tile labels from saved section names (user may have renamed them)
+      // Match saved sections to tiles: by label first, then by position
+      const matchedSavedNames = new Set<string>();
+      const tileToSaved: Record<string, string> = {};
+
+      // Pass 1: exact label match
+      for (const tile of tiles) {
+        if (savedSections[tile.label]) {
+          tileToSaved[tile.id] = tile.label;
+          matchedSavedNames.add(tile.label);
+        }
+      }
+
+      // Pass 2: unmatched saved sections → assign to unmatched tiles by position
+      const unmatchedSaved = savedNames.filter((n) => !matchedSavedNames.has(n));
+      const unmatchedTiles = tiles.filter((t) => !tileToSaved[t.id]);
+      for (let i = 0; i < Math.min(unmatchedSaved.length, unmatchedTiles.length); i++) {
+        tileToSaved[unmatchedTiles[i].id] = unmatchedSaved[i];
+      }
+
+      // Rename tiles to match saved section names
+      const renamedTiles = tiles.map((t) => {
+        const savedName = tileToSaved[t.id];
+        if (savedName && savedName !== t.label) {
+          return { ...t, label: savedName };
+        }
+        return t;
+      });
+
+      // Update tiles if any were renamed
+      const tilesChanged = renamedTiles.some((t, i) => t.label !== tiles[i]?.label);
+      if (tilesChanged) {
+        setTilesMap((prev) => ({ ...prev, [selectedId]: renamedTiles }));
+      }
+
+      // Also create tiles for saved sections that don't have a tile yet
+      const extraSaved = unmatchedSaved.slice(unmatchedTiles.length);
+      if (extraSaved.length > 0) {
+        const extraTiles = extraSaved.map((name) => ({
+          id: `tile-${++tileCounter}`,
+          label: name,
+        }));
+        setTilesMap((prev) => ({
+          ...prev,
+          [selectedId]: [...(tilesChanged ? renamedTiles : tiles), ...extraTiles],
+        }));
+        // Add extra tiles to the mapping
+        for (let i = 0; i < extraTiles.length; i++) {
+          tileToSaved[extraTiles[i].id] = extraSaved[i];
+        }
+      }
+
+      // Restore chat histories using the mapping
       setChatHistories((prev) => {
         const next = { ...prev };
-        for (const tile of tiles) {
-          const key = buildKey(selectedId, tile.id);
-          const savedMsgs = savedSections[tile.label];
+        for (const tileId of Object.keys(tileToSaved)) {
+          const savedName = tileToSaved[tileId];
+          const savedMsgs = savedSections[savedName];
           if (savedMsgs && savedMsgs.length > 0) {
-            // Persisted history takes priority over init-from-draft
+            const key = buildKey(selectedId, tileId);
             next[key] = savedMsgs;
-            // Restore approved state
-            if (savedMsgs.some((m) => m.role === "system" && m.metadata?.status === "Approved")) {
+            if (savedMsgs.some((m: ChatMessage) => m.role === "system" && m.metadata?.status === "Approved")) {
               setApprovedSections((s) => new Set(s).add(key));
             }
           }
