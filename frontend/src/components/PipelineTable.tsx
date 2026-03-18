@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { StatusPicker } from "./StatusPicker";
 import { DeadlineChip } from "./DeadlineChip";
 import { GrantDetailSheet } from "./GrantDetailSheet";
@@ -36,6 +36,7 @@ const STATUS_TABS = [
   { id: "new", label: "New", icon: Sparkles },
   { id: "shortlisted", label: "Shortlisted" },
   { id: "pursue", label: "Pursue" },
+  { id: "hold", label: "Hold" },
   { id: "drafting", label: "Drafting" },
   { id: "submitted", label: "Submitted" },
   { id: "rejected", label: "Rejected" },
@@ -112,6 +113,14 @@ export function PipelineTable({
     return flat;
   });
 
+  // Sync when parent filters change
+  useEffect(() => {
+    const flat: Grant[] = [];
+    for (const col of Object.values(initialGrants)) flat.push(...col);
+    setAllGrants(flat);
+    setPage(1); // reset pagination on filter change
+  }, [initialGrants]);
+
   async function handleStatusChange(grantId: string, newStatus: string) {
     // Optimistic: update local state immediately
     setAllGrants((prev) =>
@@ -158,9 +167,11 @@ export function PipelineTable({
       return allGrants.filter((g) =>
         ["draft_complete", "submitted", "won"].includes(g.status)
       );
+    if (statusFilter === "hold")
+      return allGrants.filter((g) => g.status === "hold");
     if (statusFilter === "rejected")
       return allGrants.filter((g) =>
-        ["passed", "auto_pass", "human_passed", "reported"].includes(g.status)
+        ["passed", "auto_pass", "human_passed", "reported", "guardrail_rejected"].includes(g.status)
       );
     return allGrants.filter((g) => g.status === statusFilter);
   }, [allGrants, statusFilter, lastSeenAt]);
@@ -230,9 +241,11 @@ export function PipelineTable({
           ? "shortlisted"
           : g.status === "pursuing"
           ? "pursue"
+          : g.status === "hold"
+          ? "hold"
           : ["draft_complete", "submitted", "won"].includes(g.status)
           ? "submitted"
-          : ["passed", "auto_pass", "human_passed", "reported"].includes(
+          : ["passed", "auto_pass", "human_passed", "reported", "guardrail_rejected"].includes(
               g.status
             )
           ? "rejected"
