@@ -29,9 +29,11 @@ class GrantState(TypedDict):
     draft_guardrail_result: Optional[Dict]     # {passed, checks, reason, ...}
     override_guardrails: bool
 
-    # ── Drafter: Theme + Outline ────────────────────────────────────────────────
+    # ── Drafter: Theme + Outline + Criteria Map ─────────────────────────────────
     grant_theme: Optional[str]             # Resolved theme key (e.g. "climatetech")
     draft_outline: Optional[str]           # Narrative outline for cross-section coherence
+    criteria_map: Optional[Dict]           # section_name → criteria-evidence mapping
+    funder_terms: Optional[str]            # Extracted funder language/terms to mirror
 
     # ── Drafter: Section Loop ─────────────────────────────────────────────────
     current_section_index: int

@@ -45,6 +45,9 @@ def draft_reviews():
 def grant_outcomes():
     return get_db()["grant_outcomes"]
 
+def golden_examples():
+    return get_db()["golden_examples"]
+
 def knowledge_chunks():
     return get_db()["knowledge_chunks"]
 
@@ -68,6 +71,9 @@ def drafter_chat_history():
 
 def notion_page_cache():
     return get_db()["notion_page_cache"]
+
+def draft_preferences():
+    return get_db()["draft_preferences"]
 
 
 async def ensure_indexes():
@@ -123,6 +129,11 @@ async def ensure_indexes():
     await _idx("grant_outcomes", [("themes", 1)])
     await _idx("grant_outcomes", [("outcome", 1), ("created_at", -1)])
 
+    # golden_examples (few-shot learning)
+    await _idx("golden_examples", [("agent", 1), ("quality_score", -1)])
+    await _idx("golden_examples", [("agent", 1), ("theme", 1)])
+    await _idx("golden_examples", "agent")
+
     # knowledge_chunks
     await _idx("knowledge_chunks", "source_id")
     await _idx("knowledge_chunks", [("source_id", 1), ("chunk_index", 1)], unique=True)
@@ -158,6 +169,12 @@ async def ensure_indexes():
     await _idx("notifications", [("user_email", 1), ("read", 1), ("created_at", -1)])
     await _idx("notifications", "created_at", expireAfterSeconds=30 * 24 * 3600)
     await _idx("notifications", [("type", 1), ("created_at", -1)])
+
+    # draft_preferences (preference learning)
+    await _idx("draft_preferences", [("user_id", 1), ("created_at", -1)])
+    await _idx("draft_preferences", [("user_id", 1), ("section_name", 1)])
+    await _idx("draft_preferences", [("user_id", 1), ("theme", 1)])
+    await _idx("draft_preferences", "grant_id")
 
     # knowledge_sync_logs
     await _idx("knowledge_sync_logs", [("synced_at", -1)])

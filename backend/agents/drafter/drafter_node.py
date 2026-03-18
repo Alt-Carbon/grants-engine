@@ -5,14 +5,18 @@ then writes each section with targeted Pinecone knowledge retrieval.
 
 Flow:
   1. Called after grant_reader + company_brain
-  2. On first call (index 0): resolve theme, generate outline
+  2. On first call (index 0): resolve theme, generate outline, build criteria map,
+     extract funder language
   3. Checks section_review_decision (from interrupt resume):
      - "approve": save current section, advance index
      - "revise": rewrite current section with instructions
   4. Retrieves section-specific context from Pinecone
-  5. Writes next section with theme profile + outline + targeted knowledge
-  6. Interrupts — waits for human review via /resume/section-review
-  7. When all sections approved → move to reviewer
+  5. Writes next section with theme profile + outline + targeted knowledge +
+     criteria map + funder terms
+  6. Self-critique loop reviews output before interrupt
+  7. Auto-resolves evidence gaps via Pinecone search
+  8. Interrupts — waits for human review via /resume/section-review
+  9. When all sections approved → move to reviewer
 """
 from __future__ import annotations
 
@@ -74,6 +78,132 @@ Keep it concise — this will be provided as context to each section writer."""
     except Exception as e:
         logger.warning("Outline generation failed: %s", e)
         return ""
+
+
+async def _build_criteria_map(
+    grant: Dict,
+    sections: List[Dict],
+    company_context: str,
+    theme_key: str,
+) -> Dict[str, str]:
+    """Pre-map evaluation criteria → evidence → sections.
+
+    Returns a dict mapping section_name → formatted criteria-evidence text
+    that tells the section writer exactly which criteria to address and
+    what evidence to use.
+    """
+    from backend.utils.llm import chat, ANALYST_LIGHT
+
+    grant_requirements = grant.get("grant_requirements") or {}
+    eval_criteria = (
+        grant_requirements.get("evaluation_criteria")
+        or grant.get("evaluation_criteria")
+        or (grant.get("deep_analysis") or {}).get("evaluation_criteria")
+        or []
+    )
+
+    if not eval_criteria:
+        return {}
+
+    section_list = "\n".join(
+        f"  {i+1}. {s.get('name', f'Section {i+1}')}: {s.get('description', '')}"
+        for i, s in enumerate(sections)
+    )
+
+    criteria_list = "\n".join(
+        f"  - {c.get('criterion', '')}: {c.get('description', c.get('what_they_look_for', ''))} "
+        f"(weight: {c.get('weight', 'unspecified')})"
+        for c in eval_criteria
+    )
+
+    prompt = f"""Map each evaluation criterion to the grant sections where it should be addressed,
+and identify the best available evidence for each.
+
+GRANT: {grant.get('title', 'Unknown')}
+FUNDER: {grant.get('funder', 'Unknown')}
+
+EVALUATION CRITERIA:
+{criteria_list}
+
+APPLICATION SECTIONS:
+{section_list}
+
+AVAILABLE COMPANY EVIDENCE (summary):
+{company_context[:3000]}
+
+For each section, list which criteria it must address and what specific evidence to cite.
+
+Respond ONLY with valid JSON:
+{{
+  "<section_name>": "Criterion 1 (weight): use [evidence X] to demonstrate... | Criterion 2 (weight): cite [evidence Y]...",
+  ...
+}}
+
+Rules:
+- Every criterion must appear in at least one section
+- High-weight criteria should appear in 2+ sections
+- Be specific about which evidence to use — don't say "mention capabilities", say "cite Frontier/Stripe buyer relationships"
+- If no evidence exists for a criterion, note "[EVIDENCE GAP: description]"
+"""
+
+    try:
+        raw = await chat(prompt, model=ANALYST_LIGHT, max_tokens=2000, temperature=0.2)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        import json
+        result = json.loads(raw)
+        logger.info("Criteria map built: %d sections mapped", len(result))
+        return result
+    except Exception as e:
+        logger.warning("Criteria map generation failed: %s", e)
+        return {}
+
+
+async def _extract_funder_language(
+    grant_raw_doc: str,
+    grant: Dict,
+) -> str:
+    """Extract the funder's key terms and phrases from the RFP.
+
+    Returns a formatted string of funder-specific terminology for the
+    section writer to mirror.
+    """
+    from backend.utils.llm import chat, ANALYST_LIGHT
+
+    if not grant_raw_doc or len(grant_raw_doc) < 200:
+        return ""
+
+    prompt = f"""Extract 15-20 key terms and phrases this funder uses repeatedly in their grant document.
+
+FUNDER: {grant.get('funder', 'Unknown')}
+GRANT: {grant.get('title', 'Unknown')}
+
+GRANT DOCUMENT (first 6000 chars):
+{grant_raw_doc[:6000]}
+
+Focus on:
+1. How they name the PROBLEM (e.g., "climate change" vs "climate crisis" vs "global warming")
+2. How they name the SOLUTION TYPE (e.g., "nature-based solutions" vs "natural climate solutions")
+3. IMPACT METRICS they care about (e.g., "tonnes of CO2" vs "carbon credits" vs "drawdown potential")
+4. EVALUATION language (e.g., "scalability" vs "growth potential", "innovation" vs "novelty")
+5. TONE markers (e.g., "transformative" vs "incremental", "community" vs "stakeholder")
+
+Return ONLY a bullet list of terms/phrases with brief notes on usage:
+- "term or phrase" — context of how funder uses it"""
+
+    try:
+        result = await chat(prompt, model=ANALYST_LIGHT, max_tokens=800, temperature=0.1)
+        result = result.strip()
+        if result and len(result) > 50:
+            logger.info("Extracted funder language: %d chars", len(result))
+            return result
+    except Exception as e:
+        logger.warning("Funder language extraction failed: %s", e)
+
+    return ""
 
 
 async def drafter_node(state: GrantState) -> Dict:
@@ -161,7 +291,10 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         grant_theme = resolve_theme(themes_detected)
         logger.info("Drafter: resolved theme → %s (from %s)", grant_theme, themes_detected)
 
-    # ── Outline generation (once, on first section) ───────────────────────────
+    # ── Outline + Criteria Map + Funder Language (once, on first section) ────
+    criteria_map = state.get("criteria_map") or {}
+    funder_terms = state.get("funder_terms") or ""
+
     if not draft_outline and current_idx == 0 and review_decision is None:
         profile = get_theme_profile(grant_theme)
         # Use theme-specific default sections if grant_reader returned generic ones
@@ -174,9 +307,24 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
                 total_sections = len(sections)
                 logger.info("Drafter: using theme-specific sections for %s (%d sections)", grant_theme, total_sections)
 
-        draft_outline = await _generate_outline(grant, grant_theme, sections, company_context)
+        # Run outline, criteria map, and funder language extraction in parallel
+        import asyncio
+        outline_task = _generate_outline(grant, grant_theme, sections, company_context)
+        criteria_task = _build_criteria_map(grant, sections, company_context, grant_theme)
+        funder_lang_task = _extract_funder_language(
+            state.get("grant_raw_doc", ""), grant,
+        )
+
+        draft_outline, criteria_map, funder_terms = await asyncio.gather(
+            outline_task, criteria_task, funder_lang_task,
+        )
+
         if draft_outline:
             logger.info("Drafter: generated outline (%d chars)", len(draft_outline))
+        if criteria_map:
+            logger.info("Drafter: criteria map covers %d sections", len(criteria_map))
+        if funder_terms:
+            logger.info("Drafter: extracted funder language (%d chars)", len(funder_terms))
 
     # Handle review decision from previous interrupt
     if review_decision == "approve" and current_idx > 0:
@@ -184,7 +332,8 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         prev_section = sections[current_idx - 1]
         prev_name = prev_section.get("name", f"Section {current_idx}")
         prev_interrupt = state.get("pending_interrupt") or {}
-        content_to_save = edited_content or prev_interrupt.get("content", "")
+        ai_version = prev_interrupt.get("content", "")
+        content_to_save = edited_content or ai_version
         if content_to_save and prev_name not in approved_sections:
             approved_sections[prev_name] = {
                 "content": content_to_save,
@@ -194,6 +343,22 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
                 "approved_at": datetime.now(timezone.utc).isoformat(),
             }
             logger.info("Drafter: section '%s' approved", prev_name)
+
+            # ── Preference learning: record the approve signal ───────────
+            try:
+                from backend.agents.preference_learner import record_preference
+                await record_preference(
+                    grant_id=str(grant_id or ""),
+                    section_name=prev_name,
+                    ai_version=ai_version,
+                    final_version=content_to_save,
+                    was_revised=False,
+                    theme=grant_theme,
+                    funder=grant.get("funder", ""),
+                    grant_type=grant.get("grant_type", ""),
+                )
+            except Exception:
+                logger.debug("Preference recording skipped (approve)", exc_info=True)
 
             # Notion sync — mark section approved
             try:
@@ -217,6 +382,24 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         prev_interrupt = state.get("pending_interrupt") or {}
         instructions = state.get("section_revision_instructions", {}).get(section.get("name", ""), "")
         critique = state.get("section_critiques", {}).get(section.get("name", ""), "")
+
+        # ── Preference learning: record the revise signal ────────────
+        # The revision instruction is gold — it says exactly what was wrong
+        try:
+            from backend.agents.preference_learner import record_preference
+            await record_preference(
+                grant_id=str(grant_id or ""),
+                section_name=section.get("name", ""),
+                ai_version=prev_interrupt.get("content", ""),
+                final_version=prev_interrupt.get("content", ""),  # not yet rewritten
+                was_revised=True,
+                revision_instructions=instructions,
+                theme=grant_theme,
+                funder=grant.get("funder", ""),
+                grant_type=grant.get("grant_type", ""),
+            )
+        except Exception:
+            logger.debug("Preference recording skipped (revise)", exc_info=True)
 
         # Get fresh section-specific context for the revision
         grant_themes = grant.get("themes_detected", [])
@@ -248,6 +431,8 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
             "grant_theme": grant_theme,
             "draft_outline": draft_outline,
             "grant_requirements": grant_requirements,
+            "criteria_map": criteria_map,
+            "funder_terms": funder_terms,
             "audit_log": state.get("audit_log", []) + [{
                 "node": "drafter",
                 "ts": datetime.now(timezone.utc).isoformat(),
@@ -267,6 +452,8 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
             "grant_theme": grant_theme,
             "draft_outline": draft_outline,
             "grant_requirements": grant_requirements,
+            "criteria_map": criteria_map,
+            "funder_terms": funder_terms,
             "audit_log": state.get("audit_log", []) + [{
                 "node": "drafter",
                 "ts": datetime.now(timezone.utc).isoformat(),
@@ -286,6 +473,26 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         grant_theme, section_name, grant.get("title", ""), grant_themes, company_context,
     )
 
+    # ── Preference learning: load user preferences + approved examples ────
+    user_preferences = ""
+    approved_examples = ""
+    try:
+        from backend.agents.preference_learner import get_user_preferences, get_approved_examples
+        user_preferences = await get_user_preferences(
+            theme=grant_theme,
+            section_name=section_name,
+        )
+        approved_examples = await get_approved_examples(
+            section_name=section_name,
+            theme=grant_theme,
+        )
+        if user_preferences:
+            logger.info("Drafter: loaded user preferences (%d chars)", len(user_preferences))
+        if approved_examples:
+            logger.info("Drafter: loaded %d approved examples", approved_examples.count("Approved Example"))
+    except Exception:
+        logger.debug("Preference loading skipped", exc_info=True)
+
     # Load drafter settings from agent_config
     from backend.db.mongo import agent_config
     drafter_cfg = await agent_config().find_one({"agent": "drafter"}) or {}
@@ -302,6 +509,15 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
             logger.info("Drafter: loaded past outcome lessons for funder=%s (%d chars)", funder, len(past_outcomes))
     except Exception as e:
         logger.debug("Drafter: feedback learner unavailable: %s", e)
+
+    # Look up section-specific criteria map
+    section_criteria = criteria_map.get(section_name, "")
+    # Also try partial matches
+    if not section_criteria:
+        for map_key, map_val in criteria_map.items():
+            if map_key.lower() in section_name.lower() or section_name.lower() in map_key.lower():
+                section_criteria = map_val
+                break
 
     result = await write_section(
         section=section,
@@ -322,6 +538,12 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         domain_terms_override=theme_settings.get("domain_terms") or None,
         theme_instructions=theme_settings.get("custom_instructions", ""),
         past_outcomes=past_outcomes,
+        # P0 improvements
+        criteria_map_for_section=section_criteria,
+        funder_terms=funder_terms,
+        # Preference learning
+        user_preferences=user_preferences,
+        approved_examples=approved_examples,
     )
 
     # ── Notion Mission Control sync ──────────────────────────────────────────
@@ -351,6 +573,8 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         "grant_theme": grant_theme,
         "draft_outline": draft_outline,
         "grant_requirements": grant_requirements,
+        "criteria_map": criteria_map,
+        "funder_terms": funder_terms,
         "audit_log": state.get("audit_log", []) + [{
             "node": "drafter",
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -359,6 +583,7 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
             "word_count": result["word_count"],
             "within_limit": result["within_limit"],
             "theme": grant_theme,
+            "self_critique": result.get("self_critique", {}),
         }],
     }
 

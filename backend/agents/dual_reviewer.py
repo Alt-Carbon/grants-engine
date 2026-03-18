@@ -248,6 +248,71 @@ def _fallback_review(perspective: str, error: str) -> Dict:
     }
 
 
+COHERENCE_PROMPT = """You are reviewing a COMPLETE grant application for cross-section coherence.
+
+GRANT: {grant_title}
+FUNDER: {funder}
+
+COMPLETE DRAFT:
+{draft}
+
+Review the application as a WHOLE (not section-by-section). Check for:
+
+1. NARRATIVE CONSISTENCY: Is there a single coherent story from problem → solution → impact? Or do sections tell different stories?
+2. BUDGET ↔ ACTIVITIES MATCH: Does the budget justify the activities described in the technical approach? Are there activities with no budget, or budget items with no corresponding activity?
+3. CLAIMS ↔ EVIDENCE MATCH: Do impact claims in the outcomes section match what the methodology can actually deliver? Are there claims without methodological backing?
+4. CROSS-SECTION CONTRADICTIONS: Do any sections contradict each other? (e.g., timeline says 12 months but impact claims require 24 months of data)
+5. UNNECESSARY REPETITION: Are the same points made in multiple sections without adding new value?
+6. MISSING THREADS: Are there important elements introduced in one section but never followed up? (e.g., partnerships mentioned in team section but absent from project plan)
+
+Respond ONLY with valid JSON:
+{{
+  "coherence_score": <float 1-10>,
+  "narrative_consistent": <bool>,
+  "issues": [
+    {{"type": "<contradiction|budget_mismatch|unsupported_claim|repetition|missing_thread>", "sections_involved": ["<sec1>", "<sec2>"], "description": "<specific issue>", "fix": "<suggested fix>"}}
+  ],
+  "overall_assessment": "<2-3 sentence assessment of application coherence>"
+}}"""
+
+
+async def _run_coherence_review(
+    grant: Dict,
+    draft_text: str,
+) -> Dict:
+    """Run holistic coherence review across all sections."""
+    prompt = COHERENCE_PROMPT.format(
+        grant_title=grant.get("title") or grant.get("grant_name") or "Untitled",
+        funder=grant.get("funder") or "Unknown",
+        draft=draft_text[:30000],
+    )
+
+    try:
+        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=2000, temperature=0.2)
+        result = _parse_json_response(raw)
+    except json.JSONDecodeError as e:
+        logger.error("Coherence review JSON parse failed: %s", e)
+        result = {
+            "coherence_score": 0,
+            "narrative_consistent": True,
+            "issues": [{"type": "error", "sections_involved": [], "description": f"Parse error: {e}", "fix": "Retry review"}],
+            "overall_assessment": "Coherence review could not be completed.",
+        }
+    except Exception as e:
+        logger.error("Coherence review LLM call failed: %s", e)
+        result = {
+            "coherence_score": 0,
+            "narrative_consistent": True,
+            "issues": [],
+            "overall_assessment": f"Coherence review failed: {e}",
+        }
+
+    result.setdefault("coherence_score", 5.0)
+    result.setdefault("issues", [])
+    result.setdefault("overall_assessment", "Review completed.")
+    return result
+
+
 async def run_dual_review(grant_id: str) -> Dict:
     """Run funder + scientific reviews on the latest draft for a grant.
 
@@ -294,18 +359,23 @@ async def run_dual_review(grant_id: str) -> Dict:
         scientific_settings.get("strictness", "balanced"),
     )
 
-    # Run both perspectives in parallel
-    funder_result, scientific_result = await asyncio.gather(
+    # Run all three perspectives in parallel: funder + scientific + coherence
+    funder_result, scientific_result, coherence_result = await asyncio.gather(
         _run_single_review(grant, draft_text, "funder", funder_settings),
         _run_single_review(grant, draft_text, "scientific", scientific_settings),
+        _run_coherence_review(grant, draft_text),
     )
 
     now = datetime.now(timezone.utc).isoformat()
     draft_id = str(draft_doc["_id"])
     draft_version = draft_doc.get("version", 0)
 
-    # Store reviews
-    for perspective, result in [("funder", funder_result), ("scientific", scientific_result)]:
+    # Store reviews (funder, scientific, coherence)
+    for perspective, result in [
+        ("funder", funder_result),
+        ("scientific", scientific_result),
+        ("coherence", coherence_result),
+    ]:
         review_doc = {
             "grant_id": grant_id,
             "draft_id": draft_id,
@@ -314,20 +384,30 @@ async def run_dual_review(grant_id: str) -> Dict:
             **result,
             "created_at": now,
         }
-        # Upsert — replace previous review of same perspective for this grant
         await draft_reviews().replace_one(
             {"grant_id": grant_id, "perspective": perspective},
             review_doc,
             upsert=True,
         )
 
+    # Log coherence issues as critical if found
+    coherence_issues = coherence_result.get("issues", [])
+    if coherence_issues:
+        logger.warning(
+            "Coherence review found %d issues for '%s': %s",
+            len(coherence_issues),
+            grant_title,
+            [i.get("type") for i in coherence_issues[:5]],
+        )
+
     logger.info(
-        "Dual review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s)",
+        "Triple review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), coherence=%.1f",
         grant_title,
         funder_result.get("overall_score", 0),
         funder_result.get("verdict", "?"),
         scientific_result.get("overall_score", 0),
         scientific_result.get("verdict", "?"),
+        coherence_result.get("coherence_score", 0),
     )
 
     # Update heartbeat
@@ -338,10 +418,16 @@ async def run_dual_review(grant_id: str) -> Dict:
             "grant_title": grant_title[:50],
             "funder_score": funder_result.get("overall_score", 0),
             "scientific_score": scientific_result.get("overall_score", 0),
+            "coherence_score": coherence_result.get("coherence_score", 0),
             "funder_verdict": funder_result.get("verdict", ""),
             "scientific_verdict": scientific_result.get("verdict", ""),
+            "coherence_issues": len(coherence_issues),
         })
     except Exception:
         logger.debug("Heartbeat update skipped (reviewer)", exc_info=True)
 
-    return {"funder": funder_result, "scientific": scientific_result}
+    return {
+        "funder": funder_result,
+        "scientific": scientific_result,
+        "coherence": coherence_result,
+    }

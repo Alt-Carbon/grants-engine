@@ -9,17 +9,21 @@ Grounded in:
 - Draft outline (cross-section coherence)
 - Past application style examples
 - Grant evaluation criteria
+- Criteria-evidence mapping (pre-computed by drafter_node)
 
 Flags [EVIDENCE NEEDED: description] rather than inventing facts.
 Accepts revision instructions to rewrite with human feedback.
+Self-critique loop: reviews own output before returning to human.
+Auto-resolves evidence gaps via Pinecone search.
 """
 from __future__ import annotations
 
 import logging
+import json
 import re
 from typing import Dict, List, Optional
 
-from backend.utils.llm import chat, DRAFTER_DEFAULT, resolve_drafter_model
+from backend.utils.llm import chat, DRAFTER_DEFAULT, ANALYST_LIGHT, resolve_drafter_model
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +63,21 @@ STYLE EXAMPLES (match this voice and tone — these are AltCarbon's past applica
 
 {revision_block}
 
-INSTRUCTIONS:
+MANDATORY WRITING RULES (violating these will trigger a rewrite):
+1. DECLARATIVE VOICE: Use "will" not "may/could/aim to". State what you will do, not what you hope to do.
+2. NO EMPTY ADJECTIVES: Never write "innovative", "cutting-edge", "state-of-the-art", "world-class", "groundbreaking", "revolutionary", "game-changing", "holistic", "synergistic", "paradigm-shifting", "next-generation". DESCRIBE the innovation instead of labeling it.
+3. QUANTIFY EVERY CLAIM: Every claim of scale, impact, or capability must include a number, unit, comparison, or citation. No "significant impact" — write "23% increase in soil organic carbon across 12 field plots".
+4. NO "NOT ONLY X BUT ALSO Y": State both points directly. Write "ERW consumes atmospheric CO2 and exports alkalinity to rivers" not "ERW not only captures carbon but also improves soil health".
+5. PROBLEM → GAP → STRATEGY: Structure as: what is known → what is missing → how this proposal fills it.
+6. PRECISE TERMINOLOGY: Name exact methods, species, locations, equipment. "MC-ICP-MS" not "advanced instruments".
+7. BOLD KEY CLAIMS: Bold the 3-5 most important sentences (gap statement, main deliverable, key differentiator). Do not bold entire paragraphs.
+8. EVIDENCE HIERARCHY: Published results (with citations) first, then pilot data, then proposed work.
+9. LOGICAL CONNECTORS: Use "Thus,", "Hence,", "However,", "Since". Avoid filler transitions like "Additionally,", "Furthermore,", "Moreover,".
+10. ONE CLAIM PER PARAGRAPH with supporting evidence. No paragraphs without a number, citation, or data reference.
+11. NEVER HEDGE when you have evidence. State data as fact. If you lack data, flag [EVIDENCE NEEDED].
+12. SCIENTIFIC PARAGRAPH STRUCTURE (especially for Technical Approach, Methodology, Background sections): Each paragraph must follow Finding → Evidence → Implication → Justification. Open with the key observation/fact. Support with data/citations. State what it means. Close with why it justifies the next step. Never start with the method before establishing why it is needed. Never end with a finding and no justification.
+
+ADDITIONAL INSTRUCTIONS:
 - Write ONLY this section, nothing else
 - Stay within the word limit
 - Ground every claim in the company knowledge provided
@@ -69,10 +87,51 @@ INSTRUCTIONS:
 - Match AltCarbon's voice from the style examples
 - For any required claim you cannot support with the provided knowledge, write exactly: [EVIDENCE NEEDED: <brief description of what's missing>]
 - Do NOT invent statistics, team names, funding amounts, or technical claims
-- Be specific and concrete — avoid vague platitudes
 - Address the evaluation criteria directly
 
 Write the section now:"""
+
+SELF_CRITIQUE_PROMPT = """You just wrote a section of a grant application. Now review your own work critically.
+
+SECTION: {section_name}
+WORD LIMIT: {word_limit}
+
+EVALUATION CRITERIA FOR THIS GRANT:
+{criteria}
+
+{criteria_map_block}
+
+YOUR DRAFT:
+{content}
+
+Score yourself honestly on these dimensions:
+1. CRITERIA COVERAGE (1-5): Does every paragraph directly address at least one evaluation criterion? Are any criteria completely missing?
+2. EVIDENCE GROUNDING (1-5): Are all claims backed by evidence from the company knowledge? Or are there vague platitudes like "innovative approach" or "significant impact"? Every paragraph must have at least one number, citation, or data reference.
+3. WORD COUNT (pass/fail): Is it within the word limit of {word_limit}?
+4. SPECIFICITY (1-5): Would a skeptical reviewer find unsupported assertions? Are there concrete numbers, dates, and names? Check for banned adjectives: "innovative", "cutting-edge", "state-of-the-art", "world-class", "groundbreaking", "revolutionary", "game-changing", "holistic", "synergistic", "paradigm-shifting". If ANY banned word appears, score 1.
+5. FUNDER ALIGNMENT (1-5): Does this section use the funder's language and address what THIS specific funder values?
+6. VOICE CHECK (pass/fail): Does it use declarative "will" voice (not "aim to", "could", "may")? Are there any "not only X but also Y" constructions? Any filler transitions ("Additionally", "Furthermore", "Moreover")? Any hedging ("we believe", "it is expected")?
+
+Respond ONLY with valid JSON:
+{{
+  "scores": {{"criteria_coverage": <int>, "evidence_grounding": <int>, "specificity": <int>, "funder_alignment": <int>}},
+  "word_count_ok": <bool>,
+  "voice_check_ok": <bool>,
+  "banned_words_found": ["<word1>", ...],
+  "weaknesses": ["<specific weakness 1>", "<weakness 2>"],
+  "needs_rewrite": <bool>,
+  "rewritten": "<full rewritten section if needs_rewrite is true, else null>"
+}}
+
+Rules:
+- Set needs_rewrite=true if ANY score < 4 OR word_count_ok is false OR voice_check_ok is false OR banned_words_found is non-empty
+- If rewriting: remove ALL banned adjectives, fix hedging language, replace "not only X but also Y" with direct statements, ensure every paragraph has evidence
+- The rewrite must stay within the word limit
+- If all scores >= 4 and all checks pass, set needs_rewrite=false and rewritten=null"""
+
+
+EVIDENCE_RESOLVE_MAX_ATTEMPTS = 3  # Max gaps to auto-resolve per section
+
 
 REVISION_PROMPT = """You previously wrote this section:
 
@@ -159,6 +218,136 @@ async def get_section_context(
     return "No company context available for this section."
 
 
+async def _self_critique(
+    content: str,
+    section_name: str,
+    word_limit: int,
+    criteria_text: str,
+    criteria_map_for_section: str,
+    model: Optional[str] = None,
+) -> Dict:
+    """Run self-critique on a written section. Returns improved content if needed.
+
+    The LLM reviews its own output against evaluation criteria and rewrites
+    if any quality dimension scores below 4/5.
+    """
+    criteria_map_block = ""
+    if criteria_map_for_section:
+        criteria_map_block = f"CRITERIA→EVIDENCE MAP FOR THIS SECTION (you MUST address all of these):\n{criteria_map_for_section}"
+
+    prompt = SELF_CRITIQUE_PROMPT.format(
+        section_name=section_name,
+        word_limit=word_limit,
+        criteria=criteria_text,
+        criteria_map_block=criteria_map_block,
+        content=content,
+    )
+
+    try:
+        raw = await chat(prompt, model=model or ANALYST_LIGHT, max_tokens=3000, temperature=0.2)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        result = json.loads(raw)
+
+        if result.get("needs_rewrite") and result.get("rewritten"):
+            rewritten = result["rewritten"].strip()
+            # Sanity: rewrite must be non-empty and reasonably sized
+            if len(rewritten) > 50:
+                logger.info(
+                    "Self-critique rewrote '%s' (scores: %s, weaknesses: %s)",
+                    section_name,
+                    result.get("scores", {}),
+                    result.get("weaknesses", [])[:3],
+                )
+                return {
+                    "content": rewritten,
+                    "was_rewritten": True,
+                    "scores": result.get("scores", {}),
+                    "weaknesses": result.get("weaknesses", []),
+                }
+
+        logger.info(
+            "Self-critique passed '%s' (scores: %s)",
+            section_name, result.get("scores", {}),
+        )
+        return {
+            "content": content,
+            "was_rewritten": False,
+            "scores": result.get("scores", {}),
+            "weaknesses": result.get("weaknesses", []),
+        }
+
+    except Exception as e:
+        logger.warning("Self-critique failed for '%s': %s — keeping original", section_name, e)
+        return {"content": content, "was_rewritten": False, "scores": {}, "weaknesses": []}
+
+
+async def _resolve_evidence_gaps(
+    content: str,
+    grant_themes: List[str],
+    theme_key: str,
+) -> str:
+    """Attempt to auto-fill [EVIDENCE NEEDED: ...] gaps via Pinecone search.
+
+    For each gap, searches Pinecone with the gap description as the query.
+    Replaces the flag with found evidence + source attribution.
+    Keeps the flag if no evidence is found — human must still fill it.
+    """
+    gaps = re.findall(r"\[EVIDENCE NEEDED: ([^\]]+)\]", content)
+    if not gaps:
+        return content
+
+    try:
+        from backend.db.pinecone_store import is_pinecone_configured, search_similar
+        if not is_pinecone_configured():
+            return content
+    except Exception:
+        return content
+
+    resolved_count = 0
+    for gap_desc in gaps[:EVIDENCE_RESOLVE_MAX_ATTEMPTS]:
+        try:
+            pc_filter = {}
+            if grant_themes:
+                pc_filter["themes"] = {"$in": grant_themes}
+
+            results = search_similar(
+                f"{gap_desc} {theme_key} AltCarbon",
+                top_k=3,
+                filter_dict=pc_filter or None,
+            )
+
+            if results:
+                best = results[0]
+                evidence = best.get("content") or best.get("text", "")
+                source = best.get("source_title", best.get("title", "company knowledge"))
+
+                if evidence and len(evidence.strip()) > 30:
+                    # Truncate to a reasonable size for inline insertion
+                    evidence_snippet = evidence.strip()[:500]
+                    # Replace last partial sentence if truncated
+                    if len(evidence.strip()) > 500:
+                        last_period = evidence_snippet.rfind(".")
+                        if last_period > 200:
+                            evidence_snippet = evidence_snippet[:last_period + 1]
+
+                    content = content.replace(
+                        f"[EVIDENCE NEEDED: {gap_desc}]",
+                        f"{evidence_snippet} [Source: {source}]",
+                    )
+                    resolved_count += 1
+        except Exception as e:
+            logger.debug("Evidence gap resolution failed for '%s': %s", gap_desc[:50], e)
+
+    if resolved_count:
+        logger.info("Auto-resolved %d/%d evidence gaps", resolved_count, len(gaps))
+
+    return content
+
+
 async def write_section(
     section: Dict,
     section_num: int,
@@ -184,8 +373,21 @@ async def write_section(
     domain_terms_override: Optional[List[str]] = None,
     theme_instructions: str = "",
     past_outcomes: str = "",
+    # P0 improvements
+    criteria_map_for_section: str = "",
+    enable_self_critique: bool = True,
+    funder_terms: str = "",
+    # Preference learning
+    user_preferences: str = "",
+    approved_examples: str = "",
 ) -> Dict:
-    """Write or rewrite a single section. Returns section dict with content + metadata."""
+    """Write or rewrite a single section. Returns section dict with content + metadata.
+
+    P0 improvements:
+    - criteria_map_for_section: pre-computed criteria→evidence mapping for this section
+    - enable_self_critique: run self-critique loop after writing (default True)
+    - funder_terms: extracted funder language to mirror in writing
+    """
     from backend.agents.drafter.theme_profiles import get_theme_profile
 
     section_name = section.get("name", f"Section {section_num}")
@@ -214,8 +416,19 @@ async def write_section(
     # Writing style description
     style_desc = {
         "professional": "Professional & Corporate — clear, formal, confident. Use strong assertions, structured arguments, and business-oriented language.",
-        "scientific": "Scientific & Academic — rigorous, precise, evidence-driven. Use technical terminology, cite methodologies, and maintain scholarly tone.",
+        "scientific": "Scientific & Academic — rigorous, precise, evidence-driven. Every paragraph follows Finding → Evidence → Implication → Justification. Open with the established fact, support with data/citations, state what it means, close with why it justifies the proposed work. Use technical terminology, cite methodologies, and maintain scholarly tone.",
+        "startup-founder": "Startup-Founder voice for corporate/buyer grants — direct, operationally honest, conversational confidence. Use 'we' not 'I'. Use em-dashes for emphasis. Admit uncertainty where honest ('results are not guaranteed'). Lead with operational proof (deployment acres, verified tonnes, buyer names) not publications. No literature reviews, no academic formalities. Tight sentences, every word earns its place. Credibility comes from field operations and buyer validation (Google, Stripe, Shopify), not impact factors.",
     }.get(writing_style, writing_style)
+
+    # Funder language mirroring
+    funder_terms_block = ""
+    if funder_terms:
+        funder_terms_block = f"\nFUNDER'S LANGUAGE (mirror these terms — use their vocabulary, not ours):\n{funder_terms}\n"
+
+    # Criteria-evidence map for this section
+    criteria_map_block = ""
+    if criteria_map_for_section:
+        criteria_map_block = f"\nCRITERIA→EVIDENCE MAP FOR THIS SECTION (address ALL of these):\n{criteria_map_for_section}\n"
 
     # Custom instructions block — merge global + theme-specific
     all_instructions = []
@@ -256,6 +469,19 @@ async def write_section(
     # Use section-specific context if available, otherwise fall back to general
     effective_context = section_context if section_context else (company_context[:6000] if company_context else "No company context available.")
 
+    # User preferences block (learned from past editing patterns)
+    preferences_block = ""
+    if user_preferences:
+        preferences_block = f"\n{user_preferences}\n"
+
+    # Approved examples block (user's own approved sections as few-shot)
+    approved_examples_block = ""
+    if approved_examples:
+        approved_examples_block = f"\n{approved_examples}\n"
+
+    # Build the enriched custom instructions with all learned context
+    enriched_custom = preferences_block + funder_terms_block + criteria_map_block + approved_examples_block + custom_instructions_block
+
     prompt = WRITE_PROMPT.format(
         writing_style=style_desc,
         theme_display=theme_display,
@@ -275,7 +501,7 @@ async def write_section(
         criteria=criteria_text,
         section_context=effective_context,
         style_examples=style_examples[:2000] if style_examples else "No style examples available.",
-        custom_instructions_block=custom_instructions_block,
+        custom_instructions_block=enriched_custom,
         past_outcomes_block=past_outcomes_block,
         revision_block=revision_block,
     )
@@ -290,11 +516,29 @@ async def write_section(
         logger.error("Section writer failed for %s: %s", section_name, e)
         content = f"[SECTION GENERATION FAILED: {e}]\n\n[EVIDENCE NEEDED: Full section content for {section_name}]"
 
-    # Count words
+    # ── P0: Auto-resolve evidence gaps ──────────────────────────────────────
+    grant_themes = grant.get("themes_detected", [])
+    content = await _resolve_evidence_gaps(content, grant_themes, theme_key)
+
+    # ── P0: Self-critique loop ──────────────────────────────────────────────
+    self_critique_result = {}
+    if enable_self_critique and not revision_instructions:
+        # Don't self-critique revisions (human already gave specific feedback)
+        self_critique_result = await _self_critique(
+            content=content,
+            section_name=section_name,
+            word_limit=word_limit,
+            criteria_text=criteria_text,
+            criteria_map_for_section=criteria_map_for_section,
+            model=model,
+        )
+        content = self_critique_result.get("content", content)
+
+    # Count words (after potential rewrite)
     word_count = len(content.split())
     within_limit = word_count <= word_limit
 
-    # Extract evidence gaps
+    # Extract remaining evidence gaps (after auto-resolve)
     evidence_gaps = re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", content)
 
     return {
@@ -307,4 +551,9 @@ async def write_section(
         "criteria_addressed": [c.get("criterion", "") for c in eval_criteria],
         "is_revision": bool(revision_instructions),
         "theme_key": theme_key,
+        "self_critique": {
+            "was_rewritten": self_critique_result.get("was_rewritten", False),
+            "scores": self_critique_result.get("scores", {}),
+            "weaknesses": self_critique_result.get("weaknesses", []),
+        },
     }
