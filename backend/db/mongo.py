@@ -75,6 +75,9 @@ def notion_page_cache():
 def draft_preferences():
     return get_db()["draft_preferences"]
 
+def chat_snapshots():
+    return get_db()["chat_snapshots"]
+
 
 async def ensure_indexes():
     """Create all MongoDB indexes. Call once at startup. Skips indexes that already exist."""
@@ -169,6 +172,11 @@ async def ensure_indexes():
     await _idx("notifications", [("user_email", 1), ("read", 1), ("created_at", -1)])
     await _idx("notifications", "created_at", expireAfterSeconds=30 * 24 * 3600)
     await _idx("notifications", [("type", 1), ("created_at", -1)])
+
+    # chat_snapshots (conversation history / versioning)
+    await _idx("chat_snapshots", [("pipeline_id", 1), ("user_email", 1), ("snapshot_at", -1)])
+    await _idx("chat_snapshots", [("pipeline_id", 1), ("snapshot_at", -1)])
+    await _idx("chat_snapshots", "snapshot_at", expireAfterSeconds=90 * 24 * 3600)  # 90-day TTL
 
     # draft_preferences (preference learning)
     await _idx("draft_preferences", [("user_id", 1), ("created_at", -1)])

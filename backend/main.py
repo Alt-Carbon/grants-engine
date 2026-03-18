@@ -2321,34 +2321,83 @@ async def save_chat_history(
     body: ChatHistorySaveRequest,
     _: None = Depends(verify_internal),
 ):
-    """Save/upsert chat history for a pipeline (scoped to user if email provided)."""
-    from backend.db.mongo import drafter_chat_history
+    """Save/upsert chat history for a pipeline. Snapshots previous version for history."""
+    from backend.db.mongo import drafter_chat_history, chat_snapshots
     from pymongo.errors import DuplicateKeyError as DupKeyError
 
+    now_iso = datetime.now(timezone.utc).isoformat()
     update_doc: dict = {
         "pipeline_id": body.pipeline_id,
         "grant_id": body.grant_id,
         "sections": body.sections,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": now_iso,
     }
     if body.user_email:
         update_doc["user_email"] = body.user_email
     if body.session_id:
         update_doc["session_id"] = body.session_id
 
-    # Build query key — scoped to user if email provided
     query: dict = {"pipeline_id": body.pipeline_id}
     if body.user_email:
         query["user_email"] = body.user_email
 
-    # Use replace_one for clean upsert, with DuplicateKeyError fallback
+    # Snapshot the previous version before overwriting (for conversation history)
+    try:
+        existing = await drafter_chat_history().find_one(query)
+        if existing:
+            existing_sections = existing.get("sections", {})
+            # Only snapshot if there are actual messages (not just system init messages)
+            has_content = any(
+                len(msgs) > 1 for msgs in existing_sections.values()
+                if isinstance(msgs, list)
+            )
+            if has_content:
+                # Check if last snapshot is different (avoid duplicate snapshots from rapid saves)
+                last_snap = await chat_snapshots().find_one(
+                    {"pipeline_id": body.pipeline_id, "user_email": body.user_email or None},
+                    sort=[("snapshot_at", -1)],
+                )
+                # Only create new snapshot if >5 min since last one or session_id changed
+                should_snapshot = True
+                if last_snap:
+                    last_session = last_snap.get("session_id", "")
+                    if last_session == body.session_id:
+                        # Same session — only snapshot every 5 minutes
+                        from dateutil.parser import parse as parse_dt
+                        try:
+                            last_time = parse_dt(last_snap["snapshot_at"])
+                            now_time = datetime.now(timezone.utc)
+                            if (now_time - last_time).total_seconds() < 300:
+                                should_snapshot = False
+                        except Exception:
+                            pass
+
+                if should_snapshot:
+                    snapshot = {
+                        "pipeline_id": body.pipeline_id,
+                        "grant_id": body.grant_id,
+                        "user_email": body.user_email,
+                        "session_id": body.session_id or existing.get("session_id"),
+                        "sections": existing_sections,
+                        "snapshot_at": datetime.now(timezone.utc),
+                        "message_count": sum(
+                            len(msgs) for msgs in existing_sections.values()
+                            if isinstance(msgs, list)
+                        ),
+                        "section_names": list(existing_sections.keys()),
+                    }
+                    await chat_snapshots().insert_one(snapshot)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug("Chat snapshot failed (non-critical): %s", e)
+
+    # Save current version
     try:
         await drafter_chat_history().replace_one(query, update_doc, upsert=True)
     except DupKeyError:
-        # Doc already exists — just update it (no upsert needed)
         await drafter_chat_history().update_one(query, {"$set": update_doc})
 
-    # Clean up orphan docs (no user_email) for this pipeline
+    # Clean up orphan docs
     if body.user_email:
         try:
             await drafter_chat_history().delete_many(
@@ -2382,6 +2431,108 @@ async def clear_section_history(
         {"$unset": {f"sections.{section_name}": ""}},
     )
     return {"status": "cleared", "pipeline_id": pipeline_id, "section_name": section_name}
+
+
+@app.get("/drafter/chat-sessions/{pipeline_id}")
+async def list_chat_sessions(
+    pipeline_id: str,
+    user_email: Optional[str] = None,
+    limit: int = 20,
+    _: None = Depends(verify_internal),
+):
+    """List past conversation snapshots for a pipeline (for session history UI)."""
+    from backend.db.mongo import chat_snapshots
+
+    query: dict = {"pipeline_id": pipeline_id}
+    if user_email:
+        query["user_email"] = user_email
+
+    docs = await chat_snapshots().find(
+        query,
+        {
+            "sections": 0,  # Don't send full messages in the list — too heavy
+        },
+    ).sort("snapshot_at", -1).to_list(limit)
+
+    sessions = []
+    for doc in docs:
+        sessions.append({
+            "id": str(doc["_id"]),
+            "session_id": doc.get("session_id"),
+            "snapshot_at": doc.get("snapshot_at", "").isoformat() if hasattr(doc.get("snapshot_at", ""), "isoformat") else str(doc.get("snapshot_at", "")),
+            "message_count": doc.get("message_count", 0),
+            "section_names": doc.get("section_names", []),
+            "user_email": doc.get("user_email"),
+        })
+
+    return {"pipeline_id": pipeline_id, "sessions": sessions}
+
+
+@app.get("/drafter/chat-sessions/{pipeline_id}/{snapshot_id}")
+async def get_chat_snapshot(
+    pipeline_id: str,
+    snapshot_id: str,
+    _: None = Depends(verify_internal),
+):
+    """Load a specific conversation snapshot (full messages)."""
+    from backend.db.mongo import chat_snapshots
+    from bson import ObjectId
+
+    try:
+        doc = await chat_snapshots().find_one({"_id": ObjectId(snapshot_id), "pipeline_id": pipeline_id})
+    except Exception:
+        doc = None
+
+    if not doc:
+        return {"error": "Snapshot not found"}
+
+    doc.pop("_id", None)
+    if hasattr(doc.get("snapshot_at"), "isoformat"):
+        doc["snapshot_at"] = doc["snapshot_at"].isoformat()
+    return doc
+
+
+@app.post("/drafter/chat-sessions/{pipeline_id}/{snapshot_id}/restore")
+async def restore_chat_snapshot(
+    pipeline_id: str,
+    snapshot_id: str,
+    user_email: Optional[str] = None,
+    _: None = Depends(verify_internal),
+):
+    """Restore a past snapshot as the current conversation."""
+    from backend.db.mongo import chat_snapshots, drafter_chat_history
+    from bson import ObjectId
+    from pymongo.errors import DuplicateKeyError as DupKeyError
+
+    try:
+        snap = await chat_snapshots().find_one({"_id": ObjectId(snapshot_id), "pipeline_id": pipeline_id})
+    except Exception:
+        snap = None
+
+    if not snap:
+        return {"error": "Snapshot not found"}
+
+    # Restore: overwrite the current chat history with the snapshot
+    restore_doc: dict = {
+        "pipeline_id": pipeline_id,
+        "grant_id": snap.get("grant_id", ""),
+        "sections": snap.get("sections", {}),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "session_id": snap.get("session_id"),
+    }
+    if user_email:
+        restore_doc["user_email"] = user_email
+
+    query: dict = {"pipeline_id": pipeline_id}
+    if user_email:
+        query["user_email"] = user_email
+
+    try:
+        await drafter_chat_history().replace_one(query, restore_doc, upsert=True)
+    except DupKeyError:
+        await drafter_chat_history().update_one(query, {"$set": restore_doc})
+
+    return {"status": "restored", "pipeline_id": pipeline_id, "snapshot_id": snapshot_id}
 
 
 async def _predraft_validate(grant: dict) -> dict | None:

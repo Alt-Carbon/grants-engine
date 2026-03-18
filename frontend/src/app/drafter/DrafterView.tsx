@@ -544,6 +544,11 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [clearingSection, setClearingSection] = useState(false);
   const [generatingBrief, setGeneratingBrief] = useState(false);
+  const [pastSessions, setPastSessions] = useState<
+    { id: string; snapshot_at: string; message_count: number; section_names: string[]; session_id?: string }[]
+  >([]);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  const [restoringSession, setRestoringSession] = useState<string | null>(null);
   const [streamingByKey, setStreamingByKey] = useState<Record<string, string>>({});
   const [streamStatusByKey, setStreamStatusByKey] = useState<Record<string, string>>({});
 
@@ -696,6 +701,65 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, tiles.length, historyKey, sessionStatus]);
+
+  // -- Load past sessions when timeline opens ---------------------------------
+  useEffect(() => {
+    if (!timelineOpen || !selectedId) return;
+    setLoadingSessions(true);
+    let cancelled = false;
+    (async () => {
+      try {
+        let url = `/api/drafter/chat-sessions?pipeline_id=${encodeURIComponent(selectedId)}`;
+        if (userEmail) url += `&user_email=${encodeURIComponent(userEmail)}`;
+        const res = await fetch(url);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setPastSessions(data.sessions ?? []);
+      } catch {
+        // silent
+      } finally {
+        if (!cancelled) setLoadingSessions(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [timelineOpen, selectedId, userEmail]);
+
+  // -- Restore a past session ------------------------------------------------
+  const restoreSession = useCallback(async (snapshotId: string) => {
+    if (!selectedId || restoringSession) return;
+    setRestoringSession(snapshotId);
+    try {
+      let url = `/api/drafter/chat-sessions?pipeline_id=${encodeURIComponent(selectedId)}&snapshot_id=${encodeURIComponent(snapshotId)}`;
+      if (userEmail) url += `&user_email=${encodeURIComponent(userEmail)}`;
+      const res = await fetch(url, { method: "POST" });
+      if (!res.ok) throw new Error("Restore failed");
+
+      // Reload chat history from DB
+      const savedSections = await loadChatHistories(selectedId, userEmail);
+      if (savedSections) {
+        setChatHistories((prev) => {
+          const next = { ...prev };
+          for (const tile of tiles) {
+            const key = buildKey(selectedId, tile.id);
+            const savedMsgs = savedSections[tile.label];
+            if (savedMsgs && savedMsgs.length > 0) {
+              next[key] = savedMsgs;
+              if (savedMsgs.some((m: ChatMessage) => m.role === "system" && m.metadata?.status === "Approved")) {
+                setApprovedSections((s) => new Set(s).add(key));
+              }
+            }
+          }
+          return next;
+        });
+      }
+
+      setTimelineOpen(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Restore failed");
+    } finally {
+      setRestoringSession(null);
+    }
+  }, [selectedId, userEmail, tiles, restoringSession]);
 
   // -- Cache state for navigation persistence ---------------------------------
   useEffect(() => {
@@ -1846,7 +1910,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       {/* ---- RIGHT: SETTINGS SLIDE-OVER ---------------------------------- */}
       <DrafterSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
-      {/* ---- RIGHT: ACTIVITY TIMELINE (SLIDE-OVER) ----------------------- */}
+      {/* ---- RIGHT: ACTIVITY TIMELINE + SESSION HISTORY ------------------- */}
       {timelineOpen && (
         <>
           {/* Backdrop */}
@@ -1937,6 +2001,63 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                   ))}
                 </div>
               )}
+
+              {/* ── Past Sessions ─────────────────────────── */}
+              <div className="border-t border-gray-100 px-4 py-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <History className="h-3.5 w-3.5 text-gray-400" />
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Past Sessions
+                  </span>
+                </div>
+
+                {loadingSessions ? (
+                  <div className="flex items-center justify-center py-4">
+                    <Loader2 className="h-4 w-4 animate-spin text-gray-300" />
+                  </div>
+                ) : pastSessions.length === 0 ? (
+                  <p className="text-[11px] text-gray-300 py-2">
+                    No past sessions saved yet
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {pastSessions.map((s) => {
+                      const date = new Date(s.snapshot_at);
+                      const isRestoring = restoringSession === s.id;
+                      return (
+                        <button
+                          key={s.id}
+                          onClick={() => restoreSession(s.id)}
+                          disabled={!!restoringSession}
+                          className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left transition-colors hover:bg-violet-50 disabled:opacity-50"
+                        >
+                          <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-violet-50 text-violet-400">
+                            {isRestoring ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <RotateCcw className="h-3 w-3" />
+                            )}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-medium text-gray-600">
+                              {date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                              {" "}
+                              {date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+                            </p>
+                            <p className="mt-0.5 text-[11px] text-gray-400 truncate">
+                              {s.message_count} messages · {s.section_names.length} sections
+                            </p>
+                            <p className="mt-0.5 text-[10px] text-gray-300 truncate">
+                              {s.section_names.slice(0, 3).join(", ")}
+                              {s.section_names.length > 3 ? ` +${s.section_names.length - 3}` : ""}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </>
