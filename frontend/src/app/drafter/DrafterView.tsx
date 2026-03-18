@@ -477,13 +477,23 @@ interface DrafterCache {
   sessionId: string; // UUID per drafter session
 }
 
-const _cache: { current: DrafterCache | null } = { current: null };
+const _cache: { current: DrafterCache | null; userEmail: string | null } = {
+  current: null,
+  userEmail: null,
+};
 
-function saveToCache(c: DrafterCache) {
+function saveToCache(c: DrafterCache, email?: string) {
   _cache.current = c;
+  _cache.userEmail = email ?? null;
 }
 
-function loadFromCache(): DrafterCache | null {
+function loadFromCache(email?: string): DrafterCache | null {
+  // Don't return stale cache from a different user
+  if (_cache.userEmail && email && _cache.userEmail !== email) {
+    _cache.current = null;
+    _cache.userEmail = null;
+    return null;
+  }
   return _cache.current;
 }
 
@@ -492,9 +502,9 @@ function loadFromCache(): DrafterCache | null {
 // ---------------------------------------------------------------------------
 
 export function DrafterView({ pipelines }: DrafterViewProps) {
-  const { data: session } = useSession();
+  const { data: session, status: sessionStatus } = useSession();
   const userEmail = session?.user?.email ?? undefined;
-  const cached = loadFromCache();
+  const cached = loadFromCache(userEmail);
   const [sessionId] = useState(
     () => cached?.sessionId ?? crypto.randomUUID()
   );
@@ -646,15 +656,20 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   }, [selectedPipeline?.grant_id]);
 
   // -- Load persisted chat history from DB -----------------------------------
+  // Build a stable key that includes userEmail so we re-fetch when user changes
+  const historyKey = userEmail ? `${selectedId}::${userEmail}` : selectedId;
+
   useEffect(() => {
-    if (!selectedId || !selectedPipeline || historyLoaded.has(selectedId)) return;
+    if (!selectedId || !selectedPipeline || historyLoaded.has(historyKey)) return;
     if (tiles.length === 0) return; // wait for tiles to be initialized
+    // Wait for session to resolve — don't fetch with undefined email
+    if (sessionStatus === "loading") return;
 
     let cancelled = false;
     (async () => {
       const savedSections = await loadChatHistories(selectedId, userEmail);
       if (cancelled || !savedSections) {
-        setHistoryLoaded((prev) => new Set(prev).add(selectedId));
+        setHistoryLoaded((prev) => new Set(prev).add(historyKey));
         return;
       }
 
@@ -675,12 +690,12 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         return next;
       });
 
-      setHistoryLoaded((prev) => new Set(prev).add(selectedId));
+      setHistoryLoaded((prev) => new Set(prev).add(historyKey));
     })();
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, tiles.length]);
+  }, [selectedId, tiles.length, historyKey, sessionStatus]);
 
   // -- Cache state for navigation persistence ---------------------------------
   useEffect(() => {
@@ -693,8 +708,8 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       agentInfo,
       historyLoaded: Array.from(historyLoaded),
       sessionId,
-    });
-  }, [selectedId, activeTileId, tilesMap, chatHistories, approvedSections, agentInfo, historyLoaded, sessionId]);
+    }, userEmail);
+  }, [selectedId, activeTileId, tilesMap, chatHistories, approvedSections, agentInfo, historyLoaded, sessionId, userEmail]);
 
   // -- Flush pending save on unmount ------------------------------------------
   useEffect(() => {
