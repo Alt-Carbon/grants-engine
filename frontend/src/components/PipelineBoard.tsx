@@ -128,11 +128,6 @@ interface PipelineBoardProps {
 export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
   const router = useRouter();
   const [grants, setGrants] = useState<Record<string, Grant[]>>(initialGrants);
-
-  // Sync with filtered grants from parent (search/filter changes)
-  useEffect(() => {
-    setGrants(initialGrants);
-  }, [initialGrants]);
   const [updatingIds, setUpdatingIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [selectedGrantId, setSelectedGrantId] = useGrantUrl();

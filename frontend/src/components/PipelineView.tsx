@@ -177,6 +177,12 @@ export function PipelineView({ initialGrants }: PipelineViewProps) {
   const totalFiltered = Object.values(filteredGrants).reduce((sum, arr) => sum + arr.length, 0);
   const totalAll = Object.values(initialGrants).reduce((sum, arr) => sum + arr.length, 0);
 
+  // Stable key for PipelineBoard — forces remount when filter results change
+  const boardKey = useMemo(
+    () => `board-${totalFiltered}-${filters.search}-${filters.themes.join(",")}-${filters.scoreRange}-${filters.deadline}-${filters.funding}-${filters.geography}`,
+    [totalFiltered, filters]
+  );
+
   const updateFilter = useCallback(<K extends keyof PipelineFilters>(
     key: K,
     value: PipelineFilters[K]
@@ -452,7 +458,7 @@ export function PipelineView({ initialGrants }: PipelineViewProps) {
       {/* ── Active view ─────────────────────────────────────────── */}
       <div className="flex-1 overflow-auto">
         {view === "kanban" ? (
-          <PipelineBoard initialGrants={filteredGrants} />
+          <PipelineBoard key={boardKey} initialGrants={filteredGrants} />
         ) : (
           <PipelineTable initialGrants={filteredGrants} />
         )}
