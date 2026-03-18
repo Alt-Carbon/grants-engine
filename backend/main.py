@@ -21,7 +21,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -2363,9 +2363,8 @@ async def save_chat_history(
                     last_session = last_snap.get("session_id", "")
                     if last_session == body.session_id:
                         # Same session — only snapshot every 5 minutes
-                        from dateutil.parser import parse as parse_dt
                         try:
-                            last_time = parse_dt(last_snap["snapshot_at"])
+                            last_time = last_snap["snapshot_at"] if isinstance(last_snap["snapshot_at"], datetime) else datetime.fromisoformat(str(last_snap["snapshot_at"]).replace("Z", "+00:00"))
                             now_time = datetime.now(timezone.utc)
                             if (now_time - last_time).total_seconds() < 300:
                                 should_snapshot = False
@@ -2804,7 +2803,7 @@ class RecordOutcomeRequest(BaseModel):
     grant_id: str
     outcome: str  # "won" | "rejected" | "shortlisted" | "withdrawn"
     feedback: str = ""
-    section_feedback: Optional[Dict] = None
+    section_feedback: Optional[Dict[str, Any]] = None
     lessons_learned: Optional[List[str]] = None
     what_worked: Optional[List[str]] = None
     what_failed: Optional[List[str]] = None
