@@ -2321,12 +2321,9 @@ async def save_chat_history(
     body: ChatHistorySaveRequest,
     _: None = Depends(verify_internal),
 ):
-    """Save/upsert chat history for a pipeline (scoped to user if email provided).
-
-    If user_email is provided, first checks for an unscoped doc and migrates it.
-    This prevents duplicate documents for the same pipeline.
-    """
+    """Save/upsert chat history for a pipeline (scoped to user if email provided)."""
     from backend.db.mongo import drafter_chat_history
+    from pymongo.errors import DuplicateKeyError as DupKeyError
 
     update_doc: dict = {
         "pipeline_id": body.pipeline_id,
@@ -2344,27 +2341,25 @@ async def save_chat_history(
     if body.user_email:
         query["user_email"] = body.user_email
 
-        # Check if there's an orphaned doc without user_email — adopt it
-        orphan = await drafter_chat_history().find_one(
-            {"pipeline_id": body.pipeline_id, "user_email": {"$exists": False}}
-        )
-        if not orphan:
-            orphan = await drafter_chat_history().find_one(
+    # Use replace_one for clean upsert, with DuplicateKeyError fallback
+    try:
+        await drafter_chat_history().replace_one(query, update_doc, upsert=True)
+    except DupKeyError:
+        # Doc already exists — just update it (no upsert needed)
+        await drafter_chat_history().update_one(query, {"$set": update_doc})
+
+    # Clean up orphan docs (no user_email) for this pipeline
+    if body.user_email:
+        try:
+            await drafter_chat_history().delete_many(
                 {"pipeline_id": body.pipeline_id, "user_email": None}
             )
-        if orphan:
-            # Migrate: update the orphaned doc with user_email + new data
-            await drafter_chat_history().update_one(
-                {"_id": orphan["_id"]},
-                {"$set": update_doc},
+            await drafter_chat_history().delete_many(
+                {"pipeline_id": body.pipeline_id, "user_email": {"$exists": False}}
             )
-            return {"status": "saved", "pipeline_id": body.pipeline_id, "user_email": body.user_email}
+        except Exception:
+            pass
 
-    await drafter_chat_history().update_one(
-        query,
-        {"$set": update_doc},
-        upsert=True,
-    )
     return {"status": "saved", "pipeline_id": body.pipeline_id, "user_email": body.user_email}
 
 
