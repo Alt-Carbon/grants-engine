@@ -712,28 +712,35 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   }, [selectedId, activeTileId, tilesMap, chatHistories, approvedSections, agentInfo, historyLoaded, sessionId, userEmail]);
 
   // -- Flush pending save on unmount ------------------------------------------
+  // Store userEmail in a ref so the cleanup function always has the latest value
+  const userEmailRef = useRef(userEmail);
+  userEmailRef.current = userEmail;
+
   useEffect(() => {
     return () => {
       // Cancel any debounced save and save immediately
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
       const pipeline = pipelines.find((p) => p._id === selectedId);
-      if (pipeline && tilesRef.current.length > 0) {
+      const email = userEmailRef.current;
+      if (pipeline && tilesRef.current.length > 0 && email) {
         saveChatHistories(
           selectedId,
           pipeline.grant_id,
           tilesRef.current,
           chatHistoriesRef.current,
-          userEmail,
+          email,
           sessionId
         );
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, userEmail, sessionId]);
+  }, [selectedId, sessionId]);
 
   // -- Debounced auto-save (uses refs for latest state) ----------------------
   const triggerSave = useCallback(() => {
     if (!selectedPipeline) return;
+    // Don't save until we have the user's email — prevents orphan docs
+    if (!userEmail) return;
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
 
     setSaveStatus("saving");

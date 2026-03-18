@@ -2276,14 +2276,40 @@ async def get_chat_history(
     user_email: Optional[str] = None,
     _: None = Depends(verify_internal),
 ):
-    """Load persisted chat history for a pipeline (optionally scoped to user)."""
+    """Load persisted chat history for a pipeline (optionally scoped to user).
+
+    Tries user-scoped query first, falls back to unscoped if no match.
+    This handles the case where history was saved before user_email was available.
+    If an unscoped doc is found, it is migrated to the user-scoped key.
+    """
     from backend.db.mongo import drafter_chat_history
 
-    query: dict = {"pipeline_id": pipeline_id}
-    if user_email:
-        query["user_email"] = user_email
+    doc = None
 
-    doc = await drafter_chat_history().find_one(query)
+    # 1. Try user-scoped query first
+    if user_email:
+        doc = await drafter_chat_history().find_one(
+            {"pipeline_id": pipeline_id, "user_email": user_email}
+        )
+
+    # 2. Fall back to unscoped (no user_email field or null)
+    if not doc:
+        doc = await drafter_chat_history().find_one(
+            {"pipeline_id": pipeline_id, "user_email": {"$exists": False}}
+        )
+        # Also try where user_email is explicitly null
+        if not doc:
+            doc = await drafter_chat_history().find_one(
+                {"pipeline_id": pipeline_id, "user_email": None}
+            )
+
+        # 3. Migrate: attach user_email to this doc so future loads find it directly
+        if doc and user_email:
+            await drafter_chat_history().update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"user_email": user_email}},
+            )
+
     if not doc:
         return {"pipeline_id": pipeline_id, "sections": {}, "user_email": user_email}
     doc.pop("_id", None)
@@ -2295,13 +2321,12 @@ async def save_chat_history(
     body: ChatHistorySaveRequest,
     _: None = Depends(verify_internal),
 ):
-    """Save/upsert chat history for a pipeline (scoped to user if email provided)."""
-    from backend.db.mongo import drafter_chat_history
+    """Save/upsert chat history for a pipeline (scoped to user if email provided).
 
-    # Build query key — scoped to user if email provided
-    query: dict = {"pipeline_id": body.pipeline_id}
-    if body.user_email:
-        query["user_email"] = body.user_email
+    If user_email is provided, first checks for an unscoped doc and migrates it.
+    This prevents duplicate documents for the same pipeline.
+    """
+    from backend.db.mongo import drafter_chat_history
 
     update_doc: dict = {
         "pipeline_id": body.pipeline_id,
@@ -2313,6 +2338,27 @@ async def save_chat_history(
         update_doc["user_email"] = body.user_email
     if body.session_id:
         update_doc["session_id"] = body.session_id
+
+    # Build query key — scoped to user if email provided
+    query: dict = {"pipeline_id": body.pipeline_id}
+    if body.user_email:
+        query["user_email"] = body.user_email
+
+        # Check if there's an orphaned doc without user_email — adopt it
+        orphan = await drafter_chat_history().find_one(
+            {"pipeline_id": body.pipeline_id, "user_email": {"$exists": False}}
+        )
+        if not orphan:
+            orphan = await drafter_chat_history().find_one(
+                {"pipeline_id": body.pipeline_id, "user_email": None}
+            )
+        if orphan:
+            # Migrate: update the orphaned doc with user_email + new data
+            await drafter_chat_history().update_one(
+                {"_id": orphan["_id"]},
+                {"$set": update_doc},
+            )
+            return {"status": "saved", "pipeline_id": body.pipeline_id, "user_email": body.user_email}
 
     await drafter_chat_history().update_one(
         query,
