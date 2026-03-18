@@ -2551,16 +2551,10 @@ async def _predraft_validate(grant: dict) -> dict | None:
         if deadline_dt and deadline_dt < datetime.now(timezone.utc):
             return {"check": "deadline", "reason": f"Grant deadline {deadline_dt.strftime('%Y-%m-%d')} has expired"}
 
-    # 3. Score floor
-    scores = grant.get("scores") or {}
-    weighted_total = grant.get("weighted_total") or scores.get("weighted_total", 0)
-    if isinstance(weighted_total, (int, float)) and weighted_total < 4.0:
-        return {"check": "score_floor", "reason": f"Weighted score {weighted_total:.1f} is below minimum 4.0"}
+    # 3. Score floor — removed; any pursued grant should be draftable regardless of score
+    # Users can override via the pipeline or manual draft flow
 
-    # 4. Theme floor
-    theme_alignment = scores.get("theme_alignment", 0)
-    if isinstance(theme_alignment, (int, float)) and theme_alignment <= 2:
-        return {"check": "theme_floor", "reason": f"Theme alignment score {theme_alignment} is too low (≤2)"}
+    # 4. Theme floor — removed; let the draft guardrail handle thematic checks instead
 
     return None
 

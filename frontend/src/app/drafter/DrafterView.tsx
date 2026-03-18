@@ -509,7 +509,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     () => cached?.sessionId ?? crypto.randomUUID()
   );
   const [selectedId, setSelectedId] = useState(
-    cached?.selectedId ?? pipelines[0]?._id ?? ""
+    cached?.selectedId ?? pipelines[0]?._id ?? "__manual__"
   );
   const [activeTileId, setActiveTileId] = useState<string | null>(
     cached?.activeTileId ?? null
@@ -598,6 +598,30 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const approvedCount = tiles.filter((t) =>
     approvedSections.has(buildKey(selectedId, t.id))
   ).length;
+
+  // -- Init tiles for manual draft -------------------------------------------
+  useEffect(() => {
+    if (selectedId !== "__manual__") return;
+    if (tilesMap["__manual__"]) return; // already initialized
+
+    const defaultTiles: Tile[] = [
+      { id: "manual-1", label: "Section 1" },
+      { id: "manual-2", label: "Section 2" },
+      { id: "manual-3", label: "Section 3" },
+    ];
+    setTilesMap((prev) => ({ ...prev, __manual__: defaultTiles }));
+    setChatHistories((prev) => {
+      const next = { ...prev };
+      for (const tile of defaultTiles) {
+        const key = buildKey("__manual__", tile.id);
+        if (!next[key]) {
+          next[key] = [initSystemMessage(tile.label, "climatetech")];
+        }
+      }
+      return next;
+    });
+    setActiveTileId(defaultTiles[0].id);
+  }, [selectedId]);
 
   // -- Init tiles & histories on grant change --------------------------------
   useEffect(() => {
@@ -1431,12 +1455,19 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                 {p.grant_title || "Untitled"}
               </option>
             ))}
+            <option value="__manual__" className="font-medium text-violet-700">
+              + New Manual Draft
+            </option>
           </select>
-          {selectedPipeline?.grant_funder && (
+          {selectedId === "__manual__" ? (
+            <p className="mt-1 text-[11px] text-violet-500">
+              Draft without a pre-existing grant — paste questions directly
+            </p>
+          ) : selectedPipeline?.grant_funder ? (
             <p className="mt-1 text-[11px] text-gray-400 truncate">
               {selectedPipeline.grant_funder}
             </p>
-          )}
+          ) : null}
           <span
             className={`mt-1.5 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${themeConfig.bg} ${themeConfig.color}`}
           >

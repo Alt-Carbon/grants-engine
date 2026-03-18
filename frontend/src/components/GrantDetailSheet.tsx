@@ -223,7 +223,7 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                 {grant.deadline_urgent && (
                   <DeadlineChip deadline={grant.deadline} daysLeft={grant.days_to_deadline} />
                 )}
-                {(grant.status === "pursue" || grant.status === "pursuing") && (
+                {(grant.status === "pursue" || grant.status === "pursuing" || grant.status === "hold" || grant.status === "triage") && (
                   <button
                     onClick={async () => {
                       setDraftLoading(true);

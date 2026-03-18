@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import {
   DragDropContext,
   Droppable,
@@ -37,6 +38,17 @@ const COLUMNS = [
     dropHighlight: "bg-green-50/80 ring-2 ring-inset ring-green-300",
     barIdle: "border-green-200 bg-green-50 text-green-700",
     barOver: "border-green-400 bg-green-100 text-green-900 scale-105 shadow-md",
+  },
+  {
+    id: "hold",
+    label: "Hold",
+    targetStatus: "hold",
+    color: "orange",
+    headerCls: "border-orange-300 bg-orange-50",
+    countCls: "bg-orange-100 text-orange-800",
+    dropHighlight: "bg-orange-50/80 ring-2 ring-inset ring-orange-300",
+    barIdle: "border-orange-200 bg-orange-50 text-orange-700",
+    barOver: "border-orange-400 bg-orange-100 text-orange-900 scale-105 shadow-md",
   },
   {
     id: "drafting",
@@ -78,6 +90,7 @@ type ColumnId = (typeof COLUMNS)[number]["id"];
 function statusToColumn(status: string): ColumnId {
   if (status === "triage") return "shortlisted";
   if (status === "pursue" || status === "pursuing") return "pursue";
+  if (status === "hold") return "hold";
   if (status === "drafting") return "drafting";
   if (
     status === "submitted" ||
@@ -113,7 +126,13 @@ interface PipelineBoardProps {
 }
 
 export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
+  const router = useRouter();
   const [grants, setGrants] = useState<Record<string, Grant[]>>(initialGrants);
+
+  // Sync with filtered grants from parent (search/filter changes)
+  useEffect(() => {
+    setGrants(initialGrants);
+  }, [initialGrants]);
   const [updatingIds, setUpdatingIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [selectedGrantId, setSelectedGrantId] = useGrantUrl();
@@ -261,6 +280,20 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
 
     try {
       await persistStatus(draggableId, column.targetStatus);
+
+      // If moved to Drafting → trigger start-draft and navigate to drafter
+      if (dstId === "drafting") {
+        try {
+          await fetch("/api/drafter/trigger", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ grant_id: draggableId }),
+          });
+        } catch {
+          // Draft trigger failed — still allow the status change
+        }
+        router.push("/drafter");
+      }
     } catch (e) {
       setGrants(snapshot);
       setError(

@@ -36,6 +36,7 @@ const STATUS_LABELS: Record<string, string> = {
 const MOVE_OPTIONS = [
   { value: "triage",       label: "Shortlisted", dot: "bg-amber-400" },
   { value: "pursue",       label: "Pursue",      dot: "bg-green-400" },
+  { value: "hold",         label: "Hold",         dot: "bg-orange-400" },
   { value: "drafting",     label: "Drafting",     dot: "bg-purple-400" },
   { value: "submitted",    label: "Submitted",    dot: "bg-cyan-400" },
   { value: "human_passed", label: "Rejected",      dot: "bg-red-400" },
