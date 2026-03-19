@@ -55,19 +55,41 @@ from backend.utils.parsing import parse_json_safe, retry_async, api_health, Cred
 logger = logging.getLogger(__name__)
 
 # ── Default scoring weights (centralized in settings.py) ──────────────────────
+from pathlib import Path
+
 from backend.config.settings import get_settings as _get_settings
 
 DEFAULT_WEIGHTS: Dict[str, float] = _get_settings().get_scoring_weights()
 
+# ── Company profile loader (cached, used in all prompts) ──────────────────────
+_company_profile_cache: Optional[str] = None
+
+
+def _get_company_profile() -> str:
+    """Load company profile from knowledge file; cache for process lifetime."""
+    global _company_profile_cache
+    if _company_profile_cache is None:
+        profile_path = Path(__file__).parent.parent / "knowledge" / "altcarbon_profile.md"
+        try:
+            _company_profile_cache = profile_path.read_text(encoding="utf-8")[:3000]
+        except FileNotFoundError:
+            _company_profile_cache = f"{_get_settings().company_name} — company profile not found"
+    return _company_profile_cache
+
+
+def _get_company_name() -> str:
+    return _get_settings().company_name
+
+
 # ── Scoring prompt ─────────────────────────────────────────────────────────────
 SCORING_SYSTEM = (
-    "You are an expert grant analyst for AltCarbon, a climate technology startup based in India. "
+    "You are an expert grant analyst for {company_name}, a climate technology startup based in India. "
     "Respond ONLY with valid JSON — no prose, no markdown fences, no explanation before or after."
 )
 
 # ── Deep research prompt (second LLM pass — pursue/watch grants only) ──────────
 DEEP_ANALYSIS_SYSTEM = (
-    "You are a senior grant advisor for AltCarbon, a climate technology startup based in India "
+    "You are a senior grant advisor for {company_name}, a climate technology startup based in India "
     "working on CDR, MRV, agritech, AI for earth sciences, and social impact. "
     "You read grant RFPs thoroughly and produce structured research briefs that tell the team "
     "exactly what is required, whether they are eligible, and how to win. "
@@ -75,17 +97,10 @@ DEEP_ANALYSIS_SYSTEM = (
 )
 
 DEEP_ANALYSIS_PROMPT = """Read the following grant opportunity THOROUGHLY and produce a comprehensive
-research brief for AltCarbon's grants team.
+research brief for {company_name}'s grants team.
 
-AltCarbon profile (default — use when no internal knowledge provided):
-- India-based for-profit climate + data science company (DPIIT-registered startup)
-- HQ: IISc Campus, Bengaluru; Operations: Darjeeling & Eastern India
-- Core tech: Enhanced Rock Weathering (ERW) on 60,000+ acres, Biochar production, MRV platform (FELUDA), D-CAL laboratory
-- Team: ~50 people (engineers + scientists + field ops), 8,000+ farmers in network
-- Revenue from: Google/Frontier, Stripe, Shopify, UBS, Mitsubishi, BCG, Mitsui O.S.K. Lines
-- Verification: Isometric-verified carbon credits
-- Can provide: pilot data, lab results, audited financials, credit issuance records, company registration
-- Cannot provide: US/EU entity registration, nonprofit/501(c)(3) status
+{company_name} profile (default — use when no internal knowledge provided):
+{company_profile}
 
 {company_context_section}
 
@@ -122,7 +137,7 @@ Return this exact JSON structure (fill null where information is not found in th
     {{
       "criterion": "<specific eligibility requirement>",
       "altcarbon_status": "<met | likely_met | verify | not_met>",
-      "note": "<brief note on why and what AltCarbon needs to confirm or do>"
+      "note": "<brief note on why and what {company_name} needs to confirm or do>"
     }}
   ],
   "evaluation_criteria": [
@@ -156,13 +171,13 @@ Return this exact JSON structure (fill null where information is not found in th
     "audit_requirement": "<is an independent audit required? yes/no/conditional>"
   }},
   "red_flags": [
-    "<anything that could disqualify AltCarbon or make the application very difficult>"
+    "<anything that could disqualify {company_name} or make the application very difficult>"
   ],
-  "strategic_angle": "<2-3 sentences: exactly what narrative AltCarbon should lead with given this funder's stated priorities. Name the specific AltCarbon product/data/pilot that maps to the grant's evaluation criteria.>",
+  "strategic_angle": "<2-3 sentences: exactly what narrative {company_name} should lead with given this funder's stated priorities. Name the specific {company_name} product/data/pilot that maps to the grant's evaluation criteria.>",
   "application_tips": [
     "<specific, actionable tip for writing the application — e.g. 'Lead with the soil carbon MRV data from the Karnataka pilot — the evaluation criterion on measurable impact is worth 30%'>"
   ],
-  "opportunity_summary": "<4-sentence summary: (1) what this grant funds and its total budget, (2) what a successful applicant receives (money + non-monetary: mentorship, networking, visibility, lab access, etc.), (3) who the ideal applicant is, (4) why AltCarbon should care about this specific opportunity>",
+  "opportunity_summary": "<4-sentence summary: (1) what this grant funds and its total budget, (2) what a successful applicant receives (money + non-monetary: mentorship, networking, visibility, lab access, etc.), (3) who the ideal applicant is, (4) why {company_name} should care about this specific opportunity>",
   "application_process_detailed": "<step-by-step process in detail: (1) how to apply — online portal URL, email address, or postal submission, (2) required documents at each stage (LOI, concept note, full proposal, budget template, pitch deck, letters of support), (3) stages (e.g. LOI → shortlist → full proposal → interview → award), (4) review timeline — when to expect decisions, (5) any pre-registration, account creation, or partnership requirements before applying>",
   "contact": {{
     "name": "<program manager or contact person name if stated, else null>",
@@ -179,13 +194,13 @@ Return this exact JSON structure (fill null where information is not found in th
     "guidelines_url": "<URL of detailed program guidelines or RFP document if found, else null>"
   }},
   "similar_grants": [
-    "<name of similar programs or previous rounds mentioned in the content that AltCarbon should also track>"
+    "<name of similar programs or previous rounds mentioned in the content that {company_name} should also track>"
   ]
 }}"""
 
 # ── Past winners extraction (third pass — runs concurrently with deep analysis) ─
 WINNERS_EXTRACTION_SYSTEM = (
-    "You are a grant research analyst for AltCarbon, a climate technology startup in India. "
+    "You are a grant research analyst for {company_name}, a climate technology startup in India. "
     "Return ONLY valid JSON — no prose, no markdown fences."
 )
 
@@ -199,13 +214,13 @@ Source URL: {source_url}
 Content:
 {content}
 
-AltCarbon profile (for similarity scoring):
+{company_name} profile (for similarity scoring):
 - India-based for-profit climate + data science company (DPIIT-registered)
 - Core tech: ERW on 60,000+ acres, Biochar, MRV platform (FELUDA), D-CAL lab
 - Stage: early-growth with revenue; 50 people, 8,000+ farmers, Isometric-verified
 
 Extract ALL past winner/awardee entries you can find. For each winner assess how similar
-they are to AltCarbon — look for: climate/agritech/AI theme, startup type, Indian origin,
+they are to {company_name} — look for: climate/agritech/AI theme, startup type, Indian origin,
 similar technology (MRV, soil carbon, earth observation, precision ag).
 
 Return this exact JSON (no other text):
@@ -220,14 +235,14 @@ Return this exact JSON (no other text):
       "amount": "<amount received if stated, else null>",
       "website": "<their website URL if visible, else null>",
       "altcarbon_similarity": "<high|medium|low>",
-      "similarity_reason": "<one sentence: why similar or different to AltCarbon>"
+      "similarity_reason": "<one sentence: why similar or different to {company_name}>"
     }}
   ],
   "total_winners_found": <integer count of winners extracted>,
   "altcarbon_comparable_count": <count with high or medium similarity>,
   "funder_pattern": "<2-3 sentences: what patterns do you see in who gets funded? Sectors, geographies, org types, project stages. Be specific.>",
-  "altcarbon_fit_verdict": "<strong|moderate|weak|unknown — how well does AltCarbon's profile match the historical awardee profile?>",
-  "strategic_note": "<1-2 sentences: one concrete insight for AltCarbon based on past winners — e.g. 'All 4 Indian awardees were post-revenue; AltCarbon's Karnataka pilot data directly addresses this bar'>"
+  "altcarbon_fit_verdict": "<strong|moderate|weak|unknown — how well does {company_name}'s profile match the historical awardee profile?>",
+  "strategic_note": "<1-2 sentences: one concrete insight for {company_name} based on past winners — e.g. 'All 4 Indian awardees were post-revenue; {company_name}'s pilot data directly addresses this bar'>"
 }}
 
 If NO past winner data is visible in the content return:
@@ -236,25 +251,10 @@ If NO past winner data is visible in the content return:
   "altcarbon_fit_verdict": "unknown", "strategic_note": null}}"""
 
 
-SCORING_PROMPT = """You are scoring a grant opportunity for AltCarbon. Use the profile below to judge fit.
+SCORING_PROMPT = """You are scoring a grant opportunity for {company_name}. Use the profile below to judge fit.
 
-=== ALTCARBON PROFILE ===
-- India-based for-profit climate + data science company (DPIIT-registered startup)
-- HQ: IISc Campus, Bengaluru; Operations: Darjeeling & Eastern India
-- Core tech: Enhanced Rock Weathering (ERW) on 60,000+ acres, Biochar production, MRV platform (FELUDA), D-CAL laboratory
-- Team: ~50 people (engineers + scientists + field ops), 8,000+ farmers in network
-- Revenue from: Google/Frontier, Stripe, Shopify, UBS, Mitsubishi, BCG, Mitsui O.S.K. Lines
-- Verification: Isometric-verified carbon credits
-- Can provide: pilot data, lab results, audited financials, credit issuance records, company registration
-- Cannot provide: US/EU entity registration, nonprofit/501(c)(3) status, charitable registration
-
-Six focus themes:
-1. Climatetech — carbon removal (ERW, biochar), MRV, net-zero technology
-2. Agritech — soil carbon, precision agriculture, farmer technology, crop yield improvement
-3. AI for Sciences — AI applied to environmental and scientific problems
-4. Applied Earth Sciences — remote sensing, satellite, geospatial, geology
-5. Social Impact — inclusive climate solutions, rural communities, farmer livelihoods
-6. Deep Tech — frontier science & engineering (advanced materials, biotech, quantum, nanotechnology, robotics)
+=== COMPANY PROFILE ===
+{company_profile}
 
 {company_context_section}
 
@@ -280,13 +280,13 @@ Funder research context:
 
 1. theme_alignment:
    9-10 = Directly funds CDR, ERW, biochar, MRV, soil carbon monitoring, or carbon credit verification
-   7-8  = Funds broader climate tech, agritech, AI for earth sciences, or deep tech that AltCarbon works in
-   5-6  = Adjacent sector (clean energy, water, biodiversity) with partial overlap to AltCarbon's work
-   3-4  = Tangential (general sustainability, ESG, green finance) — AltCarbon could stretch to fit
+   7-8  = Funds broader climate tech, agritech, AI for earth sciences, or deep tech that {company_name} works in
+   5-6  = Adjacent sector (clean energy, water, biodiversity) with partial overlap to {company_name}'s work
+   3-4  = Tangential (general sustainability, ESG, green finance) — {company_name} could stretch to fit
    1-2  = Unrelated sector (fintech, pharma, arts, pure digital, social media, edtech)
 
 2. eligibility_confidence:
-   9-10 = AltCarbon explicitly qualifies: for-profit, DPIIT-registered, India-based, climate/agritech startup accepted
+   9-10 = {company_name} explicitly qualifies: for-profit, DPIIT-registered, India-based, climate/agritech startup accepted
    7-8  = Likely eligible: open to startups or companies, no org-type exclusion, India or global eligible
    5-6  = Uncertain: eligibility criteria unclear, or requires verification (e.g. "SME" may or may not include Indian startups)
    3-4  = Likely ineligible: requires nonprofit status, academic affiliation, specific country registration, or government entity
@@ -330,11 +330,11 @@ Return this exact JSON (no other text):
     "geography_fit": <int 1-10>,
     "competition_level": <int 1-10>
   }},
-  "evidence_found": ["<specific thing matching AltCarbon's mission>", ...],
-  "evidence_gaps": ["<requirement AltCarbon may not meet>", ...],
+  "evidence_found": ["<specific thing matching {company_name}'s mission>", ...],
+  "evidence_gaps": ["<requirement {company_name} may not meet>", ...],
   "red_flags": ["<serious disqualifying concern>"],
   "reasoning": "<2-3 sentences explaining the overall score and key trade-offs — be specific about which eligibility or scope issues matter most>",
-  "rationale": "<SPECIFIC 2-3 sentences: name the grant and funder, state exactly which AltCarbon theme (CDR/MRV/agritech/AI for sciences/earth sciences/social impact/deep tech) aligns with the funder's stated priorities, and what competitive edge AltCarbon has (India base, startup stage, specific technology). Be actionable and crisp — e.g. 'The Bezos CDR Fund directly funds companies building carbon removal measurement — AltCarbon's MRV platform addresses the core verification gap this program targets. India-headquartered with global pilots gives geographic diversity few CDR applicants offer.'>"
+  "rationale": "<SPECIFIC 2-3 sentences: name the grant and funder, state exactly which {company_name} theme (CDR/MRV/agritech/AI for sciences/earth sciences/social impact/deep tech) aligns with the funder's stated priorities, and what competitive edge {company_name} has (India base, startup stage, specific technology). Be actionable and crisp — e.g. 'The Bezos CDR Fund directly funds companies building carbon removal measurement — {company_name}'s MRV platform addresses the core verification gap this program targets. India-headquartered with global pilots gives geographic diversity few CDR applicants offer.'>"
 }}"""
 
 
@@ -343,20 +343,10 @@ Return this exact JSON (no other text):
 # minimum-funding gating — not for financial calculations).
 # The LLM extraction stores max_funding_usd as the raw original-currency amount
 # when currency != USD, so we convert here before comparing against the threshold.
-_USD_EXCHANGE_RATES: Dict[str, float] = {
-    "USD": 1.0,
-    "INR": 83.5,     # 1 USD ≈ ₹83.5
-    "EUR": 0.92,     # 1 USD ≈ €0.92
-    "GBP": 0.79,     # 1 USD ≈ £0.79
-    "CAD": 1.36,     # 1 USD ≈ CA$1.36
-    "AUD": 1.53,     # 1 USD ≈ A$1.53
-    "SGD": 1.34,     # 1 USD ≈ S$1.34
-    "JPY": 149.0,    # 1 USD ≈ ¥149
-    "BRL": 4.97,     # 1 USD ≈ R$4.97
-    "ZAR": 18.6,     # 1 USD ≈ R18.6 (South Africa)
-    "KES": 129.0,    # 1 USD ≈ KES 129 (Kenya)
-    "NGN": 1540.0,   # 1 USD ≈ ₦1,540 (Nigeria)
-}
+def _get_exchange_rates() -> Dict[str, float]:
+    """Lazy accessor for exchange rates from settings (avoids import-time settings load)."""
+    from backend.config.settings import get_settings
+    return get_settings().get_exchange_rates()
 
 _CURRENCY_SYMBOLS: Dict[str, str] = {
     "USD": "$", "INR": "₹", "EUR": "€", "GBP": "£",
@@ -364,12 +354,12 @@ _CURRENCY_SYMBOLS: Dict[str, str] = {
     "BRL": "R$", "ZAR": "R", "KES": "KES ", "NGN": "₦",
 }
 
-# Per-currency minimum funding thresholds.
-# Used instead of the USD conversion for currencies listed here — avoids
-# exchange-rate noise for Indian grants where ₹1.5L is the meaningful bar.
-_CURRENCY_MIN_FUNDING: Dict[str, int] = {
-    "INR": 150_000,   # ₹1.5 lakh — grants below this aren't worth the effort
-}
+def _get_currency_min_funding() -> Dict[str, float]:
+    """Lazy accessor for per-currency minimum funding thresholds from settings."""
+    from backend.config.settings import get_settings
+    return {
+        "INR": get_settings().min_funding_inr,
+    }
 
 # Currency values that mean "we don't know the currency".
 # When a funding amount is present but currency is unrecognised, the grant is
@@ -385,7 +375,7 @@ def _normalize_to_usd(amount: float, currency: str) -> float:
 
     Example: _normalize_to_usd(250_000, "INR") → 2,994.0 USD
     """
-    rate = _USD_EXCHANGE_RATES.get(currency.upper(), 1.0)
+    rate = _get_exchange_rates().get(currency.upper(), 1.0)
     return round(amount / rate, 2)
 
 
@@ -460,7 +450,7 @@ async def _resolve_unknown_currency(grant: Dict) -> Optional[Dict]:
             return None
 
         # Accept recognised currencies only
-        if resolved_currency not in _USD_EXCHANGE_RATES:
+        if resolved_currency not in _get_exchange_rates():
             logger.debug(
                 "Currency resolution returned unrecognised code '%s' for %s",
                 resolved_currency, grant.get("url", "")[:60],
@@ -520,7 +510,7 @@ def _check_hold_conditions(grant: Dict) -> Optional[str]:
 
     is_unknown = (
         cu in {t.upper() for t in _UNKNOWN_CURRENCY_TERMS}
-        or (len(cu) == 3 and cu not in _USD_EXCHANGE_RATES)
+        or (len(cu) == 3 and cu not in _get_exchange_rates())
         or len(cu) == 0
     )
     if is_unknown:
@@ -692,16 +682,17 @@ def _apply_hard_rules(grant: Dict, min_funding: int = 3_000) -> Optional[str]:
     4. Org-type eligibility explicitly excludes for-profit startups
     """
     # Rule 1: minimum funding (currency-aware)
-    # - INR grants: compared against _CURRENCY_MIN_FUNDING["INR"] (₹1.5L) directly
+    # - INR grants: compared against per-currency min funding (₹1.5L) directly
     # - USD grants: compared against min_funding ($3,000) directly
     # - Other currencies: converted to USD then compared against min_funding
     raw_funding = grant.get("max_funding_usd") or grant.get("max_funding")
     currency = (grant.get("currency") or "USD").upper()
+    currency_min_funding = _get_currency_min_funding()
     if raw_funding is not None and raw_funding > 0:
         sym = _CURRENCY_SYMBOLS.get(currency, f"{currency} ")
-        if currency in _CURRENCY_MIN_FUNDING:
+        if currency in currency_min_funding:
             # Use the currency-native threshold (e.g. ₹1.5L for INR)
-            cur_min = _CURRENCY_MIN_FUNDING[currency]
+            cur_min = currency_min_funding[currency]
             if raw_funding < cur_min:
                 return (
                     f"Below {sym}{cur_min:,} minimum funding "
@@ -948,11 +939,14 @@ async def _scrape_past_winners(grant: Dict) -> Dict:
         return empty
 
     async def _extract(c: str, src: str) -> Dict:
+        _cn = _get_company_name()
         prompt = WINNERS_EXTRACTION_PROMPT.format(
+            company_name=_cn,
             title=title, funder=funder, source_url=src, content=c
         )
         raw = await chat(
-            prompt, model=ANALYST_LIGHT, max_tokens=2048, system=WINNERS_EXTRACTION_SYSTEM
+            prompt, model=ANALYST_LIGHT, max_tokens=2048,
+            system=WINNERS_EXTRACTION_SYSTEM.format(company_name=_cn),
         )
         result = parse_json_safe(raw)
         return result if isinstance(result, dict) else {}
@@ -1010,8 +1004,9 @@ def _company_context_section(company_context: str) -> str:
     """Build the company context section for prompts. Empty if no context."""
     if not (company_context or "").strip():
         return ""
+    company_name = _get_company_name()
     return (
-        "AltCarbon internal knowledge (from Notion/Drive — use for eligibility and strategic angle):\n"
+        f"{company_name} internal knowledge (from Notion/Drive — use for eligibility and strategic angle):\n"
         f"{company_context.strip()[:4000]}\n\n"
     )
 
@@ -1049,7 +1044,10 @@ async def _deep_research_grant(
     full_content = (grant.get("raw_content") or "")[:10_000]
     themes_str = ", ".join(grant.get("themes_detected") or [])
 
+    _cn = _get_company_name()
     prompt = DEEP_ANALYSIS_PROMPT.format(
+        company_name=_cn,
+        company_profile=_get_company_profile(),
         title=grant.get("title") or grant.get("grant_name", ""),
         funder=grant.get("funder", ""),
         source_url=grant.get("source_url") or grant.get("url", ""),
@@ -1069,7 +1067,7 @@ async def _deep_research_grant(
     try:
         # Run deep analysis (Sonnet) and past-winners scraping (Haiku) concurrently.
         # _scrape_past_winners never raises, so gather is safe without return_exceptions.
-        deep_task    = chat(prompt, model=ANALYST_HEAVY, max_tokens=4096, system=DEEP_ANALYSIS_SYSTEM)
+        deep_task    = chat(prompt, model=ANALYST_HEAVY, max_tokens=4096, system=DEEP_ANALYSIS_SYSTEM.format(company_name=_cn))
         winners_task = _scrape_past_winners(grant)
 
         raw_text, winners_data = await asyncio.gather(deep_task, winners_task)
@@ -1309,7 +1307,10 @@ async def _score_grant(
     else:
         _funding_for_prompt = _raw_funding or "unknown"
 
+    _cn = _get_company_name()
     prompt = SCORING_PROMPT.format(
+        company_name=_cn,
+        company_profile=_get_company_profile(),
         title=grant.get("title") or grant.get("grant_name", ""),
         funder=grant.get("funder", ""),
         source_url=grant.get("source_url") or grant.get("url", ""),
@@ -1334,7 +1335,7 @@ async def _score_grant(
                 prompt,
                 model=ANALYST_HEAVY,
                 max_tokens=2048,   # was 1024 — raised to prevent JSON truncation
-                system=SCORING_SYSTEM,
+                system=SCORING_SYSTEM.format(company_name=_cn),
             )
             result = parse_json_safe(raw_text)
             if result and "scores" in result:
@@ -1369,10 +1370,12 @@ async def _score_grant(
     scores = {k: max(1, min(10, int(scores.get(k, 5)))) for k in weights}
     weighted_total = sum(scores[dim] * weight for dim, weight in weights.items())
 
-    # Red flag penalty: each red flag reduces weighted_total by 0.5, max penalty 2.0
+    # Red flag penalty: each red flag reduces weighted_total by a configurable amount
+    from backend.config.settings import get_settings
+    s = get_settings()
     red_flags = scoring.get("red_flags") or []
     if red_flags and not scoring_error:
-        penalty = min(len(red_flags) * 0.5, 2.0)
+        penalty = min(len(red_flags) * s.red_flag_penalty, s.red_flag_max_penalty)
         weighted_total = max(0.0, weighted_total - penalty)
         logger.debug(
             "Red flag penalty: -%0.1f (%d flags) for %s → %.2f",
@@ -1380,8 +1383,6 @@ async def _score_grant(
         )
 
     # Threshold-based action (model's suggestion is not used — thresholds are authoritative)
-    from backend.config.settings import get_settings
-    s = get_settings()
     if weighted_total >= s.pursue_threshold:
         action = "pursue"
     elif weighted_total >= s.watch_threshold:

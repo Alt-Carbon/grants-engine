@@ -27,7 +27,7 @@ from backend.utils.llm import chat, DRAFTER_DEFAULT, ANALYST_LIGHT, resolve_draf
 
 logger = logging.getLogger(__name__)
 
-WRITE_PROMPT = """You are writing a section of a grant application for AltCarbon.
+WRITE_PROMPT = """You are writing a section of a grant application for {company_name}.
 
 WRITING STYLE: {writing_style}
 THEME CONTEXT: {theme_display}
@@ -54,7 +54,7 @@ EVALUATION CRITERIA FOR THIS GRANT:
 COMPANY KNOWLEDGE FOR THIS SECTION (use as primary evidence base):
 {section_context}
 
-STYLE EXAMPLES (match this voice and tone — these are AltCarbon's past applications):
+STYLE EXAMPLES (match this voice and tone — these are {company_name}'s past applications):
 {style_examples}
 
 {custom_instructions_block}
@@ -84,7 +84,7 @@ ADDITIONAL INSTRUCTIONS:
 - Use the domain terminology naturally — don't force it, but prefer precise terms
 - Follow the tone and voice guidance consistently
 - If an outline was provided, ensure this section aligns with the overall narrative
-- Match AltCarbon's voice from the style examples
+- Match {company_name}'s voice from the style examples
 - For any required claim you cannot support with the provided knowledge, write exactly: [EVIDENCE NEEDED: <brief description of what's missing>]
 - Do NOT invent statistics, team names, funding amounts, or technical claims
 - Address the evaluation criteria directly
@@ -188,7 +188,8 @@ async def get_section_context(
 
             # Phase 2: Search for articulation doc chunks specifically
             if art_sections:
-                art_query = " ".join(art_sections) + f" {theme_key} AltCarbon"
+                from backend.config.settings import get_settings as _gs
+                art_query = " ".join(art_sections) + f" {theme_key} {_gs().company_name}"
                 art_results = search_similar(art_query, top_k=4, filter_dict=pc_filter or None)
                 # Merge, dedup
                 seen_ids = {r.get("id", r.get("_id", "")) for r in results}
@@ -302,6 +303,7 @@ async def _resolve_evidence_gaps(
 
     try:
         from backend.db.pinecone_store import is_pinecone_configured, search_similar
+        from backend.config.settings import get_settings as _get_settings
         if not is_pinecone_configured():
             return content
     except Exception:
@@ -315,7 +317,7 @@ async def _resolve_evidence_gaps(
                 pc_filter["themes"] = {"$in": grant_themes}
 
             results = search_similar(
-                f"{gap_desc} {theme_key} AltCarbon",
+                f"{gap_desc} {theme_key} {_get_settings().company_name}",
                 top_k=3,
                 filter_dict=pc_filter or None,
             )
@@ -389,9 +391,10 @@ async def write_section(
     - funder_terms: extracted funder language to mirror in writing
     """
     from backend.agents.drafter.theme_profiles import get_theme_profile
+    from backend.config.settings import get_settings
 
     section_name = section.get("name", f"Section {section_num}")
-    word_limit = section.get("word_limit") or 500
+    word_limit = section.get("word_limit") or get_settings().default_section_word_limit
     word_limit_note = " (hard limit — do not exceed)" if section.get("word_limit") else " (guideline)"
 
     # Load theme profile
@@ -482,7 +485,9 @@ async def write_section(
     # Build the enriched custom instructions with all learned context
     enriched_custom = preferences_block + funder_terms_block + criteria_map_block + approved_examples_block + custom_instructions_block
 
+    from backend.config.settings import get_settings as _get_settings
     prompt = WRITE_PROMPT.format(
+        company_name=_get_settings().company_name,
         writing_style=style_desc,
         theme_display=theme_display,
         tone_guidance=tone_guidance,

@@ -64,7 +64,8 @@ def _assemble_markdown(
             continue
         content = sec.get("content", "")
         word_count = sec.get("word_count", len(content.split()))
-        word_limit = sec.get("word_limit", 500)
+        from backend.config.settings import get_settings
+        word_limit = sec.get("word_limit", get_settings().default_section_word_limit)
         within = sec.get("within_limit", True)
         status = "✓" if within else f"⚠ OVER LIMIT ({word_count}/{word_limit})"
 
@@ -144,7 +145,7 @@ async def exporter_node(state: GrantState) -> Dict:
             name: {
                 "content": sec.get("content", ""),
                 "word_count": sec.get("word_count", 0),
-                "word_limit": sec.get("word_limit", 500),
+                "word_limit": sec.get("word_limit", get_settings().default_section_word_limit),
                 "within_limit": sec.get("within_limit", True),
             }
             for name, sec in approved_sections.items()

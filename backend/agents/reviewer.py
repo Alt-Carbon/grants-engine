@@ -18,7 +18,11 @@ from backend.utils.llm import chat, DRAFTER_DEFAULT
 
 logger = logging.getLogger(__name__)
 
-REVISION_THRESHOLD = 6  # Sections scoring below this get flagged for revision
+def _get_thresholds():
+    """Lazy accessor for reviewer guardrail thresholds from settings."""
+    from backend.config.settings import get_settings
+    s = get_settings()
+    return s.reviewer_revision_threshold, s.reviewer_export_threshold
 
 REVIEW_PROMPT = """You are a senior grant reviewer performing a final quality check on a grant application for AltCarbon.
 
@@ -54,7 +58,7 @@ Respond ONLY with valid JSON:
   "evidence_gaps_critical": ["<any [EVIDENCE NEEDED] items that are critical to fix>"],
   "coherence_score": <int 1-10>,
   "coherence_notes": "<do sections tell a consistent story? any contradictions or gaps between sections?>",
-  "ready_for_export": <true if overall_score >= 6.5 else false>,
+  "ready_for_export": <true if overall_score >= {export_threshold} else false>,
   "summary": "<2-3 sentence overall assessment>"
 }}"""
 
@@ -96,12 +100,15 @@ async def reviewer_node(state: GrantState) -> Dict:
     except Exception:
         pass
 
+    revision_threshold, export_threshold = _get_thresholds()
+
     prompt = REVIEW_PROMPT.format(
         grant_title=grant.get("title", ""),
         funder=grant.get("funder", ""),
         theme=theme_display,
         criteria=criteria_text,
         draft=sections_text[:12000],
+        export_threshold=export_threshold,
     )
 
     try:
@@ -129,7 +136,7 @@ async def reviewer_node(state: GrantState) -> Dict:
     sections_needing_revision = []
     section_critiques = review.get("section_critiques", {})
     for sec_name, critique in section_critiques.items():
-        if isinstance(critique, dict) and critique.get("score", 10) < REVISION_THRESHOLD:
+        if isinstance(critique, dict) and critique.get("score", 10) < revision_threshold:
             sections_needing_revision.append({
                 "section_name": sec_name,
                 "score": critique.get("score"),
@@ -139,9 +146,9 @@ async def reviewer_node(state: GrantState) -> Dict:
 
     if sections_needing_revision:
         logger.info(
-            "Reviewer: %d sections below threshold (<%d): %s",
+            "Reviewer: %d sections below threshold (<%.1f): %s",
             len(sections_needing_revision),
-            REVISION_THRESHOLD,
+            revision_threshold,
             [s["section_name"] for s in sections_needing_revision],
         )
 

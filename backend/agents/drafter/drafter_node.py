@@ -254,8 +254,12 @@ async def drafter_node(state: GrantState) -> Dict:
 async def _drafter_node_inner(state: GrantState) -> Dict:
     """Inner drafter logic, wrapped by drafter_node() for error handling."""
     from backend.agents.drafter.theme_profiles import resolve_theme, get_theme_profile
+    from backend.config.settings import get_settings
     from backend.db.mongo import grants_scored
     from bson import ObjectId
+
+    _settings = get_settings()
+    _default_word_limit = _settings.default_section_word_limit
 
     grant_requirements = state.get("grant_requirements") or {}
     sections = grant_requirements.get("sections_required", [])
@@ -338,8 +342,8 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
             approved_sections[prev_name] = {
                 "content": content_to_save,
                 "word_count": len(content_to_save.split()),
-                "word_limit": prev_section.get("word_limit") or 500,
-                "within_limit": len(content_to_save.split()) <= (prev_section.get("word_limit") or 500),
+                "word_limit": prev_section.get("word_limit") or _default_word_limit,
+                "within_limit": len(content_to_save.split()) <= (prev_section.get("word_limit") or _default_word_limit),
                 "approved_at": datetime.now(timezone.utc).isoformat(),
             }
             logger.info("Drafter: section '%s' approved", prev_name)
@@ -370,7 +374,7 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
                     section_name=prev_name,
                     content=content_to_save,
                     word_count=len(content_to_save.split()),
-                    word_limit=prev_section.get("word_limit") or 500,
+                    word_limit=prev_section.get("word_limit") or _default_word_limit,
                     status="Approved",
                 )
             except Exception:
@@ -582,7 +586,7 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
             section_name=result["section_name"],
             content=result.get("content", ""),
             word_count=result.get("word_count", 0),
-            word_limit=section.get("word_limit", 500),
+            word_limit=section.get("word_limit", _default_word_limit),
             version=1,
             status="In Review",
             evidence_gaps=result.get("evidence_gaps"),

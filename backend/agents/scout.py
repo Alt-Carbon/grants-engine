@@ -1092,18 +1092,23 @@ _BROWSER_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-# Jina concurrency: keep to 3 with a small delay between requests to stay
-# within the free-tier limit of 10 RPM (6s per request at concurrency 1 is
-# safest, but 3-concurrent with ~1s sleep per batch keeps us under 20 RPM).
+# Jina concurrency: configurable via settings.jina_concurrency / settings.jina_delay.
+# Default: 3-concurrent with ~1s sleep per batch keeps us under 20 RPM (free-tier 10 RPM).
 _JINA_SEM: asyncio.Semaphore | None = None
-_JINA_INTER_REQUEST_DELAY = 1.0  # seconds between Jina requests per slot
 
 
 def _get_jina_sem() -> asyncio.Semaphore:
     global _JINA_SEM
     if _JINA_SEM is None:
-        _JINA_SEM = asyncio.Semaphore(3)
+        from backend.config.settings import get_settings
+        _JINA_SEM = asyncio.Semaphore(get_settings().jina_concurrency)
     return _JINA_SEM
+
+
+def _get_jina_delay() -> float:
+    """Lazy accessor for Jina inter-request delay from settings."""
+    from backend.config.settings import get_settings
+    return get_settings().jina_delay
 
 
 async def _fetch_with_jina(url: str, api_key: str = "") -> str:
@@ -1138,7 +1143,7 @@ async def _fetch_with_jina(url: str, api_key: str = "") -> str:
             )
         except CreditExhaustedError:
             return ""
-        await asyncio.sleep(_JINA_INTER_REQUEST_DELAY)
+        await asyncio.sleep(_get_jina_delay())
     if result is None:
         return ""
     api_health.record_success("jina")
@@ -1474,23 +1479,28 @@ class ScoutAgent:
 
         logger.info("Direct crawl: fetching %d known grant source pages", len(ALL_DIRECT_SOURCES))
 
+        from backend.config.settings import get_settings
+        _scout_settings = get_settings()
+        _enrich_timeout = float(_scout_settings.scout_enrichment_timeout)
+        _crawl_timeout = float(_scout_settings.scout_crawl_timeout)
+
         async def _safe_crawl(source: Dict[str, str]) -> Optional[Dict]:
             try:
                 return await asyncio.wait_for(
-                    self._crawl_direct_source(source), timeout=45.0
+                    self._crawl_direct_source(source), timeout=_enrich_timeout
                 )
             except (asyncio.TimeoutError, Exception) as e:
                 logger.debug("Direct crawl failed for %s: %s", source["url"], e)
                 return None
 
-        # Apply overall 180s timeout to the entire direct crawl phase
+        # Apply configurable timeout to the entire direct crawl phase
         try:
             results = await asyncio.wait_for(
                 asyncio.gather(*(_safe_crawl(s) for s in ALL_DIRECT_SOURCES)),
-                timeout=180.0,
+                timeout=_crawl_timeout,
             )
         except asyncio.TimeoutError:
-            logger.warning("Direct crawl hit 180s global timeout — partial results used")
+            logger.warning("Direct crawl hit %ds global timeout — partial results used", _scout_settings.scout_crawl_timeout)
             results = []
 
         valid = [r for r in results if r is not None]
@@ -1711,10 +1721,13 @@ class ScoutAgent:
                 item["_raw_title"] = raw_title  # preserve for quality filter
                 return item
 
-        # Wrap each enrich in a per-item timeout
+        # Wrap each enrich in a per-item timeout (configurable via settings)
+        from backend.config.settings import get_settings as _get_scout_settings
+        _enrich_item_timeout = float(_get_scout_settings().scout_enrichment_timeout)
+
         async def safe_enrich(item: Dict) -> Optional[Dict]:
             try:
-                return await asyncio.wait_for(enrich(item), timeout=45.0)
+                return await asyncio.wait_for(enrich(item), timeout=_enrich_item_timeout)
             except asyncio.TimeoutError:
                 logger.warning("Enrich timeout for %s", item.get("url"))
                 return None

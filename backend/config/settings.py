@@ -18,6 +18,22 @@ _DEFAULT_SCORING_WEIGHTS: Dict[str, float] = {
     "competition_level":      0.10,
 }
 
+# Default exchange rates: units of foreign currency per 1 USD.
+_DEFAULT_EXCHANGE_RATES: Dict[str, float] = {
+    "USD": 1.0,
+    "INR": 83.5,
+    "EUR": 0.92,
+    "GBP": 0.79,
+    "CAD": 1.36,
+    "AUD": 1.53,
+    "SGD": 1.34,
+    "JPY": 149.0,
+    "BRL": 4.97,
+    "ZAR": 18.6,
+    "KES": 129.0,
+    "NGN": 1540.0,
+}
+
 
 def _parse_scoring_weights(v: str) -> Dict[str, float]:
     """Parse SCORING_WEIGHTS env var (JSON string) or return default."""
@@ -30,6 +46,19 @@ def _parse_scoring_weights(v: str) -> Dict[str, float]:
     except (json.JSONDecodeError, TypeError):
         pass
     return _DEFAULT_SCORING_WEIGHTS
+
+
+def _parse_exchange_rates(v: str) -> Dict[str, float]:
+    """Parse EXCHANGE_RATES env var (JSON string) or return default."""
+    if not v:
+        return _DEFAULT_EXCHANGE_RATES
+    try:
+        parsed = json.loads(v)
+        if isinstance(parsed, dict) and all(isinstance(r, (int, float)) for r in parsed.values()):
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return _DEFAULT_EXCHANGE_RATES
 
 
 class Settings(BaseSettings):
@@ -120,9 +149,35 @@ class Settings(BaseSettings):
     analyst_heavy_model: str = ""
     drafter_model: str = ""
 
+    # ── Analyst guardrails ──
+    red_flag_penalty: float = 0.5
+    red_flag_max_penalty: float = 2.0
+    min_funding_inr: float = 150_000
+
+    # ── Currency exchange rates (JSON) ──
+    exchange_rates: str = ""
+
+    # ── Reviewer guardrails ──
+    reviewer_revision_threshold: float = 6.0
+    reviewer_export_threshold: float = 6.5
+
+    # ── Drafter guardrails ──
+    default_section_word_limit: int = 500
+    max_revision_attempts: int = 3
+
+    # ── Scout guardrails ──
+    scout_enrichment_timeout: int = 45
+    scout_crawl_timeout: int = 180
+    jina_concurrency: int = 3
+    jina_delay: float = 1.0
+
     def get_scoring_weights(self) -> Dict[str, float]:
         """Return parsed scoring weights dict."""
         return _parse_scoring_weights(self.scoring_weights)
+
+    def get_exchange_rates(self) -> Dict[str, float]:
+        """Return parsed exchange rates dict."""
+        return _parse_exchange_rates(self.exchange_rates)
 
 
 @lru_cache

@@ -1,12 +1,21 @@
-"""Theme Profiles — domain-specific configuration for each AltCarbon theme.
+"""Theme Profiles — domain-specific configuration for each company theme.
 
 Each profile provides:
 - domain_terms: vocabulary the drafter should use naturally
 - evidence_queries: Pinecone search queries per section type → pulls targeted knowledge
-- articulation_map: maps generic grant sections → AltCarbon's 12-section articulation docs
+- articulation_map: maps generic grant sections → company's 12-section articulation docs
 - tone: framing guidance
-- strengths: what to highlight for this theme
+- strengths: what to highlight for this theme (defaults — overridable via Drafter Settings UI)
 - default_sections: theme-specific fallback sections (replaces generic 5)
+
+NOTE ON STRENGTHS / COMPANY-SPECIFIC DEFAULTS:
+    The `strengths`, `tone`, and `evidence_queries` values below are AltCarbon-specific
+    defaults. They are NOT the only source of truth — the Drafter supports per-grant
+    overrides via:
+      1. `strengths_override` in individual draft settings (per-grant)
+      2. `theme_settings` in agent_config (global per-theme override from UI)
+    These defaults are used as fallback when no override is provided. To change them
+    without modifying code, use the Drafter Settings UI or update agent_config in MongoDB.
 """
 from __future__ import annotations
 
@@ -93,6 +102,9 @@ def get_articulation_sections(section_name: str) -> List[str]:
 # ── Theme profiles ─────────────────────────────────────────────────────────
 
 THEME_PROFILES: Dict[str, Dict] = {
+    # NOTE: Each theme's `strengths` list contains company-specific defaults.
+    # These are overridable per-grant via strengths_override or globally via
+    # theme_settings in agent_config (Drafter Settings UI). Do not delete defaults.
     "climatetech": {
         "display_name": "Climate Tech / CDR",
         "domain_terms": [
