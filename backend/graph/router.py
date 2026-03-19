@@ -25,12 +25,11 @@ def route_triage(state: GrantState) -> str:
 def route_after_guardrail(state: GrantState) -> str:
     """After draft guardrail: route to drafter if passed, pipeline_update if failed.
 
-    Fail-open: if guardrail_result is missing (node crashed), we pass through
-    to drafter rather than blocking — consistent with the guardrail's own
-    fail-open policy on LLM errors.
+    Defaults to failed (fail-closed) if guardrail result is missing or malformed.
+    This ensures LLM/infrastructure failures block progress rather than silently passing.
     """
     result = state.get("draft_guardrail_result") or {}
-    if result.get("passed", True):
+    if result.get("passed", False):
         return "drafter"
     return "pipeline_update"
 
@@ -38,13 +37,12 @@ def route_after_guardrail(state: GrantState) -> str:
 def route_after_drafter(state: GrantState) -> str:
     """After drafter node: loop back if more sections needed, else go to reviewer.
 
-    Edge case: if sections_required is empty (grant_reader failed), route to
-    pipeline_update to avoid an infinite drafter loop.
+    If sections_required is empty (grant_reader failed), route to pipeline_update
+    to avoid an infinite drafter loop.
     """
     sections = (state.get("grant_requirements") or {}).get("sections_required", [])
     approved = state.get("approved_sections") or {}
 
-    # No sections = grant_reader failed → stop, don't loop forever
     if not sections:
         return "pipeline_update"
 

@@ -5,7 +5,7 @@ Runs two layers of checks:
   2. LLM-powered: thematic scope, eligibility, exclusions, open/closed status
 
 On failure: updates grant status → guardrail_rejected, fires notification, logs to Notion.
-On LLM error: fail-open (pass through with warning) — don't block on infra errors.
+On LLM error: fail-closed (block and require manual review) — don't let unscreened grants through.
 """
 from __future__ import annotations
 
@@ -172,9 +172,10 @@ async def draft_guardrail_node(state: dict) -> dict:
         if llm_result.get("overall_verdict") != "pass":
             overall_passed = False
     except Exception as e:
-        # Fail-open: LLM errors don't block drafting
-        logger.warning("draft_guardrail: LLM check failed (fail-open): %s", e)
-        checks.append({"check": "llm_guardrail", "passed": True, "reason": f"LLM check failed — fail-open: {e}"})
+        # Fail-closed: LLM errors block drafting — don't let unscreened grants through
+        logger.warning("draft_guardrail: LLM check failed (fail-closed): %s", e)
+        checks.append({"check": "llm_guardrail", "passed": False, "reason": f"LLM check failed — fail-closed, manual review required: {e}"})
+        overall_passed = False
 
     # ── Override: force pass but preserve check results ──────────────────────
     if override and not overall_passed:

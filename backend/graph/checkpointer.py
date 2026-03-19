@@ -7,6 +7,7 @@ collection keyed by (thread_id, checkpoint_id).
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, Iterator, Optional, Sequence, Tuple
 
@@ -19,6 +20,8 @@ from langgraph.checkpoint.base import (
 )
 
 from backend.db.mongo import graph_checkpoints
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> str:
@@ -64,19 +67,28 @@ class MongoCheckpointSaver(BaseCheckpointSaver):
         thread_id = self._get_thread_id(config)
         checkpoint_id = self._checkpoint_id(config)
 
-        col = graph_checkpoints()
-        query: Dict[str, Any] = {"thread_id": thread_id}
-        if checkpoint_id:
-            query["checkpoint_id"] = checkpoint_id
-            doc = await col.find_one(query)
-        else:
-            doc = await col.find_one(query, sort=[("checkpoint_id", -1)])
+        try:
+            col = graph_checkpoints()
+            query: Dict[str, Any] = {"thread_id": thread_id}
+            if checkpoint_id:
+                query["checkpoint_id"] = checkpoint_id
+                doc = await col.find_one(query)
+            else:
+                doc = await col.find_one(query, sort=[("checkpoint_id", -1)])
+        except Exception as e:
+            logger.error("Checkpoint read failed for thread %s: %s", thread_id, e)
+            return None
 
         if not doc:
             return None
 
-        checkpoint = json.loads(doc["checkpoint"])
-        metadata = json.loads(doc.get("metadata", "{}"))
+        try:
+            checkpoint = json.loads(doc["checkpoint"])
+            metadata = json.loads(doc.get("metadata", "{}"))
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error("Checkpoint data corrupted for thread %s, checkpoint %s: %s",
+                         thread_id, doc.get("checkpoint_id"), e)
+            return None
         parent_id = doc.get("parent_checkpoint_id")
 
         result_config = {
@@ -161,21 +173,26 @@ class MongoCheckpointSaver(BaseCheckpointSaver):
         checkpoint_id = checkpoint["id"]
         parent_id = self._checkpoint_id(config)
 
-        col = graph_checkpoints()
-        await col.update_one(
-            {"thread_id": thread_id, "checkpoint_id": checkpoint_id},
-            {
-                "$set": {
-                    "thread_id": thread_id,
-                    "checkpoint_id": checkpoint_id,
-                    "parent_checkpoint_id": parent_id,
-                    "checkpoint": json.dumps(checkpoint),
-                    "metadata": json.dumps(dict(metadata)),
-                    "saved_at": _utcnow(),
-                }
-            },
-            upsert=True,
-        )
+        try:
+            col = graph_checkpoints()
+            await col.update_one(
+                {"thread_id": thread_id, "checkpoint_id": checkpoint_id},
+                {
+                    "$set": {
+                        "thread_id": thread_id,
+                        "checkpoint_id": checkpoint_id,
+                        "parent_checkpoint_id": parent_id,
+                        "checkpoint": json.dumps(checkpoint),
+                        "metadata": json.dumps(dict(metadata)),
+                        "saved_at": _utcnow(),
+                    }
+                },
+                upsert=True,
+            )
+        except Exception as e:
+            logger.error("Checkpoint write failed for thread %s, checkpoint %s: %s",
+                         thread_id, checkpoint_id, e)
+            raise  # Re-raise — LangGraph must know the save failed
         return {
             "configurable": {
                 "thread_id": thread_id,
@@ -192,14 +209,17 @@ class MongoCheckpointSaver(BaseCheckpointSaver):
         # Pending writes — store alongside checkpoint for debugging
         thread_id = self._get_thread_id(config)
         checkpoint_id = self._checkpoint_id(config)
-        col = graph_checkpoints()
-        await col.update_one(
-            {"thread_id": thread_id, "checkpoint_id": checkpoint_id},
-            {
-                "$set": {
-                    f"pending_writes.{task_id}": [
-                        {"channel": c, "value": json.dumps(v)} for c, v in writes
-                    ]
-                }
-            },
-        )
+        try:
+            col = graph_checkpoints()
+            await col.update_one(
+                {"thread_id": thread_id, "checkpoint_id": checkpoint_id},
+                {
+                    "$set": {
+                        f"pending_writes.{task_id}": [
+                            {"channel": c, "value": json.dumps(v)} for c, v in writes
+                        ]
+                    }
+                },
+            )
+        except Exception as e:
+            logger.warning("Checkpoint pending_writes failed for thread %s: %s", thread_id, e)

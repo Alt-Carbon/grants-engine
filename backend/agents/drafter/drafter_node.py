@@ -670,10 +670,15 @@ def _sections_are_generic(sections: List[Dict]) -> bool:
 
 
 def should_continue_drafting(state: GrantState) -> str:
-    """Router: continue drafting or move to reviewer when done."""
+    """Router: continue drafting or move to reviewer when done.
+
+    If sections_required is empty, route to pipeline_update to avoid an infinite loop.
+    """
     sections = (state.get("grant_requirements") or {}).get("sections_required", [])
     approved = state.get("approved_sections", {})
 
-    if len(approved) >= len(sections) and sections:
+    if not sections:
+        return "pipeline_update"
+    if len(approved) >= len(sections):
         return "reviewer"
     return "drafter"

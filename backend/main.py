@@ -15,6 +15,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -315,7 +316,8 @@ def _build_grant_context(grant: dict) -> str:
     return "\n\n".join(parts)
 
 
-# ── Scout job state (in-process flag) ─────────────────────────────────────────
+# ── Scout job state (lock-protected) ──────────────────────────────────────────
+_scout_lock = asyncio.Lock()
 _scout_running: bool = False
 _scout_started_at: Optional[str] = None
 
@@ -1328,11 +1330,11 @@ async def manual_scout(
     _: None = Depends(verify_internal),
 ):
     global _scout_running, _scout_started_at
-    if _scout_running:
-        return {"status": "scout_already_running", "started_at": _scout_started_at}
-
-    _scout_running = True
-    _scout_started_at = datetime.now(timezone.utc).isoformat()
+    async with _scout_lock:
+        if _scout_running:
+            return {"status": "scout_already_running", "started_at": _scout_started_at}
+        _scout_running = True
+        _scout_started_at = datetime.now(timezone.utc).isoformat()
 
     async def _run():
         global _scout_running, _scout_started_at
@@ -1354,8 +1356,9 @@ async def manual_scout(
             except Exception:
                 pass
         finally:
-            _scout_running = False
-            _scout_started_at = None
+            async with _scout_lock:
+                _scout_running = False
+                _scout_started_at = None
 
     background_tasks.add_task(_run)
     return {"status": "scout_job_started", "started_at": _scout_started_at}
@@ -1406,7 +1409,8 @@ async def sync_past_grants(
     return result
 
 
-# ── Analyst job state ─────────────────────────────────────────────────────────
+# ── Analyst job state (lock-protected) ────────────────────────────────────────
+_analyst_lock = asyncio.Lock()
 _analyst_running: bool = False
 _analyst_started_at: Optional[str] = None
 
@@ -1438,11 +1442,11 @@ async def manual_analyst(
     """Run the Analyst on all unprocessed grants_raw entries (including manually
     added ones). Idempotent — already-scored grants are skipped automatically."""
     global _analyst_running, _analyst_started_at
-    if _analyst_running:
-        return {"status": "analyst_already_running", "started_at": _analyst_started_at}
-
-    _analyst_running = True
-    _analyst_started_at = datetime.now(timezone.utc).isoformat()
+    async with _analyst_lock:
+        if _analyst_running:
+            return {"status": "analyst_already_running", "started_at": _analyst_started_at}
+        _analyst_running = True
+        _analyst_started_at = datetime.now(timezone.utc).isoformat()
 
     async def _run():
         global _analyst_running, _analyst_started_at
@@ -1523,8 +1527,9 @@ async def manual_analyst(
             except Exception:
                 pass
         finally:
-            _analyst_running = False
-            _analyst_started_at = None
+            async with _analyst_lock:
+                _analyst_running = False
+                _analyst_started_at = None
 
     background_tasks.add_task(_run)
     return {"status": "analyst_job_started", "started_at": _analyst_started_at}
@@ -1544,11 +1549,11 @@ async def rescore_analyst(
     unless the new score triggers a status change.
     """
     global _analyst_running, _analyst_started_at
-    if _analyst_running:
-        return {"status": "analyst_already_running", "started_at": _analyst_started_at}
-
-    _analyst_running = True
-    _analyst_started_at = datetime.now(timezone.utc).isoformat()
+    async with _analyst_lock:
+        if _analyst_running:
+            return {"status": "analyst_already_running", "started_at": _analyst_started_at}
+        _analyst_running = True
+        _analyst_started_at = datetime.now(timezone.utc).isoformat()
 
     async def _run():
         global _analyst_running, _analyst_started_at
@@ -1644,8 +1649,9 @@ async def rescore_analyst(
             except Exception:
                 pass
         finally:
-            _analyst_running = False
-            _analyst_started_at = None
+            async with _analyst_lock:
+                _analyst_running = False
+                _analyst_started_at = None
 
     background_tasks.add_task(_run)
     return {
@@ -3063,17 +3069,37 @@ async def get_funder_insights_endpoint(funder_name: str, _: None = Depends(verif
 @app.get("/status/pipeline")
 async def pipeline_status():
     db = get_db()
-    total     = await db["grants_scored"].count_documents({})
-    triage    = await db["grants_scored"].count_documents({"status": "triage"})
-    pursuing  = await db["grants_scored"].count_documents({"status": "pursue"})
-    watching  = await db["grants_scored"].count_documents({"status": "watch"})
-    on_hold   = await db["grants_scored"].count_documents({"status": "hold"})
-    # Grants with ≤30 days to deadline that are still actionable (fix #17/#18)
-    deadline_urgent_count = await db["grants_scored"].count_documents(
-        {"deadline_urgent": True, "status": {"$in": ["triage", "pursue", "watch"]}}
-    )
-    drafting  = await db["grants_scored"].count_documents({"status": "drafting"})
-    complete  = await db["grants_scored"].count_documents({"status": {"$in": ["draft_complete", "submitted", "won"]}})
+    # Use $facet for atomic counts — avoids race conditions between sequential queries
+    pipeline = [
+        {"$facet": {
+            "total":     [{"$count": "n"}],
+            "triage":    [{"$match": {"status": "triage"}}, {"$count": "n"}],
+            "pursuing":  [{"$match": {"status": "pursue"}}, {"$count": "n"}],
+            "watching":  [{"$match": {"status": "watch"}}, {"$count": "n"}],
+            "on_hold":   [{"$match": {"status": "hold"}}, {"$count": "n"}],
+            "deadline_urgent": [
+                {"$match": {"deadline_urgent": True, "status": {"$in": ["triage", "pursue", "watch"]}}},
+                {"$count": "n"},
+            ],
+            "drafting":  [{"$match": {"status": "drafting"}}, {"$count": "n"}],
+            "complete":  [{"$match": {"status": {"$in": ["draft_complete", "submitted", "won"]}}}, {"$count": "n"}],
+        }}
+    ]
+    result = await db["grants_scored"].aggregate(pipeline).to_list(1)
+    counts = result[0] if result else {}
+
+    def _count(key: str) -> int:
+        arr = counts.get(key, [])
+        return arr[0]["n"] if arr else 0
+
+    total     = _count("total")
+    triage    = _count("triage")
+    pursuing  = _count("pursuing")
+    watching  = _count("watching")
+    on_hold   = _count("on_hold")
+    deadline_urgent_count = _count("deadline_urgent")
+    drafting  = _count("drafting")
+    complete  = _count("complete")
 
     # Build actionable warnings (fix #18)
     warnings: list = []
@@ -3387,21 +3413,27 @@ async def add_manual_grant(
 
     s = get_settings()
     raw_content = ""
-    jina_url = f"https://r.jina.ai/{url}"
-    headers: dict = {"X-Return-Format": "markdown", "X-With-Links-Summary": "false"}
-    if s.jina_api_key:
-        headers["Authorization"] = f"Bearer {s.jina_api_key}"
 
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    # Primary: Exa get_contents for clean text extraction
+    if s.exa_api_key:
         try:
-            r = await client.get(jina_url, headers=headers)
-            r.raise_for_status()
-            raw_content = r.text.strip()[:80_000]
-        except Exception:
+            from exa_py import Exa
+            exa = Exa(api_key=s.exa_api_key)
+            result = await asyncio.to_thread(
+                exa.get_contents, url, text={"max_characters": 80_000}
+            )
+            if result.results:
+                raw_content = (getattr(result.results[0], "text", "") or "").strip()
+        except Exception as e:
+            logger.warning("Exa get_contents failed for %s: %s", url[:60], e)
+
+    # Fallback: plain HTTP
+    if not raw_content:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             try:
-                r2 = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                r2.raise_for_status()
-                raw_content = r2.text[:60_000]
+                r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                r.raise_for_status()
+                raw_content = r.text[:60_000]
             except Exception as e:
                 raise HTTPException(status_code=502, detail=f"Could not fetch URL: {e}")
 

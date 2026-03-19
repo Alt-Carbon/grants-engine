@@ -136,7 +136,7 @@ async def reviewer_node(state: GrantState) -> Dict:
     sections_needing_revision = []
     section_critiques = review.get("section_critiques", {})
     for sec_name, critique in section_critiques.items():
-        if isinstance(critique, dict) and critique.get("score", 10) < revision_threshold:
+        if isinstance(critique, dict) and critique.get("score", 0) < revision_threshold:
             sections_needing_revision.append({
                 "section_name": sec_name,
                 "score": critique.get("score"),

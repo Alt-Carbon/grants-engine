@@ -168,6 +168,7 @@ class Settings(BaseSettings):
 
     # ── Scout guardrails ──
     scout_enrichment_timeout: int = 45
+    scout_enrichment_concurrency: int = 4
     scout_crawl_timeout: int = 180
     jina_concurrency: int = 3
     jina_delay: float = 1.0

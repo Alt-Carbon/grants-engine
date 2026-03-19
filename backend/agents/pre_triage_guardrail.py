@@ -46,11 +46,19 @@ def _check_grant(grant: Dict) -> Dict[str, Any] | None:
             "detail": f"theme_alignment {theme_alignment} <= {THEME_ALIGNMENT_FLOOR}",
         }
 
-    # 3. Deadline expired
+    # 3. Deadline expired or unparseable
     deadline_str = grant.get("deadline")
     if deadline_str:
         deadline_dt = parse_deadline(deadline_str)
-        if deadline_dt and deadline_dt < datetime.now(timezone.utc):
+        if deadline_dt is None:
+            # Unparseable deadline — flag for manual review rather than silently passing
+            logger.warning("pre_triage_guardrail: unparseable deadline '%s' for grant '%s'",
+                           deadline_str, grant.get("title", "unknown"))
+            return {
+                "reason": "deadline_unparseable",
+                "detail": f"Could not parse deadline '{deadline_str}' — manual review required",
+            }
+        if deadline_dt < datetime.now(timezone.utc):
             return {
                 "reason": "deadline_expired",
                 "detail": f"deadline {deadline_str} is in the past",
