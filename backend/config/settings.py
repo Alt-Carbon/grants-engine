@@ -150,6 +150,7 @@ class Settings(BaseSettings):
     drafter_model: str = ""
 
     # ── Analyst guardrails ──
+    deadline_urgent_days: int = 30
     red_flag_penalty: float = 0.5
     red_flag_max_penalty: float = 2.0
     min_funding_inr: float = 150_000

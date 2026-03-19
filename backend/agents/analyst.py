@@ -458,11 +458,14 @@ async def _resolve_unknown_currency(grant: Dict) -> Optional[Dict]:
             return None
 
         amount = result.get("amount_per_applicant")
-        usd_val = (
-            _normalize_to_usd(float(amount), resolved_currency)
-            if amount and float(amount) > 0
-            else None
-        )
+        try:
+            usd_val = (
+                _normalize_to_usd(float(amount), resolved_currency)
+                if amount and float(amount) > 0
+                else None
+            )
+        except (TypeError, ValueError):
+            usd_val = None
         evidence = (result.get("evidence") or "")[:120]
         confidence = result.get("confidence", "low")
 
@@ -502,7 +505,11 @@ def _check_hold_conditions(grant: Dict) -> Optional[str]:
     to normal scoring.
     """
     raw_funding = grant.get("max_funding_usd") or grant.get("max_funding")
-    if not raw_funding or raw_funding <= 0:
+    try:
+        raw_funding_num = float(raw_funding) if raw_funding else 0
+    except (TypeError, ValueError):
+        raw_funding_num = 0
+    if raw_funding_num <= 0:
         return None  # No amount stated — currency irrelevant, proceed to scoring
 
     currency = (grant.get("currency") or "").strip()
@@ -516,7 +523,7 @@ def _check_hold_conditions(grant: Dict) -> Optional[str]:
     if is_unknown:
         display = f"'{currency}'" if currency else "not set"
         return (
-            f"Currency {display} — cannot evaluate funding amount {raw_funding:,} "
+            f"Currency {display} — cannot evaluate funding amount {raw_funding_num:,.0f} "
             f"without knowing the currency; needs manual review"
         )
     return None
@@ -860,7 +867,7 @@ async def _perplexity_funder_research(
 
     # Fallback: direct Perplexity API
     payload = {
-        "model": "sonar",
+        "model": ANALYST_FUNDER,
         "messages": [{"role": "user", "content": user_msg}],
         "search_recency_filter": "year",
     }
@@ -1035,8 +1042,21 @@ async def _deep_research_grant(
             cache_col = get_db()["deep_research_cache"]
             cached = await cache_col.find_one({"url_hash": url_hash})
             if cached and cached.get("result"):
-                logger.debug("Deep research cache hit: %s", grant.get("url", "")[:60])
-                return cached["result"]
+                # Enforce 7-day TTL — stale cache entries are ignored
+                cached_at = cached.get("cached_at")
+                if cached_at:
+                    if isinstance(cached_at, str):
+                        cached_at = datetime.fromisoformat(cached_at)
+                    age = datetime.now(tz=timezone.utc) - cached_at
+                    if age > timedelta(days=7):
+                        logger.debug("Deep research cache expired (%s days): %s", age.days, grant.get("url", "")[:60])
+                    else:
+                        logger.debug("Deep research cache hit: %s", grant.get("url", "")[:60])
+                        return cached["result"]
+                else:
+                    # Legacy entry without cached_at — use it but log
+                    logger.debug("Deep research cache hit (no timestamp): %s", grant.get("url", "")[:60])
+                    return cached["result"]
         except Exception:
             pass
 
@@ -1132,8 +1152,12 @@ def _has_concrete_funding(grant: Dict, deep: Dict) -> bool:
     """Return True if the grant has a usable funding amount / ticket size."""
     # Check max_funding_usd (numeric)
     mf = grant.get("max_funding_usd") or grant.get("max_funding")
-    if mf and float(mf) > 0:
-        return True
+    if mf:
+        try:
+            if float(mf) > 0:
+                return True
+        except (ValueError, TypeError):
+            pass
     # Check textual amount field
     amt = (grant.get("amount") or "").strip().lower()
     if amt and amt not in ("", "not specified", "not mentioned", "n/a", "none",
@@ -1203,8 +1227,12 @@ async def _extract_missing_mandatory(
                 )
 
         if not has_funding:
-            if result.get("max_funding_usd") and float(result["max_funding_usd"]) > 0:
-                patch["max_funding_usd"] = int(result["max_funding_usd"])
+            try:
+                _mf_val = float(result.get("max_funding_usd") or 0)
+            except (ValueError, TypeError):
+                _mf_val = 0
+            if _mf_val > 0:
+                patch["max_funding_usd"] = int(_mf_val)
                 patch["max_funding"] = patch["max_funding_usd"]
                 if result.get("amount"):
                     patch["amount"] = result["amount"]
@@ -1494,7 +1522,7 @@ def _build_scored_doc(
     _now = datetime.now(tz=timezone.utc)
     if _deadline_dt and _deadline_dt > _now:
         days_to_deadline: Optional[int] = (_deadline_dt - _now).days
-        deadline_urgent: bool = days_to_deadline <= 30
+        deadline_urgent: bool = days_to_deadline <= _get_settings().deadline_urgent_days
     else:
         days_to_deadline = None
         deadline_urgent = False
