@@ -107,7 +107,7 @@ async def reviewer_node(state: GrantState) -> Dict:
         funder=grant.get("funder", ""),
         theme=theme_display,
         criteria=criteria_text,
-        draft=sections_text[:12000],
+        draft=sections_text[:30000],
         export_threshold=export_threshold,
     )
 
@@ -122,14 +122,14 @@ async def reviewer_node(state: GrantState) -> Dict:
     except Exception as e:
         logger.error("Reviewer failed: %s", e)
         review = {
-            "overall_score": 7.0,
+            "overall_score": 0,
             "section_critiques": {},
             "top_3_fixes": [],
             "evidence_gaps_critical": [],
-            "coherence_score": 7,
+            "coherence_score": 0,
             "coherence_notes": "",
-            "ready_for_export": True,
-            "summary": f"Automated review failed ({e}). Proceeding to export.",
+            "ready_for_export": False,
+            "summary": f"Automated review failed ({e}). Manual review required before export.",
         }
 
     # Extract sections that need revision (score < threshold)

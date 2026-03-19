@@ -40,6 +40,7 @@ class GrantState(TypedDict):
     approved_sections: Dict[str, Dict]      # section_name → {content, word_count, ...}
     section_critiques: Dict[str, str]       # section_name → critique text
     section_revision_instructions: Dict[str, str]
+    section_revision_counts: Dict[str, int]   # section_name → number of revisions
 
     # ── Human Gate 2: Section Review ──────────────────────────────────────────
     pending_interrupt: Optional[Dict]       # Current section awaiting review
