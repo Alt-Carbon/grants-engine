@@ -77,7 +77,7 @@ def _assemble_markdown(
         lines.append("---")
         lines.append("")
 
-        gaps = re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", content)
+        gaps = re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", content, re.IGNORECASE)
         all_evidence_gaps.extend(gaps)
         total_words += word_count
 
@@ -130,10 +130,14 @@ async def exporter_node(state: GrantState) -> Dict:
     title_slug = _safe_filename(grant.get("title", "grant"))
     filename = f"{title_slug}_v{version}.md"
     filepath = f"/tmp/drafts/{filename}"
-    os.makedirs("/tmp/drafts", exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(markdown)
-    logger.info("Exporter: saved draft to %s", filepath)
+    try:
+        os.makedirs("/tmp/drafts", exist_ok=True)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(markdown)
+        logger.info("Exporter: saved draft to %s", filepath)
+    except OSError as e:
+        logger.warning("Exporter: file write failed (%s) — draft saved to MongoDB only", e)
+        filepath = ""
 
     # Save to MongoDB
     pipeline_id = state.get("pipeline_id")
@@ -153,13 +157,17 @@ async def exporter_node(state: GrantState) -> Dict:
         "evidence_gaps_all": [
             gap
             for sec in approved_sections.values()
-            for gap in re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", sec.get("content", ""))
+            for gap in re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", sec.get("content", ""), re.IGNORECASE)
         ],
         "total_word_count": sum(s.get("word_count", 0) for s in approved_sections.values()),
         "draft_filename": filename,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    await grant_drafts().insert_one(draft_record)
+    await grant_drafts().update_one(
+        {"pipeline_id": pipeline_id, "version": version},
+        {"$set": draft_record},
+        upsert=True,
+    )
 
     # Update pipeline status
     if pipeline_id:

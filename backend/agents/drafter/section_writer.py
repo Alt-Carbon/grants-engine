@@ -203,9 +203,12 @@ async def get_section_context(
                 content = r.get("content") or r.get("text", "")
                 source = r.get("source_title", r.get("title", ""))
                 doc_type = r.get("doc_type", "misc")
-                if content and total + len(content) <= max_chars:
-                    parts.append(f"[{doc_type} | {source}]\n{content}")
-                    total += len(content)
+                if not content:
+                    continue
+                if total + len(content) > max_chars:
+                    continue  # Skip this result, try smaller ones
+                parts.append(f"[{doc_type} | {source}]\n{content}")
+                total += len(content)
     except Exception as e:
         logger.debug("Section-specific Pinecone search failed: %s", e)
 
@@ -255,20 +258,27 @@ async def _self_critique(
 
         if result.get("needs_rewrite") and result.get("rewritten"):
             rewritten = result["rewritten"].strip()
+            rewritten_word_count = len(rewritten.split())
             # Sanity: rewrite must be non-empty and reasonably sized
             if len(rewritten) > 50:
-                logger.info(
-                    "Self-critique rewrote '%s' (scores: %s, weaknesses: %s)",
-                    section_name,
-                    result.get("scores", {}),
-                    result.get("weaknesses", [])[:3],
-                )
-                return {
-                    "content": rewritten,
-                    "was_rewritten": True,
-                    "scores": result.get("scores", {}),
-                    "weaknesses": result.get("weaknesses", []),
-                }
+                if rewritten_word_count > word_limit:
+                    logger.warning(
+                        "Self-critique rewrite for '%s' exceeds word limit (%d/%d) — keeping original",
+                        section_name, rewritten_word_count, word_limit,
+                    )
+                else:
+                    logger.info(
+                        "Self-critique rewrote '%s' (scores: %s, weaknesses: %s)",
+                        section_name,
+                        result.get("scores", {}),
+                        result.get("weaknesses", [])[:3],
+                    )
+                    return {
+                        "content": rewritten,
+                        "was_rewritten": True,
+                        "scores": result.get("scores", {}),
+                        "weaknesses": result.get("weaknesses", []),
+                    }
 
         logger.info(
             "Self-critique passed '%s' (scores: %s)",
@@ -297,7 +307,7 @@ async def _resolve_evidence_gaps(
     Replaces the flag with found evidence + source attribution.
     Keeps the flag if no evidence is found — human must still fill it.
     """
-    gaps = re.findall(r"\[EVIDENCE NEEDED: ([^\]]+)\]", content)
+    gaps = re.findall(r"\[EVIDENCE NEEDED:\s*([^\]]+)\]", content, re.IGNORECASE)
     if not gaps:
         return content
 
@@ -336,9 +346,11 @@ async def _resolve_evidence_gaps(
                         if last_period > 200:
                             evidence_snippet = evidence_snippet[:last_period + 1]
 
-                    content = content.replace(
-                        f"[EVIDENCE NEEDED: {gap_desc}]",
+                    content = re.sub(
+                        re.escape(f"[EVIDENCE NEEDED: {gap_desc}]"),
                         f"{evidence_snippet} [Source: {source}]",
+                        content,
+                        flags=re.IGNORECASE,
                     )
                     resolved_count += 1
         except Exception as e:

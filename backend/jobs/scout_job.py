@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 async def run_scout_pipeline() -> dict:
     """Run Scout → Analyst → notify_triage. Pauses at human_triage interrupt."""
-    thread_id = f"scout_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}"
+    thread_id = f"scout_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     run_id = str(uuid.uuid4())
 
     initial_state: GrantState = {
