@@ -35,6 +35,7 @@ import {
   Link2,
   Loader2,
   PlayCircle,
+  RotateCcw,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -146,6 +147,8 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
   const [collabTab, setCollabTab] = useState<"discussion" | "activity">("discussion");
   const [draftLoading, setDraftLoading] = useState(false);
   const [draftError, setDraftError] = useState<string | null>(null);
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replayResult, setReplayResult] = useState<string | null>(null);
 
   const name = grant.grant_name || grant.title || "Grant Details";
   const score = grant.weighted_total ?? 0;
@@ -196,6 +199,39 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
       setDraftError("Network error — could not reach the server");
     } finally {
       setDraftLoading(false);
+    }
+  }, [grant._id, router]);
+
+  const replayGrant = useCallback(async (resetTo: "triage" | "pursue" | "drafting") => {
+    setReplayLoading(true);
+    setReplayResult(null);
+    setDraftError(null);
+    try {
+      const res = await fetch("/api/grants/replay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          grant_id: grant._id,
+          reset_to: resetTo,
+          clear_drafts: true,
+          clear_reviews: true,
+          override_guardrails: resetTo === "drafting",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setDraftError(data?.detail || data?.error || "Replay failed");
+        return;
+      }
+      setCurrentStatus(resetTo === "drafting" ? "drafting" : resetTo);
+      setReplayResult(`Reset to "${resetTo}" — ${(data.cleaned || []).join(", ")}`);
+      if (resetTo === "drafting") {
+        router.push("/drafter");
+      }
+    } catch {
+      setDraftError("Network error during replay");
+    } finally {
+      setReplayLoading(false);
     }
   }, [grant._id, router]);
 
@@ -318,11 +354,56 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
                 Drafting in progress
               </span>
             )}
+            {/* Replay dropdown — re-test workflow on old grants */}
+            {["pursue", "pursuing", "drafting", "draft_complete", "submitted", "won", "guardrail_rejected"].includes(currentStatus) && (
+              <div className="relative group">
+                <button
+                  disabled={replayLoading}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {replayLoading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  )}
+                  Replay
+                </button>
+                <div className="absolute right-0 z-20 mt-1 hidden w-52 rounded-lg border border-gray-200 bg-white p-1 shadow-lg group-hover:block">
+                  <button
+                    onClick={() => replayGrant("triage")}
+                    className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    Reset to Triage
+                    <span className="ml-auto text-[10px] text-gray-400">Full flow</span>
+                  </button>
+                  <button
+                    onClick={() => replayGrant("pursue")}
+                    className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    Reset to Pursue
+                    <span className="ml-auto text-[10px] text-gray-400">Skip triage</span>
+                  </button>
+                  <button
+                    onClick={() => replayGrant("drafting")}
+                    className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50"
+                  >
+                    Re-draft Now
+                    <span className="ml-auto text-[10px] text-gray-400">Clean + draft</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
           {draftError && (
             <div className="mt-3 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5">
               <AlertTriangle className="h-4 w-4 shrink-0 text-red-500" />
               <p className="text-sm text-red-700">{draftError}</p>
+            </div>
+          )}
+          {replayResult && (
+            <div className="mt-3 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-2.5">
+              <RotateCcw className="h-4 w-4 shrink-0 text-green-600" />
+              <p className="text-sm text-green-700">{replayResult}</p>
             </div>
           )}
 
