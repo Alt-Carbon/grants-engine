@@ -3,6 +3,7 @@
  * POST /api/config          — save agent config to MongoDB
  */
 import { getAgentConfig, saveAgentConfig } from "@/lib/queries";
+import { auth } from "@/lib/auth";
 import { NextRequest } from "next/server";
 
 export async function GET(req: NextRequest) {
@@ -19,6 +20,10 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: Request) {
+  const session = await auth();
+  if (!session?.user) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
   try {
     const { agent, config } = await req.json() as { agent: string; config: Record<string, unknown> };
     if (!agent) return Response.json({ error: "agent required" }, { status: 400 });

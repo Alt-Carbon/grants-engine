@@ -3,8 +3,13 @@
  * Proxy to FastAPI POST /resume/triage — forwards user identity.
  */
 import { proxyHeaders } from "@/lib/api";
+import { auth } from "@/lib/auth";
 
 export async function POST(req: Request) {
+  const session = await auth();
+  if (!session?.user) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
   const url = (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
   try {
     const body = await req.json();

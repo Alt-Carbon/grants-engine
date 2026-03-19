@@ -298,7 +298,7 @@ async def fetch_notion_page(page_id: str, title: str = "") -> Optional[str]:
                 logger.debug("Fetched '%s' via MCP (%d chars)", title[:40], len(text))
                 return text
     except Exception as e:
-        logger.debug("MCP fetch failed for %s: %s", page_id, e)
+        logger.warning("Notion MCP fetch failed for %s: %s", page_id, e)
 
     # Fallback: REST API with recursive block extraction
     try:
@@ -319,7 +319,7 @@ async def fetch_notion_page(page_id: str, title: str = "") -> Optional[str]:
             logger.debug("Fetched '%s' via REST API recursive (%d chars)", title[:40], len(result))
             return result
     except Exception as e:
-        logger.debug("REST API fetch failed for %s: %s", page_id, e)
+        logger.warning("REST API fetch failed for %s: %s", page_id, e)
 
     return None
 
@@ -1004,7 +1004,7 @@ async def fetch_all_from_toc(
             if rows:
                 logger.info("ToC: queried %d rows via MCP", len(rows))
     except Exception as e:
-        logger.debug("ToC: MCP query failed, falling back to REST: %s", e)
+        logger.warning("ToC: MCP query failed, falling back to REST: %s", e)
 
     # Fallback: REST API
     if not rows:

@@ -1,6 +1,12 @@
 import { getDb } from "@/lib/mongodb";
 import { triggerEvent } from "@/lib/pusher";
+import { auth } from "@/lib/auth";
 import { NextRequest, NextResponse } from "next/server";
+
+/** Strip HTML tags to prevent XSS in stored comments. */
+function sanitize(input: string): string {
+  return input.replace(/<[^>]*>/g, "").trim();
+}
 
 /**
  * GET /api/grants/[id]/comments
@@ -49,6 +55,11 @@ export async function POST(
   props: { params: Promise<{ id: string }> }
 ) {
   try {
+    const session = await auth();
+    if (!session?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { id } = await props.params;
     const body = await req.json();
     const { user_name, user_email, user_image, message, parent_id } = body;
@@ -60,13 +71,28 @@ export async function POST(
       );
     }
 
+    const cleanMessage = sanitize(message);
+    if (!cleanMessage) {
+      return NextResponse.json(
+        { error: "message is required" },
+        { status: 400 }
+      );
+    }
+
+    if (cleanMessage.length > 5000) {
+      return NextResponse.json(
+        { error: "message too long (max 5000 characters)" },
+        { status: 400 }
+      );
+    }
+
     const doc: Record<string, unknown> = {
       grant_id: id,
       user_name:
         typeof user_name === "string" && user_name.trim()
-          ? user_name.trim()
-          : "Team Member",
-      message: message.trim(),
+          ? sanitize(user_name)
+          : session.user.name || "Team Member",
+      message: cleanMessage,
       created_at: new Date().toISOString(),
       parent_id: parent_id || null,
       pinned: false,

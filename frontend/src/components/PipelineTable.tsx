@@ -5,7 +5,8 @@ import { StatusPicker } from "./StatusPicker";
 import { DeadlineChip } from "./DeadlineChip";
 import { GrantDetailSheet } from "./GrantDetailSheet";
 import { Pagination } from "./Pagination";
-import { getPriority, getThemeLabel } from "@/lib/utils";
+import { ScoreCell, PriorityBadge } from "./ScoreBadge";
+import { getThemeLabel, formatCurrency, formatRelativeTime, formatDateShort } from "@/lib/utils";
 import { useLastSeen, isNewSince } from "@/hooks/useLastSeen";
 import { useGrantUrl } from "@/hooks/useGrantUrl";
 import type { Grant } from "@/lib/queries";
@@ -42,22 +43,6 @@ const STATUS_TABS = [
   { id: "rejected", label: "Rejected" },
 ] as const;
 
-function ScoreCell({ score }: { score: number }) {
-  const color =
-    score >= 6.5
-      ? "bg-green-100 text-green-800"
-      : score >= 5.0
-      ? "bg-amber-100 text-amber-800"
-      : "bg-red-100 text-red-800";
-  return (
-    <span
-      className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-bold ${color}`}
-    >
-      {score.toFixed(1)}
-    </span>
-  );
-}
-
 function SortIcon({
   field,
   sortField,
@@ -74,24 +59,6 @@ function SortIcon({
   ) : (
     <ChevronDown className="h-3.5 w-3.5 text-gray-600" />
   );
-}
-
-function formatDateShort(iso: string | undefined | null): string {
-  if (!iso) return "--";
-  const d = new Date(iso);
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
-
-function timeAgo(iso: string | undefined | null): string {
-  if (!iso) return "";
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d ago`;
 }
 
 export function PipelineTable({
@@ -411,14 +378,7 @@ export function PipelineTable({
                       <ScoreCell score={grant.weighted_total ?? 0} />
                     </td>
                     <td className="px-4 py-3">
-                      {(() => {
-                        const p = getPriority(grant.weighted_total ?? 0);
-                        return (
-                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${p.className}`}>
-                            {p.label}
-                          </span>
-                        );
-                      })()}
+                      <PriorityBadge score={grant.weighted_total ?? 0} />
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex flex-wrap gap-1">
@@ -438,7 +398,7 @@ export function PipelineTable({
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-700">
                       {funding
-                        ? `$${(funding / 1000).toFixed(0)}K`
+                        ? formatCurrency(funding)
                         : "\u2014"}
                     </td>
                     <td className="px-4 py-3">
@@ -464,7 +424,7 @@ export function PipelineTable({
                             {formatDateShort(addedDate)}
                           </span>
                           <span className="text-[10px] text-gray-400">
-                            {timeAgo(addedDate)}
+                            {formatRelativeTime(addedDate)}
                           </span>
                         </div>
                       ) : (

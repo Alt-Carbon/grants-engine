@@ -6,6 +6,7 @@ import { ScoreRadar } from "@/components/ScoreRadar";
 import { StatusPicker } from "@/components/StatusPicker";
 import { CommentThread } from "@/components/CommentThread";
 import { GrantActivity } from "@/components/GrantActivity";
+import { formatCurrency as formatCurrencyUtil } from "@/lib/utils";
 import {
   ArrowLeft,
   ExternalLink,
@@ -78,12 +79,7 @@ function priorityColor(score: number) {
   return { bg: "bg-red-500", text: "text-red-700", label: "Low Priority", ring: "ring-red-200" };
 }
 
-function formatCurrency(amount: number | undefined) {
-  if (!amount) return null;
-  if (amount >= 1_000_000) return `$${(amount / 1_000_000).toFixed(1)}M`;
-  if (amount >= 1_000) return `$${(amount / 1_000).toFixed(0)}K`;
-  return `$${amount.toLocaleString()}`;
-}
+const formatCurrency = formatCurrencyUtil;
 
 // ---------------------------------------------------------------------------
 // Collapsible Section
@@ -167,8 +163,8 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
           body: JSON.stringify({ grantId: grant._id, status: newStatus }),
         });
         if (res.ok) setCurrentStatus(newStatus);
-      } catch {
-        // silently fail
+      } catch (e) {
+        console.error("Failed to update grant status:", e);
       }
     },
     [grant._id]

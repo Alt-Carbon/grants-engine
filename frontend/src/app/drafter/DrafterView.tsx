@@ -395,7 +395,8 @@ async function saveChatHistories(
       }),
     });
     return true;
-  } catch {
+  } catch (e) {
+    console.error("Failed to save chat histories:", e);
     return false;
   }
 }
@@ -412,7 +413,8 @@ async function loadChatHistories(
     if (!res.ok) return null;
     const data = await res.json();
     return data.sections ?? null;
-  } catch {
+  } catch (e) {
+    console.error("Failed to load chat histories:", e);
     return null;
   }
 }
@@ -428,7 +430,8 @@ async function clearSectionHistory(
     if (userEmail) url += `&user_email=${encodeURIComponent(userEmail)}`;
     const res = await fetch(url, { method: "DELETE" });
     return res.ok;
-  } catch {
+  } catch (e) {
+    console.error("Failed to clear section history:", e);
     return false;
   }
 }
@@ -563,7 +566,19 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const grantDataRef = useRef<Record<string, any>>({});
 
   // -- Derived ---------------------------------------------------------------
-  const selectedPipeline = pipelines.find((p) => p._id === selectedId);
+  const selectedPipeline = pipelines.find((p) => p._id === selectedId) ?? (
+    selectedId === "__manual__"
+      ? {
+          _id: "__manual__",
+          grant_id: "__manual__",
+          grant_title: "Manual Draft",
+          grant_funder: "",
+          grant_themes: [],
+          status: "drafting",
+          started_at: new Date().toISOString(),
+        } as unknown as (typeof pipelines)[number]
+      : undefined
+  );
   const sections: Record<string, DraftSection> =
     selectedPipeline?.latest_draft?.sections ?? {};
   const tiles = tilesMap[selectedId] ?? [];
@@ -680,7 +695,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       .then((data) => {
         if (!cancelled && data) grantDataRef.current[gid] = data;
       })
-      .catch(() => {}); // silent — brief will retry on click
+      .catch((e) => { console.error("Failed to preload grant data:", e); }); // brief will retry on click
     return () => { cancelled = true; };
   }, [selectedPipeline?.grant_id]);
 
@@ -797,8 +812,8 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         if (!res.ok || cancelled) return;
         const data = await res.json();
         if (!cancelled) setPastSessions(data.sessions ?? []);
-      } catch {
-        // silent
+      } catch (e) {
+        console.error("Failed to load past sessions:", e);
       } finally {
         if (!cancelled) setLoadingSessions(false);
       }
@@ -884,16 +899,17 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
 
   // -- Debounced auto-save (uses refs for latest state) ----------------------
   const triggerSave = useCallback(() => {
-    if (!selectedPipeline) return;
     // Don't save until we have the user's email — prevents orphan docs
     if (!userEmail) return;
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+
+    const grantId = selectedPipeline?.grant_id || selectedId;
 
     setSaveStatus("saving");
     saveTimeoutRef.current = setTimeout(async () => {
       const ok = await saveChatHistories(
         selectedId,
-        selectedPipeline.grant_id,
+        grantId,
         tilesRef.current,
         chatHistoriesRef.current,
         userEmail,

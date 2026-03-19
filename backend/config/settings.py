@@ -1,10 +1,35 @@
 """Application settings loaded from environment variables."""
 from __future__ import annotations
 
+import json
 from functools import lru_cache
-from typing import List
+from typing import Dict, List
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Default scoring weights — must sum to 1.0, all 6 dimensions required.
+_DEFAULT_SCORING_WEIGHTS: Dict[str, float] = {
+    "theme_alignment":        0.25,
+    "eligibility_confidence": 0.20,
+    "funding_amount":         0.20,
+    "deadline_urgency":       0.15,
+    "geography_fit":          0.10,
+    "competition_level":      0.10,
+}
+
+
+def _parse_scoring_weights(v: str) -> Dict[str, float]:
+    """Parse SCORING_WEIGHTS env var (JSON string) or return default."""
+    if not v:
+        return _DEFAULT_SCORING_WEIGHTS
+    try:
+        parsed = json.loads(v)
+        if isinstance(parsed, dict) and len(parsed) == 6:
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return _DEFAULT_SCORING_WEIGHTS
 
 
 class Settings(BaseSettings):
@@ -73,6 +98,31 @@ class Settings(BaseSettings):
         "social_impact",
         "deeptech",
     ]
+
+    # Scoring weights (JSON string env var, parsed at access time)
+    scoring_weights: str = ""
+
+    # Pre-triage guardrail thresholds
+    score_floor: float = 4.0
+    theme_alignment_floor: int = 2
+
+    # Chunking parameters (Company Brain)
+    chunk_size: int = 400        # words per chunk
+    chunk_overlap: int = 80      # word overlap between chunks
+    min_chunk_words: int = 40    # minimum words to keep a chunk
+
+    # Company identity
+    company_name: str = "AltCarbon"
+    company_domain: str = "altcarbon.com"
+
+    # LLM model overrides (override per-agent model in backend/utils/llm.py)
+    scout_model: str = ""
+    analyst_heavy_model: str = ""
+    drafter_model: str = ""
+
+    def get_scoring_weights(self) -> Dict[str, float]:
+        """Return parsed scoring weights dict."""
+        return _parse_scoring_weights(self.scoring_weights)
 
 
 @lru_cache

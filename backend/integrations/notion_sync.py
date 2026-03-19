@@ -191,8 +191,8 @@ async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
                 for block in old_blocks.get("results", []):
                     try:
                         await client.blocks.delete(block_id=block["id"])
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.warning("Failed to delete Notion block %s: %s", block["id"], e)
                 if children:
                     await client.blocks.children.append(block_id=existing_id, children=children)
             except Exception:
@@ -210,9 +210,9 @@ async def sync_scored_grant(grant: dict[str, Any]) -> str | None:
             await _store_notion_url(mongo_id, page["id"])
             return page["id"]
 
-    except Exception:
+    except Exception as e:
         log.warning("Notion sync_scored_grant failed", exc_info=True)
-        return None
+        return {"success": False, "error": str(e)}
 
 
 def _build_grant_page_body(grant: dict, da: dict) -> list[dict]:
@@ -509,9 +509,9 @@ async def log_agent_run(
         log.info("Notion: logged %s run (%s) — %s", agent_display, status, page["id"])
         return page["id"]
 
-    except Exception:
+    except Exception as e:
         log.warning("Notion log_agent_run failed", exc_info=True)
-        return None
+        return {"success": False, "error": str(e)}
 
 
 async def update_agent_run(
@@ -604,9 +604,9 @@ async def log_error(
         log.info("Notion: logged error for %s (%s)", agent_display, page["id"])
         return page["id"]
 
-    except Exception:
+    except Exception as e:
         log.warning("Notion log_error failed", exc_info=True)
-        return None
+        return {"success": False, "error": str(e)}
 
 
 # ── Triage Decisions ─────────────────────────────────────────────────────────
@@ -648,9 +648,9 @@ async def log_triage_decision(
         log.info("Notion: logged triage %s for %s (%s)", decision, grant_name, page["id"])
         return page["id"]
 
-    except Exception:
+    except Exception as e:
         log.warning("Notion log_triage_decision failed", exc_info=True)
-        return None
+        return {"success": False, "error": str(e)}
 
 
 # ── Draft Sections ───────────────────────────────────────────────────────────
@@ -717,8 +717,8 @@ async def sync_draft_section(
             )
             if resp["results"]:
                 existing_id = resp["results"][0]["id"]
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Failed to query existing draft section for %s/%s: %s", grant_id, section_name, e)
 
         if existing_id:
             await client.pages.update(page_id=existing_id, properties=props)
@@ -734,9 +734,9 @@ async def sync_draft_section(
             log.info("Notion: created draft section %s for %s (%s)", section_name, grant_name, page["id"])
             return page["id"]
 
-    except Exception:
+    except Exception as e:
         log.warning("Notion sync_draft_section failed", exc_info=True)
-        return None
+        return {"success": False, "error": str(e)}
 
 
 # ── Bulk sync (for initial backfill) ─────────────────────────────────────────

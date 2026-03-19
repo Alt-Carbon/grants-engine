@@ -25,11 +25,34 @@ from openai import AsyncOpenAI
 logger = logging.getLogger(__name__)
 
 # ── Per-agent model assignments ──────────────────────────────────────────────
+# Model names are centralized here. Each agent has a default model and a
+# fallback chain (see _FALLBACK_CHAINS below). The primary models for Scout,
+# Analyst (heavy), and Drafter can be overridden via environment variables:
+#
+#   SCOUT_MODEL          — override Scout's extraction/scraping model
+#   ANALYST_HEAVY_MODEL  — override Analyst's scoring/deep-research model
+#   DRAFTER_MODEL        — override Drafter's default generation model
+#
+# Example: SCOUT_MODEL="anthropic/claude-sonnet-4-6" in .env
+# When set, the env var value replaces the default below. Fallback chains
+# still apply if the overridden model's credits are exhausted.
+
+def _load_model_overrides():
+    """Load optional model overrides from settings (env vars)."""
+    try:
+        from backend.config.settings import get_settings
+        s = get_settings()
+        return s.scout_model, s.analyst_heavy_model, s.drafter_model
+    except Exception:
+        return "", "", ""
+
+_scout_override, _analyst_heavy_override, _drafter_override = _load_model_overrides()
+
 # Scout: GPT-5.4 for grant extraction/scraping
-SCOUT_MODEL = "openai/gpt-5.4"
+SCOUT_MODEL = _scout_override or "openai/gpt-5.4"
 
 # Analyst: Opus for heavy scoring & deep research, GPT-5.4 for light tasks
-ANALYST_HEAVY = "anthropic/claude-opus-4-6"     # scoring, deep research
+ANALYST_HEAVY = _analyst_heavy_override or "anthropic/claude-opus-4-6"     # scoring, deep research
 ANALYST_LIGHT = "openai/gpt-5.4"               # currency resolution, winners, extraction
 ANALYST_FUNDER = "perplexity/sonar"  # funder enrichment via Vercel AI Gateway
 
@@ -37,7 +60,7 @@ ANALYST_FUNDER = "perplexity/sonar"  # funder enrichment via Vercel AI Gateway
 BRAIN_MODEL = "openai/gpt-5.4"
 
 # Drafter: user-selectable (default GPT-5.4, option for Opus)
-DRAFTER_DEFAULT = "openai/gpt-5.4"
+DRAFTER_DEFAULT = _drafter_override or "openai/gpt-5.4"
 DRAFTER_MODELS = {
     "gpt-5.4": "openai/gpt-5.4",
     "opus-4.6": "anthropic/claude-opus-4-6",

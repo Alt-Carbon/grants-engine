@@ -54,15 +54,10 @@ from backend.utils.parsing import parse_json_safe, retry_async, api_health, Cred
 
 logger = logging.getLogger(__name__)
 
-# ── Default scoring weights (must sum to 1.0) ─────────────────────────────────
-DEFAULT_WEIGHTS: Dict[str, float] = {
-    "theme_alignment":        0.25,
-    "eligibility_confidence": 0.20,
-    "funding_amount":         0.20,
-    "deadline_urgency":       0.15,
-    "geography_fit":          0.10,
-    "competition_level":      0.10,
-}
+# ── Default scoring weights (centralized in settings.py) ──────────────────────
+from backend.config.settings import get_settings as _get_settings
+
+DEFAULT_WEIGHTS: Dict[str, float] = _get_settings().get_scoring_weights()
 
 # ── Scoring prompt ─────────────────────────────────────────────────────────────
 SCORING_SYSTEM = (

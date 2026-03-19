@@ -52,9 +52,10 @@ def _load_static_profile() -> str:
     return _cached_profile
 
 
-CHUNK_SIZE = 400       # words
-CHUNK_OVERLAP = 80     # words
-MIN_CHUNK_WORDS = 40
+_s = get_settings()
+CHUNK_SIZE = _s.chunk_size           # words
+CHUNK_OVERLAP = _s.chunk_overlap     # words
+MIN_CHUNK_WORDS = _s.min_chunk_words
 
 TAGGING_PROMPT = """You are tagging a document chunk from AltCarbon's internal knowledge base.
 AltCarbon is a climate technology company focused on carbon removal verification and alternative carbon markets.
@@ -493,7 +494,8 @@ class CompanyBrainAgent:
                 cursor = data.get("next_cursor")
                 if not cursor:
                     break
-            except Exception:
+            except Exception as e:
+                logger.warning("Block fetch failed for %s: %s", block_id, e)
                 break
         return "\n".join(lines)
 

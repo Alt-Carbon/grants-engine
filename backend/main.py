@@ -25,8 +25,9 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
+from backend.config.settings import get_settings
 from backend.db.mongo import ensure_indexes, get_db
 from backend.graph.graph import get_graph
 from backend.jobs.backfill_job import run_field_backfill, run_deduplication
@@ -328,7 +329,10 @@ async def lifespan(app: FastAPI):
         await _seed_default_agent_config()
         logger.info("AltCarbon Grants Intelligence backend started")
     except Exception as exc:
-        logger.error("Startup DB init failed (non-fatal — check MONGODB_URI): %s", exc)
+        logger.error(
+            "MongoDB connection failed on startup — all DB reads/writes will fail until resolved. "
+            "Check MONGODB_URI env var and network access. Error: %s", exc,
+        )
 
     # Start all MCP servers (non-fatal)
     try:
@@ -390,42 +394,76 @@ def verify_internal(
         raise HTTPException(status_code=401, detail="Invalid internal secret")
 
 
+ALLOWED_EMAIL_DOMAIN = get_settings().company_domain
+
+
 def get_user_email(x_user_email: Optional[str] = Header(default=None)) -> str:
-    """Extract user email from request headers. Use as a Depends()."""
-    return x_user_email or "system"
+    """Extract user email from request headers. Validates domain server-side."""
+    if not x_user_email:
+        return "system"
+    email = x_user_email.strip().lower()
+    if "@" in email and not email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Unauthorized email domain. Only @{ALLOWED_EMAIL_DOMAIN} allowed.",
+        )
+    return email
 
 
 # ── Request/Response models ────────────────────────────────────────────────────
+
+_VALID_TRIAGE_DECISIONS = {"pursue", "watch", "pass"}
+_VALID_REVIEW_ACTIONS = {"approve", "revise"}
+_VALID_STATUSES = {
+    "triage", "pursue", "pursuing", "watch", "drafting",
+    "draft_complete", "submitted", "won", "passed", "auto_pass",
+    "human_passed", "hold", "reported", "guardrail_rejected",
+}
+
 
 class TriageResumeRequest(BaseModel):
     thread_id: str
     grant_id: str
     decision: str                      # "pursue" | "watch" | "pass"
-    notes: Optional[str] = None
+    notes: Optional[str] = Field(default=None, max_length=2000)
     human_override: bool = False       # True when human overrides the AI recommendation
-    override_reason: Optional[str] = None  # Required explanation when human_override=True
+    override_reason: Optional[str] = Field(default=None, max_length=1000)
+
+    @field_validator("decision")
+    @classmethod
+    def validate_decision(cls, v: str) -> str:
+        if v not in _VALID_TRIAGE_DECISIONS:
+            raise ValueError(f"decision must be one of {_VALID_TRIAGE_DECISIONS}")
+        return v
 
 
 class SectionReviewRequest(BaseModel):
     thread_id: str
     section_name: str
     action: str                         # "approve" | "revise"
-    instructions: Optional[str] = None
-    critique: Optional[str] = None
-    edited_content: Optional[str] = None
+    instructions: Optional[str] = Field(default=None, max_length=5000)
+    critique: Optional[str] = Field(default=None, max_length=5000)
+    edited_content: Optional[str] = Field(default=None, max_length=50000)
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str) -> str:
+        if v not in _VALID_REVIEW_ACTIONS:
+            raise ValueError(f"action must be one of {_VALID_REVIEW_ACTIONS}")
+        return v
 
 
 class StartDraftRequest(BaseModel):
     grant_id: str
     thread_id: Optional[str] = None
     override_guardrails: bool = False
-    override_reason: Optional[str] = None
+    override_reason: Optional[str] = Field(default=None, max_length=1000)
 
 
 class DrafterChatRequest(BaseModel):
     grant_id: str
     section_name: str
-    message: str
+    message: str = Field(max_length=10000)
     chat_history: Optional[list] = None  # [{role, content}, ...]
     model: Optional[str] = None  # "gpt-5.4" | "opus-4.6" — user-selectable
     user_email: Optional[str] = None  # authenticated user's email
@@ -436,12 +474,19 @@ class UpdateGrantStatusRequest(BaseModel):
     grant_id: str
     status: str
 
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        if v not in _VALID_STATUSES:
+            raise ValueError(f"status must be one of {_VALID_STATUSES}")
+        return v
+
 
 class ManualGrantRequest(BaseModel):
     url: str
-    title_override: Optional[str] = ""
-    funder_override: Optional[str] = ""
-    notes: Optional[str] = ""
+    title_override: Optional[str] = Field(default="", max_length=500)
+    funder_override: Optional[str] = Field(default="", max_length=500)
+    notes: Optional[str] = Field(default="", max_length=2000)
 
 
 # ── Seed default agent config ──────────────────────────────────────────────────
@@ -2698,6 +2743,21 @@ async def start_draft(
     grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)})
     if not grant:
         raise HTTPException(status_code=404, detail="Grant not found")
+
+    # ── Guard: prevent concurrent drafts for the same grant ──────────────────
+    existing_draft = await grants_pipeline().find_one({
+        "grant_id": body.grant_id,
+        "status": {"$in": ["drafting", "pending_interrupt"]},
+    })
+    if existing_draft:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "draft_already_in_progress",
+                "reason": f"A draft is already in progress (thread: {existing_draft.get('thread_id', 'unknown')})",
+                "grant_id": body.grant_id,
+            },
+        )
 
     # ── Layer 1: Deterministic pre-draft validation ──────────────────────────
     if not body.override_guardrails:

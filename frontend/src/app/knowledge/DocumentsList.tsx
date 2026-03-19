@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   Clock,
 } from "lucide-react";
+import { formatRelativeTime, formatChars } from "@/lib/utils";
 
 interface ArticulationDoc {
   page_id: string;
@@ -51,21 +52,6 @@ const FOCUS_COLORS: Record<string, string> = {
   "Social Impact": "bg-red-50 text-red-700 border-red-200",
   "Advanced Earth Sciences": "bg-pink-50 text-pink-700 border-pink-200",
 };
-
-function formatRelativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d ago`;
-}
-
-function formatChars(chars: number): string {
-  if (chars >= 1000) return `${(chars / 1000).toFixed(1)}k`;
-  return String(chars);
-}
 
 export function DocumentsList() {
   const [data, setData] = useState<DocsData | null>(null);

@@ -1,11 +1,13 @@
 """MongoDB client singleton and collection accessors."""
 from __future__ import annotations
 
+import logging
 import os
 from functools import lru_cache
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
+logger = logging.getLogger(__name__)
 
 _client: AsyncIOMotorClient | None = None
 
@@ -15,6 +17,11 @@ def get_client() -> AsyncIOMotorClient:
     if _client is None:
         from backend.config.settings import get_settings
         uri = get_settings().mongodb_uri.strip()
+        if not uri:
+            logger.error(
+                "MONGODB_URI is empty or not set — all database operations will fail. "
+                "Set the MONGODB_URI environment variable to a valid MongoDB connection string."
+            )
         _client = AsyncIOMotorClient(uri)
     return _client
 

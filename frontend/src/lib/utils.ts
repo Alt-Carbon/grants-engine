@@ -38,3 +38,39 @@ export function getThemeLabel(key: string): { label: string; bg: string; color: 
   if (cfg) return cfg;
   return { ...THEME_FALLBACK, label: key };
 }
+
+// ── Currency Formatting ─────────────────────────────────────────────────────
+
+export function formatCurrency(amount: number | undefined | null): string | null {
+  if (!amount) return null;
+  if (amount >= 1_000_000) return `$${(amount / 1_000_000).toFixed(1)}M`;
+  if (amount >= 1_000) return `$${(amount / 1_000).toFixed(0)}K`;
+  return `$${amount.toLocaleString()}`;
+}
+
+// ── Time Formatting ─────────────────────────────────────────────────────────
+
+export function formatRelativeTime(iso: string | undefined | null): string {
+  if (!iso) return "";
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
+export function formatDateShort(iso: string | undefined | null): string {
+  if (!iso) return "--";
+  const d = new Date(iso);
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+// ── Number Formatting ───────────────────────────────────────────────────────
+
+export function formatChars(chars: number): string {
+  if (chars >= 1000) return `${(chars / 1000).toFixed(1)}k`;
+  return String(chars);
+}

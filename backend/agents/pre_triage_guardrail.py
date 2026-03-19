@@ -17,12 +17,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from backend.agents.analyst import parse_deadline
+from backend.config.settings import get_settings
 from backend.graph.state import GrantState
 
 logger = logging.getLogger(__name__)
 
-SCORE_FLOOR = 4.0
-THEME_ALIGNMENT_FLOOR = 2
+_s = get_settings()
+SCORE_FLOOR = _s.score_floor
+THEME_ALIGNMENT_FLOOR = _s.theme_alignment_floor
 
 
 def _check_grant(grant: Dict) -> Dict[str, Any] | None:

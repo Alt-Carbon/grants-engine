@@ -7,6 +7,7 @@ import { DeadlineChip } from "./DeadlineChip";
 import { StatusBadge } from "./StatusBadge";
 import { CommentThread } from "./CommentThread";
 import { GrantActivity } from "./GrantActivity";
+import { formatCurrency } from "@/lib/utils";
 import {
   X,
   ExternalLink,
@@ -306,7 +307,7 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                 { icon: Globe,     label: "Geography", value: grant.geography || "—" },
                 {
                   icon: DollarSign, label: "Funding",
-                  value: funding ? `$${(funding / 1000).toFixed(0)}K` : (grant.amount || "—"),
+                  value: funding ? (formatCurrency(funding) ?? "—") : (grant.amount || "—"),
                 },
                 { icon: Clock,     label: "Deadline",  value: grant.deadline || "—" },
               ].map(({ icon: Icon, label, value }) => (

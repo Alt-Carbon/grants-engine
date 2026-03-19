@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { GrantDetailSheet } from "@/components/GrantDetailSheet";
 import type { Grant } from "@/lib/queries";
-import { getPriority, getThemeLabel } from "@/lib/utils";
+import { getPriority, getThemeLabel, formatCurrency } from "@/lib/utils";
 import { CheckCircle, XCircle, ChevronDown, ChevronUp, AlertTriangle, ExternalLink } from "lucide-react";
 
 interface TriageQueueProps {
@@ -135,7 +135,7 @@ export function TriageQueue({ grants: initialGrants }: TriageQueueProps) {
                   )}
                   {(grant.max_funding_usd || grant.max_funding) && (
                     <Badge variant="secondary">
-                      ${((grant.max_funding_usd || grant.max_funding || 0) / 1000).toFixed(0)}K
+                      {formatCurrency(grant.max_funding_usd || grant.max_funding)}
                     </Badge>
                   )}
                   {grant.themes_detected?.map((t) => {

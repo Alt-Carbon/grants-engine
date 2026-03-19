@@ -1,7 +1,8 @@
 import { ExternalLink } from "lucide-react";
 import { DeadlineChip } from "./DeadlineChip";
 import { StatusPicker } from "./StatusPicker";
-import { getPriority, getThemeLabel } from "@/lib/utils";
+import { ScoreBadge, PriorityBadge } from "./ScoreBadge";
+import { getThemeLabel, formatCurrency } from "@/lib/utils";
 import type { Grant } from "@/lib/queries";
 
 interface GrantCardProps {
@@ -10,34 +11,6 @@ interface GrantCardProps {
   href?: string;
   isNew?: boolean;
   onStatusChange?: (grantId: string, newStatus: string) => void;
-}
-
-function ScoreBadge({ score }: { score: number }) {
-  const color =
-    score >= 6.5
-      ? "bg-green-100 text-green-800 ring-green-200"
-      : score >= 5.0
-      ? "bg-amber-100 text-amber-800 ring-amber-200"
-      : "bg-red-100 text-red-800 ring-red-200";
-
-  return (
-    <span
-      className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-bold ring-1 ${color}`}
-    >
-      {score.toFixed(1)}
-    </span>
-  );
-}
-
-function PriorityBadge({ score }: { score: number }) {
-  const { label, className } = getPriority(score);
-  return (
-    <span
-      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ${className}`}
-    >
-      {label}
-    </span>
-  );
 }
 
 function PassedLabel({ status }: { status: string }) {
@@ -145,7 +118,7 @@ export function GrantCard({
         )}
         {funding !== undefined && funding > 0 && (
           <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
-            ${(funding / 1000).toFixed(0)}K
+            {formatCurrency(funding)}
           </span>
         )}
         {isPassed && <PassedLabel status={grant.status} />}
