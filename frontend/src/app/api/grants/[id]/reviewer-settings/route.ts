@@ -107,6 +107,21 @@ export async function POST(
 
     const db = await getDb();
 
+    // Validate strictness values if provided
+    const VALID_STRICTNESS = ["lenient", "balanced", "strict"];
+    if (funder_strictness !== undefined && !VALID_STRICTNESS.includes(funder_strictness)) {
+      return NextResponse.json(
+        { error: `Invalid funder_strictness. Must be one of: ${VALID_STRICTNESS.join(", ")}` },
+        { status: 400 }
+      );
+    }
+    if (scientific_strictness !== undefined && !VALID_STRICTNESS.includes(scientific_strictness)) {
+      return NextResponse.json(
+        { error: `Invalid scientific_strictness. Must be one of: ${VALID_STRICTNESS.join(", ")}` },
+        { status: 400 }
+      );
+    }
+
     // Build the reviewer_settings object (only include provided fields)
     const reviewerSettings: Record<string, unknown> = {};
     if (funder_strictness !== undefined) reviewerSettings.funder_strictness = funder_strictness;

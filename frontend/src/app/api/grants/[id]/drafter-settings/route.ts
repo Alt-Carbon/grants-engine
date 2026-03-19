@@ -83,19 +83,30 @@ export async function POST(
   try {
     const { id } = await props.params;
     const body = await req.json();
-    const { writing_style, custom_instructions, temperature } = body as {
+    const { writing_style, custom_instructions, temperature, theme_settings } = body as {
       writing_style?: string;
       custom_instructions?: string;
       temperature?: number;
+      theme_settings?: Record<string, unknown>;
     };
 
     const db = await getDb();
+
+    // Validate writing_style if provided (trained on reference grants)
+    const VALID_STYLES = ["professional", "scientific"];
+    if (writing_style !== undefined && !VALID_STYLES.includes(writing_style)) {
+      return NextResponse.json(
+        { error: `Invalid writing_style. Must be one of: ${VALID_STYLES.join(", ")}` },
+        { status: 400 }
+      );
+    }
 
     // Build the drafter_settings object (only include provided fields)
     const drafterSettings: Record<string, unknown> = {};
     if (writing_style !== undefined) drafterSettings.writing_style = writing_style;
     if (custom_instructions !== undefined) drafterSettings.custom_instructions = custom_instructions;
     if (temperature !== undefined) drafterSettings.temperature = temperature;
+    if (theme_settings !== undefined) drafterSettings.theme_settings = theme_settings;
     drafterSettings.updated_at = new Date().toISOString();
     drafterSettings.updated_by = session.user.email || session.user.name || "unknown";
 
