@@ -3394,21 +3394,27 @@ async def add_manual_grant(
 
     s = get_settings()
     raw_content = ""
-    jina_url = f"https://r.jina.ai/{url}"
-    headers: dict = {"X-Return-Format": "markdown", "X-With-Links-Summary": "false"}
-    if s.jina_api_key:
-        headers["Authorization"] = f"Bearer {s.jina_api_key}"
 
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    # Primary: Exa get_contents for clean text extraction
+    if s.exa_api_key:
         try:
-            r = await client.get(jina_url, headers=headers)
-            r.raise_for_status()
-            raw_content = r.text.strip()[:80_000]
-        except Exception:
+            from exa_py import Exa
+            exa = Exa(api_key=s.exa_api_key)
+            result = await asyncio.to_thread(
+                exa.get_contents, url, text={"max_characters": 80_000}
+            )
+            if result.results:
+                raw_content = (getattr(result.results[0], "text", "") or "").strip()
+        except Exception as e:
+            logger.warning("Exa get_contents failed for %s: %s", url[:60], e)
+
+    # Fallback: plain HTTP
+    if not raw_content:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             try:
-                r2 = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                r2.raise_for_status()
-                raw_content = r2.text[:60_000]
+                r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                r.raise_for_status()
+                raw_content = r.text[:60_000]
             except Exception as e:
                 raise HTTPException(status_code=502, detail=f"Could not fetch URL: {e}")
 
