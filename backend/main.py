@@ -1661,6 +1661,112 @@ async def rescore_analyst(
     }
 
 
+@app.post("/run/analyst/rescore/{grant_id}")
+async def rescore_single_grant(
+    grant_id: str,
+    background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
+):
+    """Re-run analyst deep analysis + scoring on a single grant by ID."""
+    from bson import ObjectId
+
+    global _analyst_running, _analyst_started_at
+    async with _analyst_lock:
+        if _analyst_running:
+            return {"status": "analyst_already_running", "started_at": _analyst_started_at}
+        _analyst_running = True
+        _analyst_started_at = datetime.now(timezone.utc).isoformat()
+
+    async def _run():
+        global _analyst_running, _analyst_started_at
+        try:
+            from backend.agents.analyst import AnalystAgent, DEFAULT_WEIGHTS
+            from backend.config.settings import get_settings
+            from backend.db.mongo import grants_scored, agent_config, get_db
+
+            s = get_settings()
+            cfg_doc = await agent_config().find_one({"agent": "analyst"}) or {}
+            weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
+            min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
+
+            # 1. Fetch the grant
+            try:
+                oid = ObjectId(grant_id)
+            except Exception:
+                logger.error("Rescore single: invalid grant_id %s", grant_id)
+                return
+            grant_doc = await grants_scored().find_one({"_id": oid})
+            if not grant_doc:
+                logger.error("Rescore single: grant %s not found", grant_id)
+                return
+
+            # 2. Convert to raw-like format
+            raw_doc = {
+                "_id": grant_doc["_id"],
+                "title": grant_doc.get("title") or grant_doc.get("grant_name") or "",
+                "url": grant_doc.get("url") or grant_doc.get("source_url") or "",
+                "url_hash": grant_doc.get("url_hash", ""),
+                "content_hash": grant_doc.get("content_hash", ""),
+                "funder": grant_doc.get("funder", ""),
+                "deadline": grant_doc.get("deadline", ""),
+                "amount": grant_doc.get("amount") or grant_doc.get("max_funding") or "",
+                "eligibility": grant_doc.get("eligibility", ""),
+                "geography": grant_doc.get("geography", ""),
+                "grant_type": grant_doc.get("grant_type", ""),
+                "themes_detected": grant_doc.get("themes_detected", []),
+                "about_opportunity": grant_doc.get("about_opportunity", ""),
+                "application_process": grant_doc.get("application_process", ""),
+                "scraped_at": grant_doc.get("scraped_at", ""),
+            }
+
+            # 3. Delete existing scored record so analyst doesn't skip it
+            await grants_scored().delete_one({"_id": oid})
+            logger.info("Rescore single: deleted existing record for %s", grant_id)
+
+            # 4. Run analyst
+            agent = AnalystAgent(
+                perplexity_api_key=s.perplexity_api_key,
+                gateway_api_key=s.ai_gateway_api_key,
+                gateway_url=s.ai_gateway_url,
+                weights=weights,
+                min_funding=min_funding,
+            )
+            scored = await agent.run([raw_doc])
+            logger.info("Rescore single: grant %s re-scored", grant_id)
+
+            # 5. Audit log
+            db = get_db()
+            await db["audit_logs"].insert_one({
+                "event": "analyst_rescore_single",
+                "grant_id": grant_id,
+                "grant_name": grant_doc.get("grant_name") or grant_doc.get("title") or "",
+                "triggered_by": user_email,
+                "scored_count": len(scored),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+        except Exception as e:
+            logger.error("Rescore single failed for %s: %s", grant_id, e)
+            try:
+                import traceback as _tb
+                from backend.integrations.notion_sync import log_error
+                await log_error(agent="analyst", error=e, tb=_tb.format_exc(), severity="Warning")
+            except Exception:
+                pass
+        finally:
+            async with _analyst_lock:
+                _analyst_running = False
+                _analyst_started_at = None
+
+    background_tasks.add_task(_run)
+    return {
+        "status": "rescore_single_started",
+        "grant_id": grant_id,
+        "started_at": _analyst_started_at,
+    }
+
+
 # ── Resume endpoints ───────────────────────────────────────────────────────────
 
 @app.post("/resume/triage")

@@ -5,11 +5,13 @@ import { useSession } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import ReactMarkdown from "react-markdown";
 import type { PipelineRecord, DraftSection } from "@/lib/queries";
+import { formatCurrency } from "@/lib/utils";
 import {
   Send,
   CheckCircle,
   FileText,
   ChevronDown,
+  ChevronRight,
   Download,
   MessageSquare,
   Bot,
@@ -29,6 +31,11 @@ import {
   Trash2,
   Cloud,
   CloudOff,
+  Globe,
+  DollarSign,
+  ExternalLink,
+  Target,
+  Info,
 } from "lucide-react";
 import { DrafterSettings } from "@/components/DrafterSettings";
 
@@ -554,6 +561,9 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const [restoringSession, setRestoringSession] = useState<string | null>(null);
   const [streamingByKey, setStreamingByKey] = useState<Record<string, string>>({});
   const [streamStatusByKey, setStreamStatusByKey] = useState<Record<string, string>>({});
+  const [grantIntelOpen, setGrantIntelOpen] = useState(true);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [grantData, setGrantData] = useState<Record<string, any>>({});
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -684,18 +694,25 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     }
   }, [tiles, activeTileId]);
 
-  // -- Preload full grant data for intelligence brief -------------------------
+  // -- Preload full grant data for intelligence brief + Grant Intel panel ------
   useEffect(() => {
     if (!selectedPipeline?.grant_id) return;
     const gid = selectedPipeline.grant_id;
-    if (grantDataRef.current[gid]) return; // already loaded
+    if (grantDataRef.current[gid]) {
+      // Already loaded in ref — sync to state if missing
+      setGrantData((prev) => (prev[gid] ? prev : { ...prev, [gid]: grantDataRef.current[gid] }));
+      return;
+    }
     let cancelled = false;
     fetch(`/api/grants/${encodeURIComponent(gid)}`, { credentials: "same-origin" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (!cancelled && data) grantDataRef.current[gid] = data;
+        if (!cancelled && data) {
+          grantDataRef.current[gid] = data;
+          setGrantData((prev) => ({ ...prev, [gid]: data }));
+        }
       })
-      .catch((e) => { console.error("Failed to preload grant data:", e); }); // brief will retry on click
+      .catch((e) => { console.error("Failed to preload grant data:", e); });
     return () => { cancelled = true; };
   }, [selectedPipeline?.grant_id]);
 
@@ -1490,6 +1507,140 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
             {currentAgent.name}
           </span>
         </div>
+
+        {/* ── Grant Intel Panel ──────────────────────────────────── */}
+        {selectedId !== "__manual__" && (() => {
+          const gid = selectedPipeline?.grant_id;
+          const g = gid ? grantData[gid] : null;
+          if (!g) return null;
+
+          const score = g.weighted_total ?? 0;
+          const scorePct = Math.min(100, (score / 10) * 100);
+          const scoreColor = score >= 6.5 ? "bg-green-400" : score >= 5 ? "bg-amber-400" : "bg-red-400";
+          const scoreText = score >= 6.5 ? "text-green-700" : score >= 5 ? "text-amber-700" : "text-red-700";
+          const funding = g.max_funding_usd || g.max_funding;
+          const da = g.deep_analysis || {};
+          const eligChecklist = da.eligibility_checklist || [];
+          const metCount = eligChecklist.filter((c: { altcarbon_status: string }) => c.altcarbon_status === "met" || c.altcarbon_status === "likely_met").length;
+          const totalChecks = eligChecklist.length;
+
+          return (
+            <div className="border-b border-gray-100">
+              <button
+                onClick={() => setGrantIntelOpen((o) => !o)}
+                className="flex w-full items-center gap-2 px-4 py-2 text-left transition-colors hover:bg-gray-50"
+              >
+                <ChevronRight className={`h-3 w-3 text-gray-400 transition-transform ${grantIntelOpen ? "rotate-90" : ""}`} />
+                <Info className="h-3 w-3 text-violet-400" />
+                <span className="flex-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+                  Grant Intel
+                </span>
+                <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${scoreText} ${score >= 6.5 ? "bg-green-50" : score >= 5 ? "bg-amber-50" : "bg-red-50"}`}>
+                  {score.toFixed(1)}
+                </span>
+              </button>
+
+              {grantIntelOpen && (
+                <div className="px-4 pb-3 space-y-2.5">
+                  {/* Score bar */}
+                  <div>
+                    <div className="flex items-center justify-between text-[10px] mb-1">
+                      <span className="text-gray-400">Score</span>
+                      <span className={`font-bold ${scoreText}`}>{score.toFixed(1)}/10</span>
+                    </div>
+                    <div className="h-1.5 w-full rounded-full bg-gray-100 overflow-hidden">
+                      <div className={`h-full rounded-full ${scoreColor} transition-all`} style={{ width: `${scorePct}%` }} />
+                    </div>
+                  </div>
+
+                  {/* Quick facts */}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {funding !== undefined && funding > 0 && (
+                      <div className="flex items-center gap-1.5 rounded-md bg-gray-50 px-2 py-1.5">
+                        <DollarSign className="h-3 w-3 text-gray-400" />
+                        <span className="text-[11px] font-medium text-gray-700 truncate">
+                          {formatCurrency(funding) ?? "—"}
+                        </span>
+                      </div>
+                    )}
+                    {g.deadline && (
+                      <div className="flex items-center gap-1.5 rounded-md bg-gray-50 px-2 py-1.5">
+                        <Clock className="h-3 w-3 text-gray-400" />
+                        <span className={`text-[11px] font-medium truncate ${g.deadline_urgent ? "text-red-600" : "text-gray-700"}`}>
+                          {g.days_to_deadline !== undefined ? `${g.days_to_deadline}d left` : g.deadline}
+                        </span>
+                      </div>
+                    )}
+                    {g.geography && (
+                      <div className="flex items-center gap-1.5 rounded-md bg-gray-50 px-2 py-1.5">
+                        <Globe className="h-3 w-3 text-gray-400" />
+                        <span className="text-[11px] font-medium text-gray-700 truncate">{g.geography}</span>
+                      </div>
+                    )}
+                    {totalChecks > 0 && (
+                      <div className="flex items-center gap-1.5 rounded-md bg-gray-50 px-2 py-1.5">
+                        <Target className="h-3 w-3 text-gray-400" />
+                        <span className="text-[11px] font-medium text-gray-700">
+                          {metCount}/{totalChecks} eligible
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Strategic angle */}
+                  {da.strategic_angle && (
+                    <div className="rounded-lg bg-violet-50 px-2.5 py-2">
+                      <p className="text-[10px] font-semibold text-violet-600 mb-0.5">Strategic Angle</p>
+                      <p className="text-[11px] leading-relaxed text-violet-800 line-clamp-3">
+                        {da.strategic_angle}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Red flags */}
+                  {g.red_flags && g.red_flags.length > 0 && (
+                    <div className="rounded-lg bg-red-50 px-2.5 py-2">
+                      <p className="text-[10px] font-semibold text-red-600 mb-0.5">
+                        {g.red_flags.length} Red Flag{g.red_flags.length !== 1 ? "s" : ""}
+                      </p>
+                      <ul className="space-y-0.5">
+                        {g.red_flags.slice(0, 2).map((f: string, i: number) => (
+                          <li key={i} className="text-[11px] text-red-700 line-clamp-1">
+                            {f}
+                          </li>
+                        ))}
+                        {g.red_flags.length > 2 && (
+                          <li className="text-[10px] text-red-500">
+                            +{g.red_flags.length - 2} more
+                          </li>
+                        )}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Key requirements hint */}
+                  {da.requirements?.word_page_limits && (
+                    <div className="flex items-start gap-1.5 text-[11px] text-gray-500">
+                      <FileText className="h-3 w-3 shrink-0 mt-0.5 text-gray-400" />
+                      <span className="line-clamp-1">{da.requirements.word_page_limits}</span>
+                    </div>
+                  )}
+
+                  {/* Open full detail page */}
+                  <a
+                    href={`/grants/${g._id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 text-[11px] font-medium text-violet-600 hover:text-violet-800 transition-colors"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    View full grant details
+                  </a>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Progress bar */}
         <div className="border-b border-gray-100 px-4 py-2.5">

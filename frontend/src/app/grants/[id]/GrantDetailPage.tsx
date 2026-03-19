@@ -35,6 +35,7 @@ import {
   Link2,
   Loader2,
   PlayCircle,
+  RefreshCw,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -146,6 +147,9 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
   const [collabTab, setCollabTab] = useState<"discussion" | "activity">("discussion");
   const [draftLoading, setDraftLoading] = useState(false);
   const [draftError, setDraftError] = useState<string | null>(null);
+  const [reanalyzeLoading, setReanalyzeLoading] = useState(false);
+  const [reanalyzeError, setReanalyzeError] = useState<string | null>(null);
+  const [reanalyzeStarted, setReanalyzeStarted] = useState(false);
 
   const name = grant.grant_name || grant.title || "Grant Details";
   const score = grant.weighted_total ?? 0;
@@ -198,6 +202,26 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
       setDraftLoading(false);
     }
   }, [grant._id, router]);
+
+  const startReanalyze = useCallback(async () => {
+    setReanalyzeLoading(true);
+    setReanalyzeError(null);
+    try {
+      const res = await fetch(`/api/grants/${grant._id}/reanalyze`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setReanalyzeError(data?.detail || data?.error || "Failed to start re-analysis");
+        return;
+      }
+      setReanalyzeStarted(true);
+    } catch {
+      setReanalyzeError("Network error — could not reach the server");
+    } finally {
+      setReanalyzeLoading(false);
+    }
+  }, [grant._id]);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -318,11 +342,38 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
                 Drafting in progress
               </span>
             )}
+            {!reanalyzeStarted && (
+              <button
+                onClick={startReanalyze}
+                disabled={reanalyzeLoading}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-4 py-1.5 text-sm font-semibold text-blue-700 shadow-sm transition-colors hover:bg-blue-100 disabled:opacity-50"
+                title="Re-run analyst scoring and deep analysis for this grant"
+              >
+                {reanalyzeLoading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+                {reanalyzeLoading ? "Starting..." : "Re-analyze"}
+              </button>
+            )}
+            {reanalyzeStarted && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                Re-analyzing...
+              </span>
+            )}
           </div>
           {draftError && (
             <div className="mt-3 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5">
               <AlertTriangle className="h-4 w-4 shrink-0 text-red-500" />
               <p className="text-sm text-red-700">{draftError}</p>
+            </div>
+          )}
+          {reanalyzeError && (
+            <div className="mt-3 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-red-500" />
+              <p className="text-sm text-red-700">{reanalyzeError}</p>
             </div>
           )}
 
