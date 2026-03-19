@@ -136,6 +136,7 @@ async def exporter_node(state: GrantState) -> Dict:
     logger.info("Exporter: saved draft to %s", filepath)
 
     # Save to MongoDB
+    from backend.config.settings import get_settings
     pipeline_id = state.get("pipeline_id")
     draft_record = {
         "pipeline_id": pipeline_id,
