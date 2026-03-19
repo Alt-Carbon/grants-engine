@@ -107,7 +107,7 @@ async def reviewer_node(state: GrantState) -> Dict:
         funder=grant.get("funder", ""),
         theme=theme_display,
         criteria=criteria_text,
-        draft=sections_text[:12000],
+        draft=sections_text[:30000],
         export_threshold=export_threshold,
     )
 
@@ -122,7 +122,7 @@ async def reviewer_node(state: GrantState) -> Dict:
     except Exception as e:
         logger.error("Reviewer failed: %s", e)
         review = {
-            "overall_score": 0.0,
+            "overall_score": 0,
             "section_critiques": {},
             "top_3_fixes": [],
             "evidence_gaps_critical": [],

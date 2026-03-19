@@ -260,14 +260,27 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
     if (selectedId) fetchReviews(selectedId);
   }, [selectedId, fetchReviews]);
 
-  // Poll for results after triggering a review
+  // Poll for results after triggering a review (max 60 attempts = 5 minutes)
+  const [pollCount, setPollCount] = useState(0);
   useEffect(() => {
     if (!polling || !selectedId) return;
+    const MAX_POLL_ATTEMPTS = 60;
     const interval = setInterval(async () => {
+      setPollCount((c) => {
+        const next = c + 1;
+        if (next >= MAX_POLL_ATTEMPTS) {
+          setPolling(false);
+          setRunLoading(false);
+          setError("Review timed out after 5 minutes. Please check back later or re-run.");
+          return 0;
+        }
+        return next;
+      });
       const data = await fetchReviews(selectedId);
       if (data?.funder && data?.scientific) {
         setPolling(false);
         setRunLoading(false);
+        setPollCount(0);
       }
     }, 5000);
     return () => clearInterval(interval);
@@ -290,6 +303,7 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
         return;
       }
       // Start polling for results
+      setPollCount(0);
       setPolling(true);
     } catch {
       setError("Network error");

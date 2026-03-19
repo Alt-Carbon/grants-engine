@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.config.settings import get_settings
 from backend.db.mongo import ensure_indexes, get_db
@@ -437,6 +437,12 @@ class TriageResumeRequest(BaseModel):
         if v not in _VALID_TRIAGE_DECISIONS:
             raise ValueError(f"decision must be one of {_VALID_TRIAGE_DECISIONS}")
         return v
+
+    @model_validator(mode="after")
+    def require_override_reason(self):
+        if self.human_override and not self.override_reason:
+            raise ValueError("override_reason is required when human_override is True")
+        return self
 
 
 class SectionReviewRequest(BaseModel):
@@ -1753,8 +1759,25 @@ async def resume_section_review(
     body: SectionReviewRequest,
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
     """Human approved or requested revision on a section. Resume drafter."""
+    # ── Audit log — record who reviewed the section ──────────────────
+    try:
+        from backend.db.mongo import audit_logs
+        await audit_logs().insert_one({
+            "node": "section_review",
+            "action": f"section_{body.action}",
+            "section_name": body.section_name,
+            "thread_id": body.thread_id,
+            "user_email": user_email,
+            "has_edited_content": bool(body.edited_content),
+            "has_instructions": bool(body.instructions),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        logger.debug("Audit log insert failed (section review)", exc_info=True)
+
     async def _resume():
         try:
             from langgraph.types import Command
@@ -2972,7 +2995,7 @@ async def get_reviews(grant_id: str, _: None = Depends(verify_internal)):
         {"grant_id": grant_id}
     ).sort("created_at", -1).to_list(20)
 
-    result = {"funder": None, "scientific": None}
+    result = {"funder": None, "scientific": None, "coherence": None}
     for doc in docs:
         doc["_id"] = str(doc["_id"])
         perspective = doc.get("perspective")
@@ -3178,12 +3201,13 @@ class NotionSectionReviewWebhookRequest(BaseModel):
 async def notion_webhook_triage(
     body: NotionTriageWebhookRequest,
     background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
 ):
     """Notion automation fires this when a grant Status changes to Pursue/Watch/Pass.
 
     Finds the matching LangGraph thread and resumes the human_triage checkpoint.
     """
-    from backend.db.mongo import grants_scored, grants_pipeline, graph_checkpoints
+    from backend.db.mongo import grants_scored, grants_pipeline
     from bson import ObjectId
 
     # Normalize Notion status → internal status
@@ -3224,17 +3248,9 @@ async def notion_webhook_triage(
         sort=[("started_at", -1)],
     )
 
-    # Also check checkpoints for scout/analyst threads waiting on triage
-    checkpoint = await graph_checkpoints().find_one(
-        {},
-        sort=[("checkpoint_id", -1)],
-    )
-
     thread_id = None
     if pipeline:
         thread_id = pipeline.get("thread_id")
-    elif checkpoint:
-        thread_id = checkpoint.get("thread_id")
 
     if thread_id:
         async def _resume():
@@ -3282,6 +3298,7 @@ async def notion_webhook_triage(
 async def notion_webhook_section_review(
     body: NotionSectionReviewWebhookRequest,
     background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
 ):
     """Notion automation fires this when a Draft Section status changes to
     Approved or Needs Revision.
@@ -3312,12 +3329,14 @@ async def notion_webhook_section_review(
 
     async def _resume():
         try:
+            from langgraph.types import Command
+
             graph = get_graph()
             config = {"configurable": {"thread_id": thread_id}}
             update: dict = {"section_review_decision": action}
             if body.revision_notes and action == "revise":
                 update["section_revision_instructions"] = {body.section_name: body.revision_notes}
-            await graph.ainvoke(update, config=config)
+            await graph.ainvoke(Command(resume=True, update=update), config=config)
         except Exception as e:
             logger.error("Notion webhook section review resume failed: %s", e)
 

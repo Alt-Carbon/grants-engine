@@ -127,13 +127,15 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # Gate 2: drafter loops until all sections approved, then goes to reviewer
+    # Gate 2: drafter loops until all sections approved, then goes to reviewer.
+    # "pipeline_update" is a safety valve for empty-sections edge case.
     builder.add_conditional_edges(
         "drafter",
         route_after_drafter,
         {
             "drafter": "drafter",
             "reviewer": "reviewer",
+            "pipeline_update": "pipeline_update",
         },
     )
 

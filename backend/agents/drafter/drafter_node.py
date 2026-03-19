@@ -338,7 +338,20 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         prev_interrupt = state.get("pending_interrupt") or {}
         ai_version = prev_interrupt.get("content", "")
         content_to_save = edited_content or ai_version
-        if content_to_save and prev_name not in approved_sections:
+        if not content_to_save or not content_to_save.strip():
+            logger.warning("Drafter: empty content on approve for section '%s' — cannot save", prev_name)
+            return {
+                "errors": state.get("errors", []) + [f"Cannot approve section '{prev_name}' with empty content"],
+                "section_review_decision": None,
+                "section_edited_content": None,
+                "pending_interrupt": prev_interrupt,
+                "grant_theme": grant_theme,
+                "draft_outline": draft_outline,
+                "grant_requirements": grant_requirements,
+                "criteria_map": criteria_map,
+                "funder_terms": funder_terms,
+            }
+        if prev_name not in approved_sections:
             approved_sections[prev_name] = {
                 "content": content_to_save,
                 "word_count": len(content_to_save.split()),
@@ -383,68 +396,99 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
     elif review_decision == "revise" and current_idx > 0:
         # Rewrite current section — stay on same index
         section = sections[current_idx - 1]
-        prev_interrupt = state.get("pending_interrupt") or {}
-        instructions = state.get("section_revision_instructions", {}).get(section.get("name", ""), "")
-        critique = state.get("section_critiques", {}).get(section.get("name", ""), "")
+        section_name_key = section.get("name", f"Section {current_idx}")
 
-        # ── Preference learning: record the revise signal ────────────
-        # The revision instruction is gold — it says exactly what was wrong
-        try:
-            from backend.agents.preference_learner import record_preference
-            await record_preference(
-                grant_id=str(grant_id or ""),
-                section_name=section.get("name", ""),
-                ai_version=prev_interrupt.get("content", ""),
-                final_version=prev_interrupt.get("content", ""),  # not yet rewritten
-                was_revised=True,
-                revision_instructions=instructions,
-                theme=grant_theme,
-                funder=grant.get("funder", ""),
-                grant_type=grant.get("grant_type", ""),
+        # ── Enforce max revision attempts ────────────────────────────────
+        revision_counts = dict(state.get("section_revision_counts", {}))
+        revision_counts[section_name_key] = revision_counts.get(section_name_key, 0) + 1
+        max_revisions = _settings.max_revision_attempts
+
+        if revision_counts[section_name_key] > max_revisions:
+            logger.warning(
+                "Drafter: section '%s' hit max revisions (%d) — auto-approving and continuing",
+                section_name_key, max_revisions,
             )
-        except Exception:
-            logger.debug("Preference recording skipped (revise)", exc_info=True)
+            prev_interrupt = state.get("pending_interrupt") or {}
+            content = prev_interrupt.get("content", "")
+            if content and content.strip():
+                approved_sections[section_name_key] = {
+                    "content": content,
+                    "word_count": len(content.split()),
+                    "word_limit": section.get("word_limit") or _default_word_limit,
+                    "within_limit": len(content.split()) <= (section.get("word_limit") or _default_word_limit),
+                    "approved_at": datetime.now(timezone.utc).isoformat(),
+                    "auto_approved": True,
+                    "reason": f"Max revisions ({max_revisions}) reached",
+                }
+            # Don't return — fall through to "check if all done / write next section"
+            # so the drafter continues without a dead-end interrupt.
+            review_decision = None
+        else:
 
-        # Get fresh section-specific context for the revision
-        grant_themes = grant.get("themes_detected", [])
-        section_ctx = await get_section_context(
-            grant_theme, section.get("name", ""), grant.get("title", ""), grant_themes, company_context,
-        )
+            prev_interrupt = state.get("pending_interrupt") or {}
+            instructions = state.get("section_revision_instructions", {}).get(section.get("name", ""), "")
+            critique = state.get("section_critiques", {}).get(section.get("name", ""), "")
 
-        logger.info("Drafter: rewriting section '%s'", section.get("name"))
-        result = await write_section(
-            section=section,
-            section_num=current_idx,
-            total_sections=total_sections,
-            grant=grant,
-            company_context=company_context,
-            style_examples=style_examples,
-            previous_content=prev_interrupt.get("content", ""),
-            critique=critique,
-            revision_instructions=instructions,
-            theme_key=grant_theme,
-            section_context=section_ctx,
-            draft_outline=draft_outline,
-        )
-        # Return interrupt for the rewritten section
-        return {
-            "pending_interrupt": result,
-            "approved_sections": approved_sections,
-            "section_review_decision": None,
-            "section_edited_content": None,
-            "grant_theme": grant_theme,
-            "draft_outline": draft_outline,
-            "grant_requirements": grant_requirements,
-            "criteria_map": criteria_map,
-            "funder_terms": funder_terms,
-            "audit_log": state.get("audit_log", []) + [{
-                "node": "drafter",
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "action": "section_rewritten",
-                "section": result["section_name"],
-                "theme": grant_theme,
-            }],
-        }
+            # ── Preference learning: record the revise signal ────────────
+            # The revision instruction is gold — it says exactly what was wrong
+            try:
+                from backend.agents.preference_learner import record_preference
+                await record_preference(
+                    grant_id=str(grant_id or ""),
+                    section_name=section.get("name", ""),
+                    ai_version=prev_interrupt.get("content", ""),
+                    final_version=prev_interrupt.get("content", ""),  # not yet rewritten
+                    was_revised=True,
+                    revision_instructions=instructions,
+                    theme=grant_theme,
+                    funder=grant.get("funder", ""),
+                    grant_type=grant.get("grant_type", ""),
+                )
+            except Exception:
+                logger.debug("Preference recording skipped (revise)", exc_info=True)
+
+            # Get fresh section-specific context for the revision
+            grant_themes = grant.get("themes_detected", [])
+            section_ctx = await get_section_context(
+                grant_theme, section.get("name", ""), grant.get("title", ""), grant_themes, company_context,
+            )
+
+            logger.info("Drafter: rewriting section '%s'", section.get("name"))
+            result = await write_section(
+                section=section,
+                section_num=current_idx,
+                total_sections=total_sections,
+                grant=grant,
+                company_context=company_context,
+                style_examples=style_examples,
+                previous_content=prev_interrupt.get("content", ""),
+                critique=critique,
+                revision_instructions=instructions,
+                theme_key=grant_theme,
+                section_context=section_ctx,
+                draft_outline=draft_outline,
+            )
+            # Return interrupt for the rewritten section
+            return {
+                "pending_interrupt": result,
+                "approved_sections": approved_sections,
+                "section_revision_counts": revision_counts,
+                "section_review_decision": None,
+                "section_edited_content": None,
+                "grant_theme": grant_theme,
+                "draft_outline": draft_outline,
+                "grant_requirements": grant_requirements,
+                "criteria_map": criteria_map,
+                "funder_terms": funder_terms,
+                "audit_log": state.get("audit_log", []) + [{
+                    "node": "drafter",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "action": "section_rewritten",
+                    "section": result["section_name"],
+                    "revision_number": revision_counts.get(section_name_key, 0),
+                    "theme": grant_theme,
+                }],
+            }
 
     # Check if all sections are done
     if len(approved_sections) >= total_sections:
