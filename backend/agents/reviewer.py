@@ -122,21 +122,21 @@ async def reviewer_node(state: GrantState) -> Dict:
     except Exception as e:
         logger.error("Reviewer failed: %s", e)
         review = {
-            "overall_score": 7.0,
+            "overall_score": 0.0,
             "section_critiques": {},
             "top_3_fixes": [],
             "evidence_gaps_critical": [],
-            "coherence_score": 7,
+            "coherence_score": 0,
             "coherence_notes": "",
-            "ready_for_export": True,
-            "summary": f"Automated review failed ({e}). Proceeding to export.",
+            "ready_for_export": False,
+            "summary": f"Automated review failed ({e}). Manual review required before export.",
         }
 
     # Extract sections that need revision (score < threshold)
     sections_needing_revision = []
     section_critiques = review.get("section_critiques", {})
     for sec_name, critique in section_critiques.items():
-        if isinstance(critique, dict) and critique.get("score", 10) < revision_threshold:
+        if isinstance(critique, dict) and critique.get("score", 0) < revision_threshold:
             sections_needing_revision.append({
                 "section_name": sec_name,
                 "score": critique.get("score"),

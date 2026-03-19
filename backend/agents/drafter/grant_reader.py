@@ -354,7 +354,11 @@ async def fetch_grant_document(
 
     # Step 5: Combine all pages into one document
     if not page_contents:
-        logger.warning("Grant Reader: all fetch methods failed for %s", url)
+        logger.error(
+            "Grant Reader: ALL fetch methods failed for '%s' (Tavily/Exa/Jina/Playwright) — "
+            "drafter will use default sections. Grant: '%s', Funder: '%s'",
+            url, grant_title, funder,
+        )
         return ""
 
     # Primary URL first, then related pages

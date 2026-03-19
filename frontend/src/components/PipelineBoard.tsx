@@ -279,13 +279,16 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
       // If moved to Drafting → trigger start-draft and navigate to drafter
       if (dstId === "drafting") {
         try {
-          await fetch("/api/drafter/trigger", {
+          const triggerRes = await fetch("/api/drafter/trigger", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ grant_id: draggableId }),
           });
+          if (!triggerRes.ok) {
+            setError("Grant moved to Drafting but draft trigger failed — start draft manually from the Drafter page.");
+          }
         } catch {
-          // Draft trigger failed — still allow the status change
+          setError("Grant moved to Drafting but draft trigger failed — start draft manually from the Drafter page.");
         }
         router.push("/drafter");
       }
