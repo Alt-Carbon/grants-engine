@@ -46,128 +46,135 @@ from backend.utils.parsing import parse_json_safe, retry_async, api_health, Cred
 
 logger = logging.getLogger(__name__)
 
+
+def _current_year() -> str:
+    """Return the current year as a string for dynamic query generation."""
+    return str(datetime.now(timezone.utc).year)
+
+
 # ── Tavily queries ─────────────────────────────────────────────────────────────
-DEFAULT_TAVILY_QUERIES: List[str] = [
+# NOTE: Use {year} placeholder — replaced at runtime by _build_queries()
+_TAVILY_QUERY_TEMPLATES: List[str] = [
     # ── CDR / Climate Core (merged from 9 → 4) ────────────────────────────────
-    "carbon removal CDR ERW biochar MRV startup grant funding 2026",
-    "climatetech net zero decarbonisation startup grant open call 2026",
-    "carbon credit verification monitoring technology grant 2026",
-    "nature based solutions climate adaptation resilience grant 2026",
+    "carbon removal CDR ERW biochar MRV startup grant funding {year}",
+    "climatetech net zero decarbonisation startup grant open call {year}",
+    "carbon credit verification monitoring technology grant {year}",
+    "nature based solutions climate adaptation resilience grant {year}",
     # ── Agritech / Soil ────────────────────────────────────────────────────────
-    "agritech soil carbon regenerative agriculture grant program 2026",
-    "precision agriculture farmer technology startup grant 2026",
+    "agritech soil carbon regenerative agriculture grant program {year}",
+    "precision agriculture farmer technology startup grant {year}",
     # ── AI for Sciences + Earth Sciences ────────────────────────────────────────
-    "AI for climate science earth observation machine learning grant 2026",
-    "remote sensing geospatial satellite land use grant 2026",
+    "AI for climate science earth observation machine learning grant {year}",
+    "remote sensing geospatial satellite land use grant {year}",
     # ── India — central government (exact program names) ───────────────────────
-    "BIRAC BIG Biotechnology Ignition Grant open 2026",
-    "BIRAC BIPP SBIRI ACE startup grant open call 2026",
-    "ANRF DPIIT startup grant call for proposals 2026",
-    "DST NIDHI PRAYAS SEED TIDE startup grant 2026",
-    "DST SERB startup research grant 2026 apply",
-    "DST Climate Change Programme grant India 2026",
-    "DBT soil carbon agritech research grant India 2026",
-    "AIM Atal Innovation Mission startup grant India 2026",
-    "MeitY IndiaAI Innovation Challenge startup grant 2026",
-    "TDB Technology Development Board India grant 2026",
-    "Startup India SISFS seed fund startup grant 2026",
-    "BIRAC Green Hydrogen Mission startup grant 2026",
-    "NISE MNRE solar energy innovative projects grant 2026",
+    "BIRAC BIG Biotechnology Ignition Grant open {year}",
+    "BIRAC BIPP SBIRI ACE startup grant open call {year}",
+    "ANRF DPIIT startup grant call for proposals {year}",
+    "DST NIDHI PRAYAS SEED TIDE startup grant {year}",
+    "DST SERB startup research grant {year} apply",
+    "DST Climate Change Programme grant India {year}",
+    "DBT soil carbon agritech research grant India {year}",
+    "AIM Atal Innovation Mission startup grant India {year}",
+    "MeitY IndiaAI Innovation Challenge startup grant {year}",
+    "TDB Technology Development Board India grant {year}",
+    "Startup India SISFS seed fund startup grant {year}",
+    "BIRAC Green Hydrogen Mission startup grant {year}",
+    "NISE MNRE solar energy innovative projects grant {year}",
     # ── India — state government ───────────────────────────────────────────────
-    "Karnataka KSCST KBITS startup grant 2026",
-    "Maharashtra MSINS startup innovation grant 2026",
-    "Telangana T-Hub WE Hub grant program 2026",
-    "StartupTN Tamil Nadu climatetech agritech grant 2026",
-    "KSUM Kerala startup mission grant 2026",
-    "India state government startup grant climatetech agritech 2026",
+    "Karnataka KSCST KBITS startup grant {year}",
+    "Maharashtra MSINS startup innovation grant {year}",
+    "Telangana T-Hub WE Hub grant program {year}",
+    "StartupTN Tamil Nadu climatetech agritech grant {year}",
+    "KSUM Kerala startup mission grant {year}",
+    "India state government startup grant climatetech agritech {year}",
     # ── India — philanthropic & impact ──────────────────────────────────────────
-    "Tata Trusts Azim Premji climate environment grant India 2026",
-    "Social Alpha Villgro innovation grant India climatetech agritech 2026",
-    "India Climate Collaborative Rohini Nilekani grant open call 2026",
+    "Tata Trusts Azim Premji climate environment grant India {year}",
+    "Social Alpha Villgro innovation grant India climatetech agritech {year}",
+    "India Climate Collaborative Rohini Nilekani grant open call {year}",
     # ── Social Impact ──────────────────────────────────────────────────────────
-    "social impact inclusive climate solutions rural livelihoods grant 2026",
+    "social impact inclusive climate solutions rural livelihoods grant {year}",
     # ── DFIs & Multilateral ──────────────────────────────────────────────────
-    "World Bank IFC ADB AIIB climate finance grant startups 2026",
-    "Green Climate Fund GCF readiness grant 2026",
-    "USAID UNDP UNEP climate innovation grant 2026",
+    "World Bank IFC ADB AIIB climate finance grant startups {year}",
+    "Green Climate Fund GCF readiness grant {year}",
+    "USAID UNDP UNEP climate innovation grant {year}",
     # ── Philanthropic (merged) ─────────────────────────────────────────────────
-    "Bezos Earth Fund ClimateWorks Grantham climate grant 2026",
-    "Rockefeller Foundation Bloomberg Schmidt Futures climate grant 2026",
-    "Breakthrough Energy Omidyar Laudes Foundation climate startup grant 2026",
-    "Echoing Green Skoll Earthshot Prize climate fellowship 2026",
+    "Bezos Earth Fund ClimateWorks Grantham climate grant {year}",
+    "Rockefeller Foundation Bloomberg Schmidt Futures climate grant {year}",
+    "Breakthrough Energy Omidyar Laudes Foundation climate startup grant {year}",
+    "Echoing Green Skoll Earthshot Prize climate fellowship {year}",
     # ── Accelerators & Challenges (merged from 8 → 3) ──────────────────────────
-    "Google.org XPRIZE Microsoft climate innovation challenge 2026",
-    "MIT Solve Climate Launchpad Hello Tomorrow deep tech challenge 2026",
-    "global cleantech innovation programme GCIP Zayed Sustainability Prize 2026",
+    "Google.org XPRIZE Microsoft climate innovation challenge {year}",
+    "MIT Solve Climate Launchpad Hello Tomorrow deep tech challenge {year}",
+    "global cleantech innovation programme GCIP Zayed Sustainability Prize {year}",
     # ── CDR-specific funders ────────────────────────────────────────────────────
-    "Cascade Climate CRN Enhanced Rock Weathering host site EOI 2026",
-    "Carbon to Sea CIEIF ClimeFi Milkywire CDR grant RFP 2026",
+    "Cascade Climate CRN Enhanced Rock Weathering host site EOI {year}",
+    "Carbon to Sea CIEIF ClimeFi Milkywire CDR grant RFP {year}",
     # ── Space & Earth Observation ──────────────────────────────────────────────
-    "ESA InCubed CASSINI earth observation startup programme 2026",
-    "ISRO RESPOND NRSC earth observation research grant India 2026",
-    "NASA ROSES earth science remote sensing grant 2026",
+    "ESA InCubed CASSINI earth observation startup programme {year}",
+    "ISRO RESPOND NRSC earth observation research grant India {year}",
+    "NASA ROSES earth science remote sensing grant {year}",
     # ── Australia & Pacific ──────────────────────────────────────────────────
-    "ARENA Australia cleantech CSIRO startup grant 2026",
-    "New Zealand climate innovation fund grant 2026",
+    "ARENA Australia cleantech CSIRO startup grant {year}",
+    "New Zealand climate innovation fund grant {year}",
     # ── Canada ────────────────────────────────────────────────────────────────
-    "Canada SDTC NRC IRAP cleantech climate startup grant 2026",
-    "Natural Resources Canada carbon capture FEED grant 2026",
+    "Canada SDTC NRC IRAP cleantech climate startup grant {year}",
+    "Natural Resources Canada carbon capture FEED grant {year}",
     # ── Southeast Asia ────────────────────────────────────────────────────────
-    "Singapore Enterprise cleantech startup grant 2026",
-    "ASEAN Southeast Asia Temasek climate tech startup grant 2026",
-    "Indonesia Thailand Vietnam climate innovation grant 2026",
+    "Singapore Enterprise cleantech startup grant {year}",
+    "ASEAN Southeast Asia Temasek climate tech startup grant {year}",
+    "Indonesia Thailand Vietnam climate innovation grant {year}",
     # ── East Asia ─────────────────────────────────────────────────────────────
-    "Japan NEDO green innovation fund startup grant 2026",
-    "South Korea K-startup climate innovation grant 2026",
+    "Japan NEDO green innovation fund startup grant {year}",
+    "South Korea K-startup climate innovation grant {year}",
     # ── Africa (7 → 2) ─────────────────────────────────────────────────────────
-    "African Development Bank AfDB SEFA climate grant open call 2026",
-    "Africa climate startup agritech innovation fund grant 2026",
+    "African Development Bank AfDB SEFA climate grant open call {year}",
+    "Africa climate startup agritech innovation fund grant {year}",
     # ── Latin America (7 → 2) ──────────────────────────────────────────────────
-    "IDB Lab CORFO CAF Latin America climate startup grant 2026",
-    "Brazil BNDES Colombia Innpulsa climate innovation grant 2026",
+    "IDB Lab CORFO CAF Latin America climate startup grant {year}",
+    "Brazil BNDES Colombia Innpulsa climate innovation grant {year}",
     # ── MENA (5 → 2) ──────────────────────────────────────────────────────────
-    "Islamic Development Bank UAE Masdar climate innovation grant 2026",
-    "MENA climate tech startup grant program 2026",
+    "Islamic Development Bank UAE Masdar climate innovation grant {year}",
+    "MENA climate tech startup grant program {year}",
     # ── UK ─────────────────────────────────────────────────────────────────────
-    "Innovate UK UKRI Carbon Trust net zero climate grant 2026",
-    "UK DESNZ energy innovation startup grant 2026",
+    "Innovate UK UKRI Carbon Trust net zero climate grant {year}",
+    "UK DESNZ energy innovation startup grant {year}",
     # ── Global / Thematic ──────────────────────────────────────────────────────
-    "climate MRV soil carbon sequestration grant developing countries 2026",
-    "climate adaptation resilience startup grant global 2026",
-    "deep tech climate innovation grant India global 2026",
+    "climate MRV soil carbon sequestration grant developing countries {year}",
+    "climate adaptation resilience startup grant global {year}",
+    "deep tech climate innovation grant India global {year}",
     # ── Global climate finance + food ──────────────────────────────────────────
-    "Global Innovation Lab Climate Finance CPI 2026 call for ideas",
-    "WFP Innovation Accelerator food climate challenge 2026",
-    "ADB Climate Innovation Development Fund CIDF grant 2026",
-    "Greentown Go Make accelerator 2026 RFA application",
-    "LILAS4SOILS Horizon Europe soil carbon MRV open call 2026",
-    "Mitigation Action Facility call for projects 2026 climate",
-    "UNDP young climate leaders direct funding 2026",
+    "Global Innovation Lab Climate Finance CPI {year} call for ideas",
+    "WFP Innovation Accelerator food climate challenge {year}",
+    "ADB Climate Innovation Development Fund CIDF grant {year}",
+    "Greentown Go Make accelerator {year} RFA application",
+    "LILAS4SOILS Horizon Europe soil carbon MRV open call {year}",
+    "Mitigation Action Facility call for projects {year} climate",
+    "UNDP young climate leaders direct funding {year}",
     # ── Deep Tech ──────────────────────────────────────────────────────────────
-    "deep tech frontier science startup grant 2026",
-    "advanced materials nanotechnology quantum computing grant 2026",
-    "synthetic biology biotech breakthrough innovation grant 2026",
-    "deep tech hardware robotics advanced manufacturing grant India global 2026",
+    "deep tech frontier science startup grant {year}",
+    "advanced materials nanotechnology quantum computing grant {year}",
+    "synthetic biology biotech breakthrough innovation grant {year}",
+    "deep tech hardware robotics advanced manufacturing grant India global {year}",
     # ── AI for Sciences ────────────────────────────────────────────────────────
-    "AI artificial intelligence scientific discovery grant program 2026",
-    "machine learning predictive model environmental data grant 2026",
-    "AI data science climate agriculture research grant India 2026",
+    "AI artificial intelligence scientific discovery grant program {year}",
+    "machine learning predictive model environmental data grant {year}",
+    "AI data science climate agriculture research grant India {year}",
     # ── Applied Earth Sciences ─────────────────────────────────────────────────
-    "earth science geology subsurface geophysics research grant 2026",
-    "satellite remote sensing LIDAR mapping technology grant 2026",
-    "geospatial earth observation land use monitoring grant India 2026",
+    "earth science geology subsurface geophysics research grant {year}",
+    "satellite remote sensing LIDAR mapping technology grant {year}",
+    "geospatial earth observation land use monitoring grant India {year}",
     # ── Social Impact ──────────────────────────────────────────────────────────
-    "social impact rural livelihoods community resilience grant 2026",
-    "inclusive climate solutions marginalized communities grant India 2026",
-    "farmer livelihoods rural development climate grant developing countries 2026",
+    "social impact rural livelihoods community resilience grant {year}",
+    "inclusive climate solutions marginalized communities grant India {year}",
+    "farmer livelihoods rural development climate grant developing countries {year}",
     # ── AltCarbon-specific ───────────────────────────────────────────────────
-    "enhanced rock weathering ERW startup grant funding 2026",
-    "biochar carbon sequestration grant developing countries 2026",
-    "MRV carbon monitoring verification startup grant 2026",
+    "enhanced rock weathering ERW startup grant funding {year}",
+    "biochar carbon sequestration grant developing countries {year}",
+    "MRV carbon monitoring verification startup grant {year}",
 ]
 
 # ── Exa semantic queries ───────────────────────────────────────────────────────
-DEFAULT_EXA_QUERIES: List[str] = [
+_EXA_QUERY_TEMPLATES: List[str] = [
     # ── Core thematic (natural language — Exa's strength) ──────────────────────
     "Grants and funding for startups building carbon removal measurement and verification tools",
     "Open calls for companies doing enhanced rock weathering or biochar carbon sequestration",
@@ -232,37 +239,50 @@ DEFAULT_EXA_QUERIES: List[str] = [
 ]
 
 # ── Perplexity Sonar queries ────────────────────────────────────────────────────
-DEFAULT_PERPLEXITY_QUERIES: List[str] = [
-    "What grant programs are currently open for climate technology startups in 2026?",
-    "List open calls for funding for carbon removal MRV and net-zero technology startups 2026",
-    "What grants or accelerators are accepting applications from agritech and soil carbon startups in 2026?",
+_PERPLEXITY_QUERY_TEMPLATES: List[str] = [
+    "What grant programs are currently open for climate technology startups in {year}?",
+    "List open calls for funding for carbon removal MRV and net-zero technology startups {year}",
+    "What grants or accelerators are accepting applications from agritech and soil carbon startups in {year}?",
     "Which foundations or government programs fund climate startups in India or globally right now?",
-    "World Bank ADB IFC AIIB climate finance grant open calls 2026",
-    "Bezos Earth Fund Grantham Foundation ClimateWorks open grant applications 2026",
-    "Which BIRAC ANRF DST DBT AIM India government programs have open grant calls for startups in 2026? List with URLs",
-    "EU Horizon EIC UKRI climate deep tech grant open calls 2026",
-    "XPRIZE Google.org Microsoft climate innovation grant competition 2026",
+    "World Bank ADB IFC AIIB climate finance grant open calls {year}",
+    "Bezos Earth Fund Grantham Foundation ClimateWorks open grant applications {year}",
+    "Which BIRAC ANRF DST DBT AIM India government programs have open grant calls for startups in {year}? List with URLs",
+    "EU Horizon EIC UKRI climate deep tech grant open calls {year}",
+    "XPRIZE Google.org Microsoft climate innovation grant competition {year}",
     # Global coverage
-    "Australia ARENA CSIRO Canada SDTC NRC IRAP cleantech startup grant open calls 2026",
-    "Japan NEDO South Korea climate innovation grant open calls 2026",
-    "IDB Lab CORFO Latin America UAE Masdar ISDB MENA climate grant 2026",
-    "Innovate UK Carbon Trust climate net zero grant competition open 2026",
-    "Africa AfDB SEFA Southeast Asia ASEAN climate startup grant open 2026",
+    "Australia ARENA CSIRO Canada SDTC NRC IRAP cleantech startup grant open calls {year}",
+    "Japan NEDO South Korea climate innovation grant open calls {year}",
+    "IDB Lab CORFO Latin America UAE Masdar ISDB MENA climate grant {year}",
+    "Innovate UK Carbon Trust climate net zero grant competition open {year}",
+    "Africa AfDB SEFA Southeast Asia ASEAN climate startup grant open {year}",
     # CDR + Earth Observation specific
-    "What CDR-specific programs are open in 2026? Cascade Climate CRN, Carbon to Sea, CIEIF, ClimeFi, Milkywire CTF",
-    "ESA InCubed CASSINI ISRO RESPOND NASA ROSES earth observation grants open 2026",
-    "IndiaAI Innovation Challenge TDB NISE MNRE BIRAC Green Hydrogen open calls India 2026",
-    "Greentown Go Make WFP Innovation Accelerator ADB CIDF Global Innovation Lab climate grant 2026",
-    "LILAS4SOILS EU Horizon Europe soil carbon MRV open calls 2026",
+    "What CDR-specific programs are open in {year}? Cascade Climate CRN, Carbon to Sea, CIEIF, ClimeFi, Milkywire CTF",
+    "ESA InCubed CASSINI ISRO RESPOND NASA ROSES earth observation grants open {year}",
+    "IndiaAI Innovation Challenge TDB NISE MNRE BIRAC Green Hydrogen open calls India {year}",
+    "Greentown Go Make WFP Innovation Accelerator ADB CIDF Global Innovation Lab climate grant {year}",
+    "LILAS4SOILS EU Horizon Europe soil carbon MRV open calls {year}",
     # Deep Tech + AI for Sciences + Social Impact
-    "What grants fund deep tech startups working on advanced materials, nanotechnology, or frontier science in 2026?",
-    "Which AI for science or machine learning research grants are open for startups in India or globally in 2026?",
-    "What social impact grants fund rural livelihoods, inclusive climate solutions, or community resilience in 2026?",
+    "What grants fund deep tech startups working on advanced materials, nanotechnology, or frontier science in {year}?",
+    "Which AI for science or machine learning research grants are open for startups in India or globally in {year}?",
+    "What social impact grants fund rural livelihoods, inclusive climate solutions, or community resilience in {year}?",
     # AltCarbon-specific
-    "What grants fund enhanced rock weathering ERW or biochar carbon sequestration startups in 2026?",
-    "Which MRV and carbon verification technology grants are open for Indian companies in 2026?",
+    "What grants fund enhanced rock weathering ERW or biochar carbon sequestration startups in {year}?",
+    "Which MRV and carbon verification technology grants are open for Indian companies in {year}?",
     "What CDR buyer programs or advance market commitments accept Indian companies for carbon removal credits?",
 ]
+
+
+def _build_queries(templates: List[str]) -> List[str]:
+    """Replace {year} placeholder in query templates with the current year."""
+    year = _current_year()
+    return [q.format(year=year) for q in templates]
+
+
+# Public accessors — always use current year
+DEFAULT_TAVILY_QUERIES = _build_queries(_TAVILY_QUERY_TEMPLATES)
+DEFAULT_EXA_QUERIES = _build_queries(_EXA_QUERY_TEMPLATES)
+DEFAULT_PERPLEXITY_QUERIES = _build_queries(_PERPLEXITY_QUERY_TEMPLATES)
+
 
 # ── Direct source URLs to crawl ────────────────────────────────────────────────
 DIRECT_SOURCE_URLS: Dict[str, List[Dict[str, str]]] = {
@@ -619,7 +639,7 @@ Return this exact JSON (no other text):
   "grant_type": "<grant | prize | challenge | accelerator | fellowship | contract | loan | equity | other>",
   "geography": "<eligible countries/regions exactly as stated — e.g. 'India only', 'Global', 'US and EU'>",
   "amount": "<funding amount per applicant exactly as stated — e.g. 'up to $500,000', 'EUR 150,000'; capture what each applicant receives, not total program budget>",
-  "max_funding_usd": <integer USD value per applicant — best conversion; null ONLY if truly no amount mentioned anywhere>,
+  "max_funding_usd": <integer numeric value of the funding amount in the STATED CURRENCY (NOT converted to USD) — e.g. for '$500K' put 500000, for '₹50 lakh' put 5000000; null ONLY if truly no amount mentioned anywhere>,
   "currency": "<3-letter code: USD EUR GBP INR, default USD>",
   "deadline": "<application deadline EXACTLY as stated — e.g. 'March 31, 2026', 'Rolling', 'Ongoing'; extract ANY close/submission/deadline date visible; null ONLY if absolutely no date found>",
   "eligibility": "<who can apply: org type (startup/NGO/university), stage (seed/early/growth), sector, geography restrictions including any specific country/region exclusions — max 200 words>",
@@ -646,12 +666,15 @@ EXTRACTION RULES (follow strictly):
 7. Indian currency notation — CRITICAL for Indian grants:
    "1 lakh" = 100,000  |  "10 lakh" = 1,000,000  |  "1 crore" = 10,000,000
    Indian comma grouping: "5,00,000" = 500,000 (NOT 5,000 — Indian style groups by 2 after first 3)
+   max_funding_usd stores the RAW NUMERIC VALUE in the stated currency — our backend handles conversion.
    Examples:
      "₹50 lakh"     → amount="₹50 lakh",     max_funding_usd=5000000,  currency="INR"
      "₹2 crore"     → amount="₹2 crore",      max_funding_usd=20000000, currency="INR"
      "Rs. 30,00,000" → amount="Rs. 30,00,000", max_funding_usd=3000000,  currency="INR"
-     "₹1.5 lakh"   → amount="₹1.5 lakh",    max_funding_usd=150000,   currency="INR"
-   Always set currency="INR" for rupee amounts — do NOT convert to USD in max_funding_usd."""
+     "₹1.5 lakh"    → amount="₹1.5 lakh",     max_funding_usd=150000,   currency="INR"
+     "$500,000"      → amount="$500,000",       max_funding_usd=500000,   currency="USD"
+     "EUR 200,000"   → amount="EUR 200,000",    max_funding_usd=200000,   currency="EUR"
+   Always set currency to the STATED currency code. Do NOT convert between currencies."""
 
 # ── URL helpers ─────────────────────────────────────────────────────────────────
 _TRACKING_PARAMS = frozenset({
@@ -803,7 +826,13 @@ def _extract_hub_subgrants(hub_url: str, content: str) -> List[str]:
                     full = urljoin(hub_url, raw)
                 # Strip trailing junk
                 full = _URL_TRAILING_JUNK.sub("", full)
-                if full != hub_url and len(full) > 20:
+                parsed_full = urlparse(full)
+                if (
+                    full != hub_url
+                    and len(full) > 20
+                    and parsed_full.scheme in ("http", "https")
+                    and parsed_full.netloc
+                ):
                     sub_urls.append(full)
         break  # only apply patterns for the first matched domain key
 
@@ -1079,7 +1108,7 @@ _SKIP_JINA_DOMAINS = frozenset({
 _BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     ),
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;"
@@ -1525,7 +1554,7 @@ class ScoutAgent:
         )
 
         try:
-            result = await self._run_inner()
+            result = await self._run_inner(_run_start=_run_start)
             # Update heartbeat on success
             elapsed = (datetime.now(timezone.utc) - _run_start).total_seconds()
             try:
@@ -1573,7 +1602,7 @@ class ScoutAgent:
                 logger.debug("Notion error sync skipped (scout failure)", exc_info=True)
             raise
 
-    async def _run_inner(self) -> List[Dict]:
+    async def _run_inner(self, *, _run_start: datetime) -> List[Dict]:
         """Inner scout logic, wrapped by run() for error handling."""
 
         # ── Run all searches in parallel ──────────────────────────────────────
@@ -1661,7 +1690,8 @@ class ScoutAgent:
         logger.info("Scout: %d new grants not in DB", len(new_grants))
 
         # ── Enrich: fetch content + theme detect + LLM extraction ─────────────
-        enrich_sem = asyncio.Semaphore(4)
+        from backend.config.settings import get_settings as _get_enrich_settings
+        enrich_sem = asyncio.Semaphore(_get_enrich_settings().scout_enrichment_concurrency)
 
         async def enrich(item: Dict) -> Dict:
             async with enrich_sem:
@@ -1790,8 +1820,8 @@ class ScoutAgent:
                         {"$setOnInsert": grant},
                         upsert=True,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Failed to save pre-filtered grant %s: %s", grant.get("url"), e)
                 continue
 
             # Clean up internal tracking field
@@ -1844,7 +1874,8 @@ class ScoutAgent:
                 agent="scout",
                 status="Completed",
                 trigger="Manual",
-                started_at=datetime.now(timezone.utc),
+                started_at=_run_start,
+                duration_seconds=(datetime.now(timezone.utc) - _run_start).total_seconds(),
                 grants_found=len(saved),
                 errors=0,
                 summary=f"Discovered {len(unique)} grants, saved {len(saved)} new. "
@@ -1891,9 +1922,8 @@ async def scout_node(state: GrantState) -> Dict:
     from backend.config.settings import get_settings
     s = get_settings()
 
-    cfg_doc = await __import__("backend.db.mongo", fromlist=["agent_config"]).agent_config().find_one(
-        {"agent": "scout"}
-    ) or {}
+    from backend.db.mongo import agent_config
+    cfg_doc = await agent_config().find_one({"agent": "scout"}) or {}
 
     agent = ScoutAgent(
         tavily_api_key=s.tavily_api_key,
