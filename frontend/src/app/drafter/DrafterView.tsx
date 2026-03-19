@@ -2013,7 +2013,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       </div>
 
       {/* ---- RIGHT: SETTINGS SLIDE-OVER ---------------------------------- */}
-      <DrafterSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <DrafterSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} grantId={selectedPipeline?.grant_id ?? null} />
 
       {/* ---- RIGHT: ACTIVITY TIMELINE + SESSION HISTORY ------------------- */}
       {timelineOpen && (

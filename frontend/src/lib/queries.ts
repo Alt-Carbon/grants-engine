@@ -92,19 +92,51 @@ function serializeId(doc: Record<string, unknown>): Record<string, unknown> {
 
 export async function getDashboardStats() {
   const db = await getDb();
-  const [total, triage, pursuing, onHold, drafting, complete, urgentCount] =
-    await Promise.all([
-      db.collection("grants_scored").countDocuments({}),
-      db.collection("grants_scored").countDocuments({ status: "triage" }),
-      db.collection("grants_scored").countDocuments({ status: { $in: ["pursue", "pursuing"] } }),
-      db.collection("grants_scored").countDocuments({ status: "hold" }),
-      db.collection("grants_scored").countDocuments({ status: "drafting" }),
-      db.collection("grants_scored").countDocuments({ status: { $in: ["draft_complete", "submitted", "won"] } }),
-      db.collection("grants_scored").countDocuments({
-        deadline_urgent: true,
-        status: { $in: ["triage", "pursue"] },
-      }),
-    ]);
+
+  // Single $facet aggregation replaces 7 separate countDocuments round trips
+  const facetResult = await db
+    .collection("grants_scored")
+    .aggregate([
+      {
+        $facet: {
+          total: [{ $count: "n" }],
+          triage: [{ $match: { status: "triage" } }, { $count: "n" }],
+          pursuing: [
+            { $match: { status: { $in: ["pursue", "pursuing"] } } },
+            { $count: "n" },
+          ],
+          onHold: [{ $match: { status: "hold" } }, { $count: "n" }],
+          drafting: [{ $match: { status: "drafting" } }, { $count: "n" }],
+          complete: [
+            {
+              $match: {
+                status: { $in: ["draft_complete", "submitted", "won"] },
+              },
+            },
+            { $count: "n" },
+          ],
+          urgent: [
+            {
+              $match: {
+                deadline_urgent: true,
+                status: { $in: ["triage", "pursue"] },
+              },
+            },
+            { $count: "n" },
+          ],
+        },
+      },
+    ])
+    .toArray();
+
+  const f = facetResult[0] ?? {};
+  const total = f.total?.[0]?.n ?? 0;
+  const triage = f.triage?.[0]?.n ?? 0;
+  const pursuing = f.pursuing?.[0]?.n ?? 0;
+  const onHold = f.onHold?.[0]?.n ?? 0;
+  const drafting = f.drafting?.[0]?.n ?? 0;
+  const complete = f.complete?.[0]?.n ?? 0;
+  const urgentCount = f.urgent?.[0]?.n ?? 0;
 
   const warnings: string[] = [];
   if (total > 0 && triage === 0) {
@@ -422,32 +454,50 @@ export interface AgentHealth {
 
 export async function getAgentHealth(): Promise<AgentHealth[]> {
   const db = await getDb();
+
+  // Single aggregation for node-based agents + parallel scout_runs count
+  // knowledge_sync uses event regex, so it needs separate handling
+  const [nodeRuns, knowledgeRuns, scoutRunCount] = await Promise.all([
+    db
+      .collection("audit_logs")
+      .aggregate([
+        { $match: { node: { $in: ["scout", "analyst", "drafter"] } } },
+        { $sort: { created_at: -1 } },
+        { $group: { _id: "$node", runs: { $push: "$$ROOT" } } },
+        { $project: { _id: 1, runs: { $slice: ["$runs", 100] } } },
+      ])
+      .toArray(),
+    db
+      .collection("audit_logs")
+      .find({ event: { $regex: /knowledge/i } })
+      .sort({ created_at: -1 })
+      .limit(100)
+      .toArray(),
+    db.collection("scout_runs").countDocuments({}),
+  ]);
+
+  // Build a map: agent -> runs array
+  const runsByAgent: Record<string, Record<string, unknown>[]> = {
+    scout: [],
+    analyst: [],
+    drafter: [],
+    knowledge_sync: [],
+  };
+  for (const group of nodeRuns) {
+    const agent = group._id as string;
+    if (agent in runsByAgent) {
+      runsByAgent[agent] = group.runs as Record<string, unknown>[];
+    }
+  }
+  runsByAgent.knowledge_sync = knowledgeRuns as Record<string, unknown>[];
+
   const agents = ["scout", "analyst", "drafter", "knowledge_sync"];
   const results: AgentHealth[] = [];
 
   for (const agent of agents) {
-    const query = agent === "scout"
-      ? { node: "scout" }
-      : agent === "analyst"
-      ? { node: "analyst" }
-      : agent === "knowledge_sync"
-      ? { event: { $regex: /knowledge/i } }
-      : { node: agent };
-
-    const allRuns = await db.collection("audit_logs")
-      .find(query)
-      .sort({ created_at: -1 })
-      .limit(100)
-      .toArray();
-
+    const allRuns = runsByAgent[agent];
     const lastRun = allRuns[0];
     const totalRuns = allRuns.length;
-
-    // For scout, also check scout_runs
-    let scoutRuns = 0;
-    if (agent === "scout") {
-      scoutRuns = await db.collection("scout_runs").countDocuments({});
-    }
 
     const failedRuns = allRuns.filter(
       (r) => String(r.action || "").toLowerCase().includes("fail")
@@ -455,13 +505,13 @@ export async function getAgentHealth(): Promise<AgentHealth[]> {
 
     results.push({
       agent,
-      lastRun: lastRun?.created_at ?? lastRun?.run_at ?? null,
+      lastRun: (lastRun?.created_at as string) ?? (lastRun?.run_at as string) ?? null,
       lastStatus: lastRun ? "completed" : "never_run",
-      totalRuns: agent === "scout" ? Math.max(totalRuns, scoutRuns) : totalRuns,
+      totalRuns: agent === "scout" ? Math.max(totalRuns, scoutRunCount) : totalRuns,
       successfulRuns: totalRuns - failedRuns,
       failedRuns,
       uptimePct: totalRuns > 0 ? Math.round(((totalRuns - failedRuns) / totalRuns) * 100) : 0,
-      lastGrantsProcessed: lastRun?.grants_scored ?? lastRun?.new_grants ?? 0,
+      lastGrantsProcessed: (lastRun?.grants_scored as number) ?? (lastRun?.new_grants as number) ?? 0,
     });
   }
 
@@ -705,28 +755,65 @@ export interface PipelineSummary {
 
 export async function getPipelineSummary(): Promise<PipelineSummary> {
   const db = await getDb();
-  const [total, triage, pursuing, onHold, drafting, submitted, rejected, urgent, unprocessed] =
-    await Promise.all([
-      db.collection("grants_scored").countDocuments({}),
-      db.collection("grants_scored").countDocuments({ status: "triage" }),
-      db.collection("grants_scored").countDocuments({ status: { $in: ["pursue", "pursuing"] } }),
-      db.collection("grants_scored").countDocuments({ status: "hold" }),
-      db.collection("grants_scored").countDocuments({ status: "drafting" }),
-      db.collection("grants_scored").countDocuments({ status: { $in: ["draft_complete", "submitted", "won"] } }),
-      db.collection("grants_scored").countDocuments({ status: { $in: ["passed", "auto_pass", "human_passed"] } }),
-      db.collection("grants_scored").countDocuments({ deadline_urgent: true, status: { $in: ["triage", "pursue"] } }),
-      db.collection("grants_raw").countDocuments({ processed: false }),
-    ]);
+
+  // Single $facet for grants_scored + parallel unprocessed count from grants_raw
+  const [facetResult, unprocessed] = await Promise.all([
+    db
+      .collection("grants_scored")
+      .aggregate([
+        {
+          $facet: {
+            total: [{ $count: "n" }],
+            triage: [{ $match: { status: "triage" } }, { $count: "n" }],
+            pursuing: [
+              { $match: { status: { $in: ["pursue", "pursuing"] } } },
+              { $count: "n" },
+            ],
+            onHold: [{ $match: { status: "hold" } }, { $count: "n" }],
+            drafting: [{ $match: { status: "drafting" } }, { $count: "n" }],
+            submitted: [
+              {
+                $match: {
+                  status: { $in: ["draft_complete", "submitted", "won"] },
+                },
+              },
+              { $count: "n" },
+            ],
+            rejected: [
+              {
+                $match: {
+                  status: { $in: ["passed", "auto_pass", "human_passed"] },
+                },
+              },
+              { $count: "n" },
+            ],
+            urgent: [
+              {
+                $match: {
+                  deadline_urgent: true,
+                  status: { $in: ["triage", "pursue"] },
+                },
+              },
+              { $count: "n" },
+            ],
+          },
+        },
+      ])
+      .toArray(),
+    db.collection("grants_raw").countDocuments({ processed: false }),
+  ]);
+
+  const f = facetResult[0] ?? {};
 
   return {
-    total_discovered: total,
-    in_triage: triage,
-    pursuing,
-    on_hold: onHold,
-    drafting,
-    submitted,
-    rejected,
-    urgent,
+    total_discovered: f.total?.[0]?.n ?? 0,
+    in_triage: f.triage?.[0]?.n ?? 0,
+    pursuing: f.pursuing?.[0]?.n ?? 0,
+    on_hold: f.onHold?.[0]?.n ?? 0,
+    drafting: f.drafting?.[0]?.n ?? 0,
+    submitted: f.submitted?.[0]?.n ?? 0,
+    rejected: f.rejected?.[0]?.n ?? 0,
+    urgent: f.urgent?.[0]?.n ?? 0,
     unprocessed,
   };
 }

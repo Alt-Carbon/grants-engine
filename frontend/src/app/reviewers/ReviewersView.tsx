@@ -16,7 +16,9 @@ import {
   Ban,
   Save,
   BookOpen,
+  Settings,
 } from "lucide-react";
+import { ReviewerSettingsPanel } from "@/components/ReviewerSettingsPanel";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -235,6 +237,7 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
   const [runLoading, setRunLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const fetchReviews = useCallback(async (grantId: string) => {
     setLoading(true);
@@ -358,18 +361,27 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
                   {selectedGrant.funder}
                 </p>
               </div>
-              <button
-                onClick={runReview}
-                disabled={runLoading}
-                className="inline-flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-purple-700 disabled:opacity-50 shrink-0"
-              >
-                {runLoading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <PlayCircle className="h-4 w-4" />
-                )}
-                {runLoading ? "Reviewing..." : hasReviews ? "Re-run Review" : "Run Review"}
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => setSettingsOpen(true)}
+                  className="flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 transition-colors"
+                  title="Review settings for this grant"
+                >
+                  <Settings className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={runReview}
+                  disabled={runLoading}
+                  className="inline-flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-purple-700 disabled:opacity-50"
+                >
+                  {runLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <PlayCircle className="h-4 w-4" />
+                  )}
+                  {runLoading ? "Reviewing..." : hasReviews ? "Re-run Review" : "Run Review"}
+                </button>
+              </div>
             </div>
 
             {error && (
@@ -421,6 +433,13 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
           </div>
         )}
       </div>
+
+      {/* Per-grant reviewer settings panel */}
+      <ReviewerSettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        grantId={selectedId}
+      />
     </div>
   );
 }

@@ -11,6 +11,7 @@ import {
   Loader2,
   RotateCcw,
   Save,
+  Info,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -28,12 +29,14 @@ interface DrafterConfig {
   writing_style?: string;
   custom_instructions?: string;
   theme_settings?: Record<string, ThemeSetting>;
+  is_default?: boolean;
   [key: string]: unknown;
 }
 
 interface DrafterSettingsProps {
   open: boolean;
   onClose: () => void;
+  grantId: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,21 +97,28 @@ const THEME_ORDER = [
 // Component
 // ---------------------------------------------------------------------------
 
-export function DrafterSettings({ open, onClose }: DrafterSettingsProps) {
+export function DrafterSettings({ open, onClose, grantId }: DrafterSettingsProps) {
   const [config, setConfig] = useState<DrafterConfig>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [expandedThemes, setExpandedThemes] = useState<Set<string>>(new Set());
   const [dirty, setDirty] = useState(false);
+  const [isDefault, setIsDefault] = useState(false);
 
   // -- Load config -----------------------------------------------------------
   const loadConfig = useCallback(async () => {
+    if (!grantId) {
+      setConfig({});
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
-      const res = await fetch("/api/config?agent=drafter");
+      const res = await fetch(`/api/grants/${encodeURIComponent(grantId)}/drafter-settings`);
       if (res.ok) {
         const data = await res.json();
+        setIsDefault(!!data.is_default);
         setConfig(data);
       }
     } catch {
@@ -116,7 +126,7 @@ export function DrafterSettings({ open, onClose }: DrafterSettingsProps) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [grantId]);
 
   useEffect(() => {
     if (open) {
@@ -127,41 +137,31 @@ export function DrafterSettings({ open, onClose }: DrafterSettingsProps) {
 
   // -- Save ------------------------------------------------------------------
   const handleSave = useCallback(async () => {
+    if (!grantId) return;
     setSaving(true);
     try {
-      const { _id, agent, ...rest } = config;
-      await fetch("/api/config", {
+      const { _id, agent, is_default, ...rest } = config;
+      await fetch(`/api/grants/${encodeURIComponent(grantId)}/drafter-settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent: "drafter", config: rest }),
+        body: JSON.stringify(rest),
       });
+      setIsDefault(false);
       setDirty(false);
     } catch {
       // silently fail
     } finally {
       setSaving(false);
     }
-  }, [config]);
+  }, [config, grantId]);
 
   // -- Reset to defaults -----------------------------------------------------
   const handleReset = useCallback(async () => {
+    if (!grantId) return;
     setResetting(true);
     try {
-      // Save with theme_settings removed so backend re-seeds defaults on next boot;
-      // For immediate effect, re-fetch defaults by deleting theme_settings
-      const { _id, agent, theme_settings, custom_instructions, writing_style, ...rest } = config;
-      await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agent: "drafter",
-          config: {
-            ...rest,
-            writing_style: "professional",
-            custom_instructions: "",
-            theme_settings: null,
-          },
-        }),
+      await fetch(`/api/grants/${encodeURIComponent(grantId)}/drafter-settings`, {
+        method: "DELETE",
       });
       await loadConfig();
       setDirty(false);
@@ -170,7 +170,7 @@ export function DrafterSettings({ open, onClose }: DrafterSettingsProps) {
     } finally {
       setResetting(false);
     }
-  }, [config, loadConfig]);
+  }, [grantId, loadConfig]);
 
   // -- Helpers ---------------------------------------------------------------
   const updateField = (field: string, value: unknown) => {
@@ -215,7 +215,7 @@ export function DrafterSettings({ open, onClose }: DrafterSettingsProps) {
           <div className="flex items-center gap-2">
             <Settings className="h-4 w-4 text-gray-400" />
             <span className="text-sm font-semibold text-gray-700">
-              Drafter Settings
+              Grant Settings
             </span>
           </div>
           <button
@@ -226,19 +226,38 @@ export function DrafterSettings({ open, onClose }: DrafterSettingsProps) {
           </button>
         </div>
 
+        {/* Default banner */}
+        {!loading && grantId && (
+          <div className={`flex items-start gap-2 px-4 py-2.5 text-xs border-b border-gray-100 ${
+            isDefault ? "bg-amber-50 text-amber-700" : "bg-violet-50 text-violet-700"
+          }`}>
+            <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+            <span>
+              {isDefault
+                ? "Using global defaults. Changes here apply only to this grant."
+                : "Settings for this grant"}
+            </span>
+          </div>
+        )}
+
         {/* Content */}
         <div className="flex-1 overflow-y-auto">
-          {loading ? (
+          {!grantId ? (
+            <div className="flex flex-col items-center justify-center py-16">
+              <Settings className="h-6 w-6 text-gray-300" />
+              <p className="mt-2 text-sm text-gray-400">Select a grant to configure settings</p>
+            </div>
+          ) : loading ? (
             <div className="flex flex-col items-center justify-center py-16">
               <Loader2 className="h-6 w-6 animate-spin text-gray-300" />
               <p className="mt-2 text-sm text-gray-400">Loading settings...</p>
             </div>
           ) : (
             <div className="px-4 py-4 space-y-5">
-              {/* ── Global Section ──────────────────────────── */}
+              {/* -- Global Section ----------------------------------------- */}
               <div>
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-2">
-                  Global
+                  General
                 </p>
 
                 {/* Writing Style */}
@@ -275,7 +294,7 @@ export function DrafterSettings({ open, onClose }: DrafterSettingsProps) {
                 </p>
               </div>
 
-              {/* ── Per-Theme Settings ──────────────────────── */}
+              {/* -- Per-Theme Settings ------------------------------------- */}
               <div>
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-2">
                   Theme Agents
@@ -404,7 +423,7 @@ export function DrafterSettings({ open, onClose }: DrafterSettingsProps) {
         </div>
 
         {/* Footer */}
-        {!loading && (
+        {!loading && grantId && (
           <div className="border-t border-gray-100 px-4 py-3 flex items-center gap-2">
             <Button
               variant="outline"
@@ -418,7 +437,7 @@ export function DrafterSettings({ open, onClose }: DrafterSettingsProps) {
               ) : (
                 <RotateCcw className="h-3 w-3" />
               )}
-              Reset
+              Reset to defaults
             </Button>
             <Button
               variant="default"

@@ -117,11 +117,13 @@ async def ensure_indexes():
     await _idx("grants_scored", "grant_type", sparse=True)
     await _idx("grants_scored", [("funder", 1), ("title", 1)], sparse=True)
     await _idx("grants_scored", "scored_at")
+    await _idx("grants_scored", [("deadline_urgent", 1), ("status", 1)])
 
     # grants_pipeline
     await _idx("grants_pipeline", "grant_id")
     await _idx("grants_pipeline", "thread_id", unique=True)
     await _idx("grants_pipeline", "status")
+    await _idx("grants_pipeline", [("status", 1), ("started_at", -1)])
 
     # grant_drafts
     await _idx("grant_drafts", "pipeline_id")
@@ -158,6 +160,8 @@ async def ensure_indexes():
     await _idx("graph_checkpoints", [("thread_id", 1), ("checkpoint_id", -1)])
     await _idx("audit_logs", [("created_at", -1)])
     await _idx("audit_logs", "node")
+    await _idx("audit_logs", [("node", 1), ("created_at", -1)])
+    await _idx("audit_logs", [("action", 1), ("created_at", -1)])
     await _idx("agent_config", "agent", unique=True)
 
     # funder context cache (7-day TTL index on cached_at)

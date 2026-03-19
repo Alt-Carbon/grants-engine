@@ -493,9 +493,35 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
     except Exception:
         logger.debug("Preference loading skipped", exc_info=True)
 
-    # Load drafter settings from agent_config
+    # Load drafter settings: per-grant overrides global config
     from backend.db.mongo import agent_config
-    drafter_cfg = await agent_config().find_one({"agent": "drafter"}) or {}
+    global_cfg = await agent_config().find_one({"agent": "drafter"}) or {}
+
+    # Load per-grant drafter settings (if any)
+    grant_cfg = (grant.get("drafter_settings") or {}) if grant else {}
+    if grant_id and not grant_cfg:
+        # Grant may have been loaded without drafter_settings projection — re-fetch
+        try:
+            _grant_with_settings = await grants_scored().find_one(
+                {"_id": ObjectId(grant_id)}, {"drafter_settings": 1}
+            )
+            grant_cfg = ((_grant_with_settings or {}).get("drafter_settings") or {})
+        except Exception:
+            grant_cfg = {}
+
+    # Merge: per-grant values override global, missing fields fall back to global
+    drafter_cfg = {**global_cfg}
+    if grant_cfg.get("writing_style"):
+        drafter_cfg["writing_style"] = grant_cfg["writing_style"]
+    if grant_cfg.get("custom_instructions"):
+        drafter_cfg["custom_instructions"] = grant_cfg["custom_instructions"]
+    if grant_cfg.get("temperature") is not None:
+        drafter_cfg["temperature"] = grant_cfg["temperature"]
+
+    if grant_cfg:
+        logger.info("Drafter: using per-grant settings for grant %s (keys: %s)",
+                     grant_id, list(grant_cfg.keys()))
+
     theme_settings = (drafter_cfg.get("theme_settings") or {}).get(grant_theme) or {}
 
     # Retrieve lessons from past grant outcomes (feedback learning)

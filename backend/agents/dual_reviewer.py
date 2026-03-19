@@ -346,10 +346,31 @@ async def run_dual_review(grant_id: str) -> Dict:
     if not draft_text.strip():
         raise ValueError("Draft has no content")
 
-    # Load reviewer settings
+    # Load per-grant reviewer settings (stored by the frontend settings panel)
+    grant_reviewer_cfg = (grant or {}).get("reviewer_settings") or {}
+
+    # Load global reviewer config (existing behavior)
     reviewer_cfg = await agent_config().find_one({"agent": "reviewer"}) or {}
-    funder_settings = reviewer_cfg.get("funder", {})
-    scientific_settings = reviewer_cfg.get("scientific", {})
+
+    # Merge: per-grant overrides global for funder/scientific settings
+    funder_settings = {**reviewer_cfg.get("funder", {})}
+    scientific_settings = {**reviewer_cfg.get("scientific", {})}
+
+    # Apply per-grant overrides
+    if grant_reviewer_cfg.get("funder_strictness"):
+        funder_settings["strictness"] = grant_reviewer_cfg["funder_strictness"]
+    if grant_reviewer_cfg.get("scientific_strictness"):
+        scientific_settings["strictness"] = grant_reviewer_cfg["scientific_strictness"]
+    if grant_reviewer_cfg.get("funder_focus_areas"):
+        funder_settings["focus_areas"] = grant_reviewer_cfg["funder_focus_areas"]
+    if grant_reviewer_cfg.get("scientific_focus_areas"):
+        scientific_settings["focus_areas"] = grant_reviewer_cfg["scientific_focus_areas"]
+    if grant_reviewer_cfg.get("custom_criteria"):
+        funder_settings["custom_criteria"] = grant_reviewer_cfg["custom_criteria"]
+        scientific_settings["custom_criteria"] = grant_reviewer_cfg["custom_criteria"]
+    if grant_reviewer_cfg.get("custom_instructions"):
+        funder_settings["custom_instructions"] = grant_reviewer_cfg["custom_instructions"]
+        scientific_settings["custom_instructions"] = grant_reviewer_cfg["custom_instructions"]
 
     grant_title = grant.get("title") or grant.get("grant_name") or "Untitled"
     logger.info(
