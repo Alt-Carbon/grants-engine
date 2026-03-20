@@ -1016,6 +1016,8 @@ export interface DraftReview {
   strengths: string[];
   verdict: string;
   summary: string;
+  research_insights?: string[];
+  web_research_used?: boolean;
   created_at: string;
 }
 

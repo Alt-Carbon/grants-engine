@@ -35,7 +35,7 @@ def route_after_guardrail(state: GrantState) -> str:
 
 
 def route_after_drafter(state: GrantState) -> str:
-    """After drafter node: loop back if more sections needed, else go to reviewer.
+    """After drafter node: loop back if more sections needed, else go to export.
 
     If sections_required is empty (grant_reader failed), route to pipeline_update
     to avoid an infinite drafter loop.
@@ -47,7 +47,7 @@ def route_after_drafter(state: GrantState) -> str:
         return "pipeline_update"
 
     if len(approved) >= len(sections):
-        return "reviewer"
+        return "export"
     return "drafter"
 
 

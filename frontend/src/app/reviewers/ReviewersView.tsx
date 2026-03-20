@@ -17,8 +17,13 @@ import {
   Save,
   BookOpen,
   Settings,
+  Download,
+  FileText,
+  Globe,
+  ExternalLink,
 } from "lucide-react";
 import { ReviewerSettingsPanel } from "@/components/ReviewerSettingsPanel";
+import { fetchDraftContent, generateDraftPdf, downloadDraftMarkdown } from "@/lib/generateDraftPdf";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -206,6 +211,24 @@ function ReviewPanel({
         </div>
       )}
 
+      {/* Research Insights */}
+      {(review as any).research_insights?.length > 0 && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-700 mb-2 flex items-center gap-1.5">
+            <Globe className="h-3 w-3" />
+            Web Research Insights
+          </p>
+          <ul className="space-y-1.5">
+            {(review as any).research_insights.map((s: string, i: number) => (
+              <li key={i} className="flex items-start gap-2 text-sm text-blue-900">
+                <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue-500" />
+                {s}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* Section Breakdown */}
       {Object.keys(review.section_reviews || {}).length > 0 && (
         <div>
@@ -239,6 +262,8 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
   const [polling, setPolling] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileListOpen, setMobileListOpen] = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
   const fetchReviews = useCallback(async (grantId: string) => {
     setLoading(true);
@@ -309,6 +334,28 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
     } catch {
       setError("Network error");
       setRunLoading(false);
+    }
+  }, [selectedId]);
+
+  const handleExport = useCallback(async (format: "pdf" | "md", mode: "submission" | "review") => {
+    if (!selectedId) return;
+    setPdfLoading(true);
+    setExportMenuOpen(false);
+    try {
+      const data = await fetchDraftContent(selectedId);
+      if (!data) {
+        setError("Could not load draft content for export");
+        return;
+      }
+      if (format === "pdf") {
+        await generateDraftPdf(data, mode);
+      } else {
+        downloadDraftMarkdown(data, mode);
+      }
+    } catch {
+      setError("Export failed");
+    } finally {
+      setPdfLoading(false);
     }
   }, [selectedId]);
 
@@ -407,6 +454,66 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
+                {/* Export dropdown */}
+                <div className="relative">
+                  <button
+                    onClick={() => setExportMenuOpen((o) => !o)}
+                    disabled={pdfLoading}
+                    className="flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 px-3 text-gray-500 hover:bg-gray-50 hover:text-gray-700 transition-colors disabled:opacity-50"
+                    title="Download draft as PDF or Markdown"
+                  >
+                    {pdfLoading ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Download className="h-4 w-4" />
+                    )}
+                    <span className="text-xs font-medium hidden sm:inline">Export</span>
+                    <ChevronDown className="h-3 w-3" />
+                  </button>
+                  {exportMenuOpen && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setExportMenuOpen(false)} />
+                      <div className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border border-gray-200 bg-white shadow-lg py-1">
+                        <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                          Submission-ready (clean)
+                        </p>
+                        <button
+                          onClick={() => handleExport("pdf", "submission")}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                        >
+                          <FileText className="h-4 w-4 text-red-500" />
+                          Download PDF
+                        </button>
+                        <button
+                          onClick={() => handleExport("md", "submission")}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                        >
+                          <FileText className="h-4 w-4 text-gray-500" />
+                          Download Markdown
+                        </button>
+                        <div className="my-1 border-t border-gray-100" />
+                        <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                          Internal review copy
+                        </p>
+                        <button
+                          onClick={() => handleExport("pdf", "review")}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                        >
+                          <FileText className="h-4 w-4 text-purple-500" />
+                          PDF with word counts
+                        </button>
+                        <button
+                          onClick={() => handleExport("md", "review")}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                        >
+                          <FileText className="h-4 w-4 text-gray-400" />
+                          Markdown with word counts
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+
                 <button
                   onClick={() => setSettingsOpen(true)}
                   className="flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 transition-colors"
@@ -435,6 +542,44 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
                 <p className="text-sm text-red-700">{error}</p>
               </div>
             )}
+
+            {/* Grant Details Bar */}
+            <div className="mb-4 rounded-lg border border-gray-200 bg-white px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+              {selectedGrant.funder && (
+                <span className="text-gray-500">
+                  <strong className="text-gray-700">Funder:</strong> {selectedGrant.funder}
+                </span>
+              )}
+              {selectedGrant.deadline && (
+                <span className="text-gray-500">
+                  <strong className="text-gray-700">Deadline:</strong>{" "}
+                  {new Date(selectedGrant.deadline).toLocaleDateString()}
+                </span>
+              )}
+              {(selectedGrant.max_funding_usd || selectedGrant.max_funding) && (
+                <span className="text-gray-500">
+                  <strong className="text-gray-700">Funding:</strong>{" "}
+                  ${Number(selectedGrant.max_funding_usd || selectedGrant.max_funding || 0).toLocaleString()}
+                </span>
+              )}
+              {selectedGrant.url && (
+                <a
+                  href={selectedGrant.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-purple-600 hover:text-purple-800 font-medium"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Grant Page
+                </a>
+              )}
+              {(reviews?.funder as any)?.web_research_used && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
+                  <Globe className="h-3 w-3" />
+                  Web Research Applied
+                </span>
+              )}
+            </div>
 
             {loading && !hasReviews ? (
               <div className="flex items-center justify-center py-20">

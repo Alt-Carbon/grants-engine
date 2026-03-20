@@ -3810,3 +3810,43 @@ async def download_draft(thread_id: str):
         for name, sec in sections.items()
     )
     return PlainTextResponse(content, media_type="text/markdown")
+
+
+@app.get("/draft/{grant_id}/content")
+async def get_draft_content(grant_id: str, _: None = Depends(verify_internal)):
+    """Return the latest draft content for a grant (used by reviewer PDF export)."""
+    from backend.db.mongo import grant_drafts, grants_scored
+    from bson import ObjectId
+
+    grant = await grants_scored().find_one({"_id": ObjectId(grant_id)})
+    if not grant:
+        raise HTTPException(status_code=404, detail="Grant not found")
+
+    draft = await grant_drafts().find_one(
+        {"grant_id": grant_id},
+        sort=[("version", -1)],
+    )
+    if not draft:
+        raise HTTPException(status_code=404, detail="No draft found for this grant")
+
+    sections = draft.get("sections", {})
+    return {
+        "grant_id": grant_id,
+        "grant_title": grant.get("title") or grant.get("grant_name") or "Untitled",
+        "funder": grant.get("funder") or "Unknown",
+        "deadline": grant.get("deadline") or "",
+        "max_funding": grant.get("max_funding_usd") or grant.get("max_funding") or "",
+        "version": draft.get("version", 1),
+        "sections": {
+            name: {
+                "content": sec.get("content", ""),
+                "word_count": sec.get("word_count", 0),
+                "word_limit": sec.get("word_limit", 500),
+                "within_limit": sec.get("within_limit", True),
+            }
+            for name, sec in sections.items()
+        },
+        "evidence_gaps": draft.get("evidence_gaps_all", []),
+        "total_word_count": draft.get("total_word_count", 0),
+        "created_at": draft.get("created_at", ""),
+    }

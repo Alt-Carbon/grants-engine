@@ -10,6 +10,12 @@ Each reviewer agent is configurable via agent_config (agent: "reviewer"):
 Standalone module (not a LangGraph node). Reads the latest draft from MongoDB,
 runs two independent LLM reviews in parallel, and stores results in draft_reviews.
 
+Features:
+  - Loads the full grant document (raw page content) for complete context
+  - Web research via Tavily: verifies claims, checks funder priorities, finds
+    competing approaches before scoring
+  - Three parallel review perspectives: Funder, Scientific, Coherence
+
 Usage:
     from backend.agents.dual_reviewer import run_dual_review
     result = await run_dual_review("683a1f...")  # grant_id
@@ -84,6 +90,10 @@ EVALUATION CRITERIA (from the funder):
 
 {custom_criteria_block}
 
+{grant_document_block}
+
+{research_block}
+
 FOCUS YOUR REVIEW ON:
 {focus_areas}
 
@@ -93,6 +103,7 @@ COMPLETE DRAFT APPLICATION:
 {draft}
 
 Review this application thoroughly. Be specific and constructive. {perspective_guidance}
+Use the original grant document and web research context (if provided) to verify claims, check alignment with funder priorities, and identify gaps.
 
 Respond ONLY with valid JSON:
 {{
@@ -108,7 +119,8 @@ Respond ONLY with valid JSON:
   "top_issues": ["<most critical issue 1>", "<issue 2>", "<issue 3>"],
   "strengths": ["<key strength 1>", "<strength 2>", "<strength 3>"],
   "verdict": "<one of: strong_submit | submit_with_revisions | major_revisions | reconsider>",
-  "summary": "<2-3 sentence assessment>"
+  "summary": "<2-3 sentence assessment>",
+  "research_insights": ["<key finding from web research that informed scoring, if any>"]
 }}"""
 
 PERSPECTIVE_GUIDANCE = {
@@ -128,6 +140,97 @@ ROLE_CONTEXT = {
 }
 
 
+# ── Web Research ─────────────────────────────────────────────────────────────
+
+async def _web_research_for_review(
+    grant: Dict,
+    draft_text: str,
+) -> Dict[str, List[str]]:
+    """Use Tavily to research context that helps reviewers score more accurately.
+
+    Searches for:
+    - Funder's recent priorities and past funded projects
+    - Competing approaches / state of the art in the grant's domain
+    - Verification of key technical claims in the draft
+
+    Returns {"funder_context": [...], "scientific_context": [...], "claim_checks": [...]}.
+    All values are short text snippets. Non-fatal: returns empty dicts on failure.
+    """
+    from backend.config.settings import get_settings
+
+    s = get_settings()
+    tavily_key = s.tavily_api_key
+    if not tavily_key:
+        logger.info("Reviewer research skipped: no TAVILY_API_KEY configured")
+        return {"funder_context": [], "scientific_context": [], "claim_checks": []}
+
+    try:
+        from tavily import TavilyClient
+    except ImportError:
+        logger.warning("tavily-python not installed — reviewer research skipped")
+        return {"funder_context": [], "scientific_context": [], "claim_checks": []}
+
+    client = TavilyClient(api_key=tavily_key)
+    funder = grant.get("funder") or ""
+    title = grant.get("title") or grant.get("grant_name") or ""
+    themes = ", ".join(grant.get("themes_detected", []))
+
+    queries = {
+        "funder_context": f"{funder} grant funding priorities recent awards {datetime.now().year}",
+        "scientific_context": f"{themes or title} state of the art methodology best practices",
+        "claim_checks": f"{funder} {title} evaluation criteria past winners",
+    }
+
+    async def _search(query: str) -> List[str]:
+        try:
+            result = await asyncio.to_thread(
+                client.search,
+                query=query,
+                search_depth="basic",
+                max_results=5,
+            )
+            snippets = []
+            for r in result.get("results", []):
+                snippet = r.get("content", "")[:300]
+                source = r.get("url", "")
+                if snippet:
+                    snippets.append(f"{snippet} [source: {source}]")
+            return snippets
+        except Exception as e:
+            logger.warning("Reviewer research query failed: %s — %s", query[:60], e)
+            return []
+
+    results = {}
+    tasks = {key: _search(q) for key, q in queries.items()}
+    gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    for key, res in zip(tasks.keys(), gathered):
+        results[key] = res if isinstance(res, list) else []
+
+    total = sum(len(v) for v in results.values())
+    logger.info("Reviewer research complete: %d snippets across %d queries", total, len(queries))
+    return results
+
+
+def _format_research_block(research: Dict[str, List[str]]) -> str:
+    """Format research findings into a prompt block for the reviewer."""
+    parts = []
+    if research.get("funder_context"):
+        parts.append("FUNDER INTELLIGENCE (from web research):")
+        for s in research["funder_context"][:3]:
+            parts.append(f"  - {s}")
+    if research.get("scientific_context"):
+        parts.append("DOMAIN CONTEXT (from web research):")
+        for s in research["scientific_context"][:3]:
+            parts.append(f"  - {s}")
+    if research.get("claim_checks"):
+        parts.append("COMPETITIVE LANDSCAPE (from web research):")
+        for s in research["claim_checks"][:3]:
+            parts.append(f"  - {s}")
+    if not parts:
+        return ""
+    return "\n".join(parts)
+
+
 # ── Core logic ──────────────────────────────────────────────────────────────
 
 def _parse_json_response(raw: str) -> Dict:
@@ -145,8 +248,15 @@ async def _run_single_review(
     draft_text: str,
     perspective: str,
     settings: Dict,
+    research: Optional[Dict[str, List[str]]] = None,
+    grant_raw_doc: str = "",
 ) -> Dict:
-    """Run a single review perspective with configurable settings."""
+    """Run a single review perspective with configurable settings.
+
+    Args:
+        research: Web research findings from _web_research_for_review.
+        grant_raw_doc: Original grant page content for full context.
+    """
     profile = REVIEWER_PROFILES.get(perspective, REVIEWER_PROFILES["funder"])
 
     # Build grant context
@@ -198,6 +308,19 @@ async def _run_single_review(
     if custom_instructions:
         custom_instructions_block = f"REVIEWER INSTRUCTIONS:\n{custom_instructions}"
 
+    # Grant document block — original funder page for reference
+    grant_document_block = ""
+    if grant_raw_doc:
+        # Truncate to keep prompt reasonable
+        truncated = grant_raw_doc[:8000]
+        grant_document_block = (
+            "ORIGINAL GRANT DOCUMENT (from funder's page — use to verify alignment):\n"
+            f"{truncated}"
+        )
+
+    # Research block — web-sourced intelligence
+    research_block = _format_research_block(research or {})
+
     temperature = settings.get("temperature") or profile.get("default_temperature", 0.3)
 
     prompt = REVIEW_PROMPT.format(
@@ -209,6 +332,8 @@ async def _run_single_review(
         extra_context=extra_context,
         criteria=criteria,
         custom_criteria_block=custom_criteria_block,
+        grant_document_block=grant_document_block,
+        research_block=research_block,
         focus_areas=focus_areas,
         custom_instructions_block=custom_instructions_block,
         draft=draft_text[:30000],
@@ -232,6 +357,7 @@ async def _run_single_review(
     review.setdefault("strengths", [])
     review.setdefault("verdict", "major_revisions")
     review.setdefault("summary", "Review completed.")
+    review.setdefault("research_insights", [])
 
     return review
 
@@ -245,6 +371,7 @@ def _fallback_review(perspective: str, error: str) -> Dict:
         "strengths": [],
         "verdict": "major_revisions",
         "summary": f"The {perspective} review could not be completed due to an error. Please retry.",
+        "research_insights": [],
     }
 
 
@@ -316,9 +443,14 @@ async def _run_coherence_review(
 async def run_dual_review(grant_id: str) -> Dict:
     """Run funder + scientific reviews on the latest draft for a grant.
 
-    Loads reviewer settings from agent_config, then runs both perspectives in parallel.
-    Returns {"funder": {...}, "scientific": {...}} with full review data.
-    Stores both reviews in the draft_reviews collection.
+    Pipeline:
+    1. Load grant + latest draft from MongoDB
+    2. Load original grant document (raw page content) for full context
+    3. Run web research via Tavily (funder priorities, domain context, claim checks)
+    4. Run funder + scientific + coherence reviews in parallel (with research context)
+    5. Store all results in draft_reviews collection
+
+    Returns {"funder": {...}, "scientific": {...}, "coherence": {...}}.
     """
     from backend.db.mongo import grant_drafts, grants_scored, draft_reviews, agent_config
     from bson import ObjectId
@@ -345,6 +477,39 @@ async def run_dual_review(grant_id: str) -> Dict:
 
     if not draft_text.strip():
         raise ValueError("Draft has no content")
+
+    # Load original grant context — use deep_analysis (always available on grants_scored)
+    # The raw page HTML lives in the LangGraph checkpointer but is expensive to extract.
+    # deep_analysis contains the structured extraction the analyst already performed.
+    deep = grant.get("deep_analysis") or {}
+    grant_raw_parts = []
+    if deep.get("opportunity_summary"):
+        grant_raw_parts.append(f"OPPORTUNITY: {deep['opportunity_summary']}")
+    if deep.get("eligibility"):
+        elig = deep["eligibility"]
+        if isinstance(elig, dict):
+            grant_raw_parts.append(f"ELIGIBILITY: {json.dumps(elig, default=str)[:2000]}")
+        else:
+            grant_raw_parts.append(f"ELIGIBILITY: {str(elig)[:2000]}")
+    if deep.get("requirements"):
+        reqs = deep["requirements"]
+        if isinstance(reqs, dict):
+            grant_raw_parts.append(f"REQUIREMENTS: {json.dumps(reqs, default=str)[:2000]}")
+    if deep.get("evaluation_criteria"):
+        ec = deep["evaluation_criteria"]
+        if isinstance(ec, list):
+            grant_raw_parts.append("EVALUATION CRITERIA:\n" + "\n".join(
+                f"  - {c.get('criterion', '')}: {c.get('what_they_look_for', c.get('description', ''))}"
+                for c in ec
+            ))
+    if deep.get("funding_terms"):
+        ft = deep["funding_terms"]
+        if isinstance(ft, dict):
+            grant_raw_parts.append(f"FUNDING TERMS: {json.dumps(ft, default=str)[:1500]}")
+    grant_raw_doc = "\n\n".join(grant_raw_parts)
+
+    # Step 1: Web research (runs before reviews to inform them)
+    research = await _web_research_for_review(grant, draft_text)
 
     # Load per-grant reviewer settings (stored by the frontend settings panel)
     grant_reviewer_cfg = (grant or {}).get("reviewer_settings") or {}
@@ -374,16 +539,17 @@ async def run_dual_review(grant_id: str) -> Dict:
 
     grant_title = grant.get("title") or grant.get("grant_name") or "Untitled"
     logger.info(
-        "Starting dual review for '%s' (grant_id=%s, draft v%d, funder_strictness=%s, sci_strictness=%s)",
+        "Starting dual review for '%s' (grant_id=%s, draft v%d, funder_strictness=%s, sci_strictness=%s, research_snippets=%d)",
         grant_title, grant_id, draft_doc.get("version", 0),
         funder_settings.get("strictness", "balanced"),
         scientific_settings.get("strictness", "balanced"),
+        sum(len(v) for v in research.values()),
     )
 
-    # Run all three perspectives in parallel: funder + scientific + coherence
+    # Step 2: Run all three perspectives in parallel (with research + grant doc context)
     funder_result, scientific_result, coherence_result = await asyncio.gather(
-        _run_single_review(grant, draft_text, "funder", funder_settings),
-        _run_single_review(grant, draft_text, "scientific", scientific_settings),
+        _run_single_review(grant, draft_text, "funder", funder_settings, research=research, grant_raw_doc=grant_raw_doc),
+        _run_single_review(grant, draft_text, "scientific", scientific_settings, research=research, grant_raw_doc=grant_raw_doc),
         _run_coherence_review(grant, draft_text),
     )
 
@@ -391,7 +557,7 @@ async def run_dual_review(grant_id: str) -> Dict:
     draft_id = str(draft_doc["_id"])
     draft_version = draft_doc.get("version", 0)
 
-    # Store reviews (funder, scientific, coherence)
+    # Store reviews (funder, scientific, coherence) — include research metadata
     for perspective, result in [
         ("funder", funder_result),
         ("scientific", scientific_result),
@@ -403,6 +569,7 @@ async def run_dual_review(grant_id: str) -> Dict:
             "draft_version": draft_version,
             "perspective": perspective,
             **result,
+            "web_research_used": bool(any(research.values())),
             "created_at": now,
         }
         await draft_reviews().replace_one(
@@ -451,4 +618,231 @@ async def run_dual_review(grant_id: str) -> Dict:
         "funder": funder_result,
         "scientific": scientific_result,
         "coherence": coherence_result,
+    }
+
+
+# ── LangGraph Node ──────────────────────────────────────────────────────────
+
+async def dual_reviewer_node(state: "GrantState") -> Dict:
+    """LangGraph node: run the full dual (triple) review inside the pipeline.
+
+    Uses approved_sections from graph state (instead of MongoDB draft) and
+    the grant's deep_analysis for context. Saves results to draft_reviews
+    collection so the Reviewers UI can display them immediately.
+    """
+    from backend.db.mongo import grants_scored, draft_reviews, grant_drafts, agent_config
+    from backend.graph.state import GrantState
+    from bson import ObjectId
+
+    grant_id = state.get("selected_grant_id")
+    if not grant_id:
+        logger.error("dual_reviewer_node: no selected_grant_id in state")
+        return {
+            "reviewer_output": _fallback_review("pipeline", "No grant selected"),
+            "audit_log": state.get("audit_log", []) + [{
+                "node": "reviewer", "ts": datetime.now(timezone.utc).isoformat(),
+                "error": "no grant_id",
+            }],
+        }
+
+    # Load grant from MongoDB for full metadata
+    grant = await grants_scored().find_one({"_id": ObjectId(grant_id)}) or {}
+
+    # Assemble draft text from graph state (approved_sections)
+    approved_sections = state.get("approved_sections") or {}
+    draft_text = "\n\n".join(
+        f"## {name}\n{sec.get('content', '')}"
+        for name, sec in approved_sections.items()
+    )
+
+    if not draft_text.strip():
+        logger.error("dual_reviewer_node: draft is empty")
+        return {
+            "reviewer_output": _fallback_review("pipeline", "Draft is empty"),
+            "audit_log": state.get("audit_log", []) + [{
+                "node": "reviewer", "ts": datetime.now(timezone.utc).isoformat(),
+                "error": "empty draft",
+            }],
+        }
+
+    # Build grant document context from deep_analysis
+    deep = grant.get("deep_analysis") or {}
+    grant_raw_parts = []
+    if deep.get("opportunity_summary"):
+        grant_raw_parts.append(f"OPPORTUNITY: {deep['opportunity_summary']}")
+    if deep.get("eligibility"):
+        elig = deep["eligibility"]
+        if isinstance(elig, dict):
+            grant_raw_parts.append(f"ELIGIBILITY: {json.dumps(elig, default=str)[:2000]}")
+        else:
+            grant_raw_parts.append(f"ELIGIBILITY: {str(elig)[:2000]}")
+    if deep.get("requirements"):
+        reqs = deep["requirements"]
+        if isinstance(reqs, dict):
+            grant_raw_parts.append(f"REQUIREMENTS: {json.dumps(reqs, default=str)[:2000]}")
+    if deep.get("evaluation_criteria"):
+        ec = deep["evaluation_criteria"]
+        if isinstance(ec, list):
+            grant_raw_parts.append("EVALUATION CRITERIA:\n" + "\n".join(
+                f"  - {c.get('criterion', '')}: {c.get('what_they_look_for', c.get('description', ''))}"
+                for c in ec
+            ))
+    if deep.get("funding_terms"):
+        ft = deep["funding_terms"]
+        if isinstance(ft, dict):
+            grant_raw_parts.append(f"FUNDING TERMS: {json.dumps(ft, default=str)[:1500]}")
+    grant_raw_doc = "\n\n".join(grant_raw_parts)
+
+    # Also use grant_raw_doc from state if deep_analysis is sparse
+    if not grant_raw_doc and state.get("grant_raw_doc"):
+        grant_raw_doc = (state.get("grant_raw_doc") or "")[:8000]
+
+    # Step 1: Web research
+    research = await _web_research_for_review(grant, draft_text)
+
+    # Load reviewer settings (global + per-grant overrides)
+    grant_reviewer_cfg = grant.get("reviewer_settings") or {}
+    reviewer_cfg = await agent_config().find_one({"agent": "reviewer"}) or {}
+
+    funder_settings = {**reviewer_cfg.get("funder", {})}
+    scientific_settings = {**reviewer_cfg.get("scientific", {})}
+
+    if grant_reviewer_cfg.get("funder_strictness"):
+        funder_settings["strictness"] = grant_reviewer_cfg["funder_strictness"]
+    if grant_reviewer_cfg.get("scientific_strictness"):
+        scientific_settings["strictness"] = grant_reviewer_cfg["scientific_strictness"]
+    if grant_reviewer_cfg.get("funder_focus_areas"):
+        funder_settings["focus_areas"] = grant_reviewer_cfg["funder_focus_areas"]
+    if grant_reviewer_cfg.get("scientific_focus_areas"):
+        scientific_settings["focus_areas"] = grant_reviewer_cfg["scientific_focus_areas"]
+    if grant_reviewer_cfg.get("custom_criteria"):
+        funder_settings["custom_criteria"] = grant_reviewer_cfg["custom_criteria"]
+        scientific_settings["custom_criteria"] = grant_reviewer_cfg["custom_criteria"]
+    if grant_reviewer_cfg.get("custom_instructions"):
+        funder_settings["custom_instructions"] = grant_reviewer_cfg["custom_instructions"]
+        scientific_settings["custom_instructions"] = grant_reviewer_cfg["custom_instructions"]
+
+    grant_title = grant.get("title") or grant.get("grant_name") or "Untitled"
+    logger.info(
+        "Pipeline dual review for '%s' (grant_id=%s, sections=%d, research_snippets=%d)",
+        grant_title, grant_id, len(approved_sections),
+        sum(len(v) for v in research.values()),
+    )
+
+    # Step 2: Run all three reviews in parallel
+    funder_result, scientific_result, coherence_result = await asyncio.gather(
+        _run_single_review(grant, draft_text, "funder", funder_settings, research=research, grant_raw_doc=grant_raw_doc),
+        _run_single_review(grant, draft_text, "scientific", scientific_settings, research=research, grant_raw_doc=grant_raw_doc),
+        _run_coherence_review(grant, draft_text),
+    )
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Find draft_id from MongoDB if a draft was already saved by exporter
+    draft_doc = await grant_drafts().find_one(
+        {"grant_id": grant_id},
+        sort=[("version", -1)],
+    )
+    draft_id = str(draft_doc["_id"]) if draft_doc else ""
+    draft_version = draft_doc.get("version", 0) if draft_doc else state.get("draft_version", 0)
+
+    # Save to draft_reviews collection (so the Reviewers UI can display them)
+    for perspective, result in [
+        ("funder", funder_result),
+        ("scientific", scientific_result),
+        ("coherence", coherence_result),
+    ]:
+        review_doc = {
+            "grant_id": grant_id,
+            "draft_id": draft_id,
+            "draft_version": draft_version,
+            "perspective": perspective,
+            **result,
+            "web_research_used": bool(any(research.values())),
+            "source": "pipeline",
+            "created_at": now,
+        }
+        await draft_reviews().replace_one(
+            {"grant_id": grant_id, "perspective": perspective},
+            review_doc,
+            upsert=True,
+        )
+
+    coherence_issues = coherence_result.get("issues", [])
+    if coherence_issues:
+        logger.warning(
+            "Pipeline coherence review: %d issues for '%s'",
+            len(coherence_issues), grant_title,
+        )
+
+    # Compute combined score for backward compatibility
+    funder_score = funder_result.get("overall_score", 0)
+    scientific_score = scientific_result.get("overall_score", 0)
+    coherence_score = coherence_result.get("coherence_score", 0)
+    combined_score = round((funder_score + scientific_score + coherence_score) / 3, 1)
+
+    # Determine ready_for_export based on verdicts
+    verdicts = [funder_result.get("verdict", ""), scientific_result.get("verdict", "")]
+    ready = all(v in ("strong_submit", "submit_with_revisions") for v in verdicts)
+
+    logger.info(
+        "Pipeline dual review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), coherence=%.1f, combined=%.1f, ready=%s",
+        grant_title, funder_score, funder_result.get("verdict", "?"),
+        scientific_score, scientific_result.get("verdict", "?"),
+        coherence_score, combined_score, ready,
+    )
+
+    # Update heartbeat
+    try:
+        from backend.agents.agent_context import update_heartbeat
+        await update_heartbeat("reviewer", {
+            "status": "success",
+            "source": "pipeline",
+            "grant_title": grant_title[:50],
+            "funder_score": funder_score,
+            "scientific_score": scientific_score,
+            "coherence_score": coherence_score,
+            "funder_verdict": funder_result.get("verdict", ""),
+            "scientific_verdict": scientific_result.get("verdict", ""),
+            "coherence_issues": len(coherence_issues),
+        })
+    except Exception:
+        logger.debug("Heartbeat update skipped (reviewer pipeline)", exc_info=True)
+
+    # Update grant status to "reviewed"
+    try:
+        await grants_scored().update_one(
+            {"_id": ObjectId(grant_id)},
+            {"$set": {"status": "reviewed"}},
+        )
+    except Exception as e:
+        logger.warning("dual_reviewer_node: failed to update grant status: %s", e)
+
+    # Build reviewer_output — backward-compatible shape + full triple review
+    reviewer_output = {
+        "overall_score": combined_score,
+        "ready_for_export": ready,
+        "summary": f"Funder: {funder_result.get('summary', '')} | Scientific: {scientific_result.get('summary', '')}",
+        "funder": funder_result,
+        "scientific": scientific_result,
+        "coherence": coherence_result,
+        "web_research_used": bool(any(research.values())),
+    }
+
+    audit_entry = {
+        "node": "reviewer",
+        "ts": now,
+        "funder_score": funder_score,
+        "scientific_score": scientific_score,
+        "coherence_score": coherence_score,
+        "combined_score": combined_score,
+        "funder_verdict": funder_result.get("verdict", ""),
+        "scientific_verdict": scientific_result.get("verdict", ""),
+        "ready_for_export": ready,
+        "web_research_used": bool(any(research.values())),
+    }
+
+    return {
+        "reviewer_output": reviewer_output,
+        "audit_log": state.get("audit_log", []) + [audit_entry],
     }
