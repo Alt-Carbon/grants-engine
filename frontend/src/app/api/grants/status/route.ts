@@ -11,6 +11,7 @@ const VALID_STATUSES = new Set([
   "pursuing",
   "drafting",
   "draft_complete",
+  "reviewed",
   "submitted",
   "won",
   "passed",
@@ -65,6 +66,18 @@ export async function POST(req: Request) {
         { error: "Grant not found" },
         { status: 404 }
       );
+    }
+
+    // When moving a grant back to a pre-drafting status, clean up stale
+    // grants_pipeline records so the drafter sidebar doesn't show it.
+    const preDraftStatuses = new Set(["triage", "pursue", "pursuing", "passed", "auto_pass", "human_passed", "hold"]);
+    if (preDraftStatuses.has(status)) {
+      await db
+        .collection("grants_pipeline")
+        .updateMany(
+          { grant_id: grant_id, status: { $in: ["drafting", "pending_interrupt"] } },
+          { $set: { status: "cancelled" } },
+        );
     }
 
     return Response.json({ ok: true, status });

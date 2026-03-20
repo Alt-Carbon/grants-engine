@@ -132,7 +132,7 @@ export function PipelineTable({
       );
     if (statusFilter === "submitted")
       return allGrants.filter((g) =>
-        ["draft_complete", "submitted", "won"].includes(g.status)
+        ["draft_complete", "reviewed", "submitted", "won"].includes(g.status)
       );
     if (statusFilter === "hold")
       return allGrants.filter((g) => g.status === "hold");
@@ -210,7 +210,7 @@ export function PipelineTable({
           ? "pursue"
           : g.status === "hold"
           ? "hold"
-          : ["draft_complete", "submitted", "won"].includes(g.status)
+          : ["draft_complete", "reviewed", "submitted", "won"].includes(g.status)
           ? "submitted"
           : ["passed", "auto_pass", "human_passed", "reported", "guardrail_rejected"].includes(
               g.status

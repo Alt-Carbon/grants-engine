@@ -418,7 +418,7 @@ _VALID_TRIAGE_DECISIONS = {"pursue", "watch", "pass"}
 _VALID_REVIEW_ACTIONS = {"approve", "revise"}
 _VALID_STATUSES = {
     "triage", "pursue", "pursuing", "watch", "drafting",
-    "draft_complete", "submitted", "won", "passed", "auto_pass",
+    "draft_complete", "reviewed", "submitted", "won", "passed", "auto_pass",
     "human_passed", "hold", "reported", "guardrail_rejected",
 }
 
@@ -3319,7 +3319,7 @@ async def pipeline_status():
                 {"$count": "n"},
             ],
             "drafting":  [{"$match": {"status": "drafting"}}, {"$count": "n"}],
-            "complete":  [{"$match": {"status": {"$in": ["draft_complete", "submitted", "won"]}}}, {"$count": "n"}],
+            "complete":  [{"$match": {"status": {"$in": ["draft_complete", "reviewed", "submitted", "won"]}}}, {"$count": "n"}],
         }}
     ]
     result = await db["grants_scored"].aggregate(pipeline).to_list(1)
@@ -3614,7 +3614,7 @@ async def admin_notion_backfill(
 
 _VALID_STATUSES = {
     "triage", "pursue", "pursuing", "watch", "drafting",
-    "draft_complete", "submitted", "won", "passed", "auto_pass",
+    "draft_complete", "reviewed", "submitted", "won", "passed", "auto_pass",
     "human_passed", "hold", "reported",
 }
 
