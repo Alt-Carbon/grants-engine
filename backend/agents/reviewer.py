@@ -107,12 +107,12 @@ async def reviewer_node(state: GrantState) -> Dict:
         funder=grant.get("funder", ""),
         theme=theme_display,
         criteria=criteria_text,
-        draft=sections_text[:30000],
+        draft=sections_text[:15000],
         export_threshold=export_threshold,
     )
 
     try:
-        raw = await chat(prompt, model=DRAFTER_DEFAULT, max_tokens=2048)
+        raw = await chat(prompt, model=DRAFTER_DEFAULT, max_tokens=4096)
         raw = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]

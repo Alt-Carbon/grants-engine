@@ -336,12 +336,12 @@ async def _run_single_review(
         research_block=research_block,
         focus_areas=focus_areas,
         custom_instructions_block=custom_instructions_block,
-        draft=draft_text[:30000],
+        draft=draft_text[:15000],
         perspective_guidance=PERSPECTIVE_GUIDANCE.get(perspective, ""),
     )
 
     try:
-        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=3000, temperature=temperature)
+        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=4096, temperature=temperature)
         review = _parse_json_response(raw)
     except json.JSONDecodeError as e:
         logger.error("Review JSON parse failed (%s): %s", perspective, e)
@@ -411,11 +411,11 @@ async def _run_coherence_review(
     prompt = COHERENCE_PROMPT.format(
         grant_title=grant.get("title") or grant.get("grant_name") or "Untitled",
         funder=grant.get("funder") or "Unknown",
-        draft=draft_text[:30000],
+        draft=draft_text[:15000],
     )
 
     try:
-        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=2000, temperature=0.2)
+        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=3000, temperature=0.2)
         result = _parse_json_response(raw)
     except json.JSONDecodeError as e:
         logger.error("Coherence review JSON parse failed: %s", e)
