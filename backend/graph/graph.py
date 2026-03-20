@@ -5,7 +5,8 @@ Graph structure:
        → notify_triage → [INTERRUPT: human_triage]
        → company_brain → grant_reader → draft_guardrail
        → [INTERRUPT: drafter] (loops per section)
-       → reviewer → export → END
+       → export → reviewer (dual: funder + scientific + coherence w/ web research)
+       → END
 
   [watch/pass/guardrail_rejected] → pipeline_update → END
 """
@@ -24,7 +25,7 @@ from backend.agents.drafter.drafter_node import drafter_node
 from backend.agents.drafter.exporter import exporter_node
 from backend.agents.drafter.draft_guardrail import draft_guardrail_node
 from backend.agents.drafter.grant_reader import grant_reader_node
-from backend.agents.reviewer import reviewer_node
+from backend.agents.dual_reviewer import dual_reviewer_node
 from backend.agents.scout import scout_node
 from backend.graph.checkpointer import MongoCheckpointSaver
 from backend.graph.router import route_after_drafter, route_after_guardrail, route_triage
@@ -108,7 +109,7 @@ def build_graph() -> StateGraph:
     builder.add_node("grant_reader", grant_reader_node)
     builder.add_node("draft_guardrail", draft_guardrail_node)
     builder.add_node("drafter", drafter_node)
-    builder.add_node("reviewer", reviewer_node)
+    builder.add_node("reviewer", dual_reviewer_node)
     builder.add_node("export", exporter_node)
     builder.add_node("pipeline_update", pipeline_update_node)
 
@@ -143,20 +144,21 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # Gate 2: drafter loops until all sections approved, then goes to reviewer.
+    # Gate 2: drafter loops until all sections approved, then goes to export.
     # "pipeline_update" is a safety valve for empty-sections edge case.
     builder.add_conditional_edges(
         "drafter",
         route_after_drafter,
         {
             "drafter": "drafter",
-            "reviewer": "reviewer",
+            "export": "export",
             "pipeline_update": "pipeline_update",
         },
     )
 
-    builder.add_edge("reviewer", "export")
-    builder.add_edge("export", END)
+    # Export saves draft to MongoDB first, then dual reviewer runs with full context
+    builder.add_edge("export", "reviewer")
+    builder.add_edge("reviewer", END)
     builder.add_edge("pipeline_update", END)
 
     return builder
