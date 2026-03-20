@@ -3242,6 +3242,127 @@ async def get_reviews(grant_id: str, _: None = Depends(verify_internal)):
     return result
 
 
+# ── Apply Reviewer Suggestions ────────────────────────────────────────────────
+
+class ApplySuggestionsRequest(BaseModel):
+    grant_id: str
+    accepted: Dict[str, Dict[str, List[str]]]  # {perspective: {section: [suggestion_text, ...]}}
+
+
+@app.post("/review/apply-suggestions")
+async def apply_suggestions(body: ApplySuggestionsRequest, _: None = Depends(verify_internal)):
+    """Apply accepted reviewer suggestions to the draft, producing a new version.
+
+    For each section that has accepted suggestions, the LLM rewrites that section
+    incorporating only the accepted fixes. Untouched sections are kept as-is.
+    Saves the result as a new draft version.
+    """
+    from backend.db.mongo import grant_drafts, grants_scored
+    from backend.utils.llm import chat, ANALYST_HEAVY
+    from bson import ObjectId
+
+    # Load grant
+    grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)})
+    if not grant:
+        raise HTTPException(404, f"Grant {body.grant_id} not found")
+
+    # Load latest draft
+    draft_doc = await grant_drafts().find_one(
+        {"grant_id": body.grant_id},
+        sort=[("version", -1)],
+    )
+    if not draft_doc:
+        raise HTTPException(404, f"No draft found for grant {body.grant_id}")
+
+    sections = draft_doc.get("sections", {})
+    old_version = draft_doc.get("version", 0)
+
+    # Flatten accepted suggestions: merge all perspectives per section
+    # Coherence fixes may reference compound keys like "section_a+section_b"
+    section_suggestions: Dict[str, List[str]] = {}
+    for _perspective, sec_map in body.accepted.items():
+        for sec_name, suggestions in sec_map.items():
+            if not suggestions:
+                continue
+            if "+" in sec_name:
+                # Coherence fix spans multiple sections — apply to each
+                for part in sec_name.split("+"):
+                    part = part.strip()
+                    if part:
+                        section_suggestions.setdefault(part, []).extend(suggestions)
+            else:
+                section_suggestions.setdefault(sec_name, []).extend(suggestions)
+
+    if not section_suggestions:
+        raise HTTPException(400, "No suggestions selected")
+
+    grant_title = grant.get("title") or grant.get("grant_name") or "Untitled"
+
+    # Revise each section that has accepted suggestions (in parallel)
+    async def _revise_section(sec_name: str, suggestions: List[str]) -> tuple:
+        current = sections.get(sec_name, {})
+        content = current.get("content", "")
+        if not content:
+            return sec_name, current
+
+        suggestions_text = "\n".join(f"- {s}" for s in suggestions)
+        prompt = (
+            f"You are revising a section of a grant application for '{grant_title}'.\n\n"
+            f"SECTION: {sec_name.replace('_', ' ')}\n\n"
+            f"CURRENT CONTENT:\n{content}\n\n"
+            f"ACCEPTED SUGGESTIONS TO APPLY:\n{suggestions_text}\n\n"
+            "Rewrite the section incorporating ALL the suggestions above. "
+            "Keep the same structure, tone, and approximate length. "
+            "Do NOT add new information beyond what the suggestions ask for. "
+            "Do NOT include any preamble or meta-commentary — output ONLY the revised section content."
+        )
+
+        try:
+            revised = await chat(prompt, model=ANALYST_HEAVY, max_tokens=4096, temperature=0.2)
+            revised = revised.strip()
+            new_sec = {**current, "content": revised, "revision_count": current.get("revision_count", 0) + 1}
+            new_sec["word_count"] = len(revised.split())
+            return sec_name, new_sec
+        except Exception as e:
+            logger.error("Failed to revise section %s: %s", sec_name, e)
+            return sec_name, current
+
+    tasks = [_revise_section(name, sugs) for name, sugs in section_suggestions.items()]
+    results = await asyncio.gather(*tasks)
+
+    # Build new sections dict — start from existing, overlay revised ones
+    new_sections = {**sections}
+    revised_names = []
+    for sec_name, new_sec in results:
+        if new_sec.get("content") != sections.get(sec_name, {}).get("content"):
+            revised_names.append(sec_name)
+        new_sections[sec_name] = new_sec
+
+    # Save as new version
+    new_version = old_version + 1
+    new_draft = {
+        "grant_id": body.grant_id,
+        "version": new_version,
+        "sections": new_sections,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source": "reviewer_suggestions",
+        "applied_suggestions": section_suggestions,
+    }
+    await grant_drafts().insert_one(new_draft)
+
+    logger.info(
+        "Applied reviewer suggestions for '%s': %d sections revised, new draft v%d",
+        grant_title, len(revised_names), new_version,
+    )
+
+    return {
+        "status": "applied",
+        "grant_id": body.grant_id,
+        "new_version": new_version,
+        "revised_sections": revised_names,
+    }
+
+
 # ── Feedback Learning endpoints ───────────────────────────────────────────────
 
 class RecordOutcomeRequest(BaseModel):

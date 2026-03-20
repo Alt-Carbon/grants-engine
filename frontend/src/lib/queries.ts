@@ -1021,6 +1021,26 @@ export interface DraftReview {
   created_at: string;
 }
 
+export interface CoherenceIssue {
+  type: "contradiction" | "budget_mismatch" | "unsupported_claim" | "repetition" | "missing_thread";
+  sections_involved: string[];
+  description: string;
+  fix: string;
+}
+
+export interface CoherenceReview {
+  _id: string;
+  grant_id: string;
+  draft_id: string;
+  draft_version: number;
+  perspective: "coherence";
+  coherence_score: number;
+  narrative_consistent: boolean;
+  issues: CoherenceIssue[];
+  overall_assessment: string;
+  created_at: string;
+}
+
 export async function getReviewableGrants(): Promise<Grant[]> {
   const db = await getDb();
   const docs = await db
@@ -1037,7 +1057,11 @@ export async function getReviewableGrants(): Promise<Grant[]> {
   });
 }
 
-export async function getReviewsForGrant(grantId: string): Promise<{ funder: DraftReview | null; scientific: DraftReview | null }> {
+export async function getReviewsForGrant(grantId: string): Promise<{
+  funder: DraftReview | null;
+  scientific: DraftReview | null;
+  coherence: CoherenceReview | null;
+}> {
   const db = await getDb();
   const docs = await db
     .collection("draft_reviews")
@@ -1046,11 +1070,16 @@ export async function getReviewsForGrant(grantId: string): Promise<{ funder: Dra
     .limit(10)
     .toArray();
 
-  const result: { funder: DraftReview | null; scientific: DraftReview | null } = { funder: null, scientific: null };
+  const result: { funder: DraftReview | null; scientific: DraftReview | null; coherence: CoherenceReview | null } = {
+    funder: null,
+    scientific: null,
+    coherence: null,
+  };
   for (const doc of docs) {
-    const r = serializeId(doc as Record<string, unknown>) as unknown as DraftReview;
-    if (r.perspective === "funder" && !result.funder) result.funder = r;
-    if (r.perspective === "scientific" && !result.scientific) result.scientific = r;
+    const r = serializeId(doc as Record<string, unknown>) as unknown as DraftReview & CoherenceReview;
+    if (r.perspective === "funder" && !result.funder) result.funder = r as DraftReview;
+    if (r.perspective === "scientific" && !result.scientific) result.scientific = r as DraftReview;
+    if (r.perspective === "coherence" && !result.coherence) result.coherence = r as unknown as CoherenceReview;
   }
   return result;
 }
