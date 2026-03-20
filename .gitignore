@@ -43,7 +43,7 @@ out/
 *.xlsx
 *.csv
 output/
-draft/
+/draft/
 
 # ── OS / editor ─────────────────────────────────────────────
 .DS_Store
