@@ -468,6 +468,15 @@ class StartDraftRequest(BaseModel):
     override_reason: Optional[str] = Field(default=None, max_length=1000)
 
 
+class ReplayGrantRequest(BaseModel):
+    """Reset an existing grant so the full workflow can be re-tested."""
+    grant_id: str
+    reset_to: str = "triage"  # "triage" | "pursue" | "drafting"
+    clear_drafts: bool = True
+    clear_reviews: bool = True
+    override_guardrails: bool = False
+
+
 class DrafterChatRequest(BaseModel):
     grant_id: str
     section_name: str
@@ -3031,6 +3040,128 @@ async def start_draft(
 
     background_tasks.add_task(_run_draft)
     return {"status": "draft_started", "thread_id": thread_id, "pipeline_id": pipeline_id}
+
+
+# ── Replay / Re-test endpoint ─────────────────────────────────────────────────
+
+@app.post("/grants/replay")
+async def replay_grant(
+    body: ReplayGrantRequest,
+    background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
+):
+    """Reset an existing grant to re-test the workflow from a chosen stage.
+
+    Cleans up old pipeline records, drafts, reviews, and graph checkpoints
+    so the grant can go through the pipeline again cleanly.
+
+    reset_to options:
+      - "triage"   → grant goes back to triage queue (full flow)
+      - "pursue"   → skips triage, ready for Start Draft
+      - "drafting"  → cleans old drafts and immediately starts a new draft
+    """
+    from backend.db.mongo import (
+        grants_scored, grants_pipeline, grant_drafts,
+        draft_reviews, graph_checkpoints, audit_logs,
+    )
+    from bson import ObjectId
+
+    valid_reset_targets = {"triage", "pursue", "drafting"}
+    if body.reset_to not in valid_reset_targets:
+        raise HTTPException(
+            status_code=400,
+            detail=f"reset_to must be one of {valid_reset_targets}",
+        )
+
+    # Verify grant exists
+    try:
+        grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid grant_id")
+    if not grant:
+        raise HTTPException(status_code=404, detail="Grant not found in grants_scored")
+
+    grant_title = grant.get("title") or grant.get("grant_name") or "Unknown"
+    cleaned = []
+
+    # ── Clean up old pipeline records ─────────────────────────────────────────
+    old_pipelines = await grants_pipeline().find(
+        {"grant_id": body.grant_id}
+    ).to_list(100)
+
+    old_thread_ids = [p.get("thread_id") for p in old_pipelines if p.get("thread_id")]
+
+    if old_pipelines:
+        result = await grants_pipeline().delete_many({"grant_id": body.grant_id})
+        cleaned.append(f"pipeline_records: {result.deleted_count}")
+
+    # ── Clean up graph checkpoints for old threads ────────────────────────────
+    if old_thread_ids:
+        result = await graph_checkpoints().delete_many(
+            {"thread_id": {"$in": old_thread_ids}}
+        )
+        cleaned.append(f"graph_checkpoints: {result.deleted_count}")
+
+    # ── Clean up drafts ───────────────────────────────────────────────────────
+    if body.clear_drafts:
+        # Delete by grant_id or by pipeline_id references
+        old_pipeline_ids = [str(p["_id"]) for p in old_pipelines]
+        query = {"$or": [
+            {"grant_id": body.grant_id},
+            {"pipeline_id": {"$in": old_pipeline_ids}},
+        ]} if old_pipeline_ids else {"grant_id": body.grant_id}
+        result = await grant_drafts().delete_many(query)
+        cleaned.append(f"drafts: {result.deleted_count}")
+
+    # ── Clean up reviews ──────────────────────────────────────────────────────
+    if body.clear_reviews:
+        result = await draft_reviews().delete_many({"grant_id": body.grant_id})
+        cleaned.append(f"reviews: {result.deleted_count}")
+
+    # ── Reset grant status ────────────────────────────────────────────────────
+    new_status = body.reset_to if body.reset_to != "drafting" else "pursue"
+    await grants_scored().update_one(
+        {"_id": ObjectId(body.grant_id)},
+        {"$set": {
+            "status": new_status,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    cleaned.append(f"status: {grant.get('status')} → {new_status}")
+
+    # ── Audit log ─────────────────────────────────────────────────────────────
+    await audit_logs().insert_one({
+        "node": "replay",
+        "action": "grant_replay",
+        "grant_id": body.grant_id,
+        "grant_name": grant_title,
+        "reset_to": body.reset_to,
+        "cleaned": cleaned,
+        "user_email": user_email,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    logger.info("replay: grant %s (%s) reset to '%s' — cleaned: %s",
+                body.grant_id, grant_title, body.reset_to, cleaned)
+
+    # ── If reset_to == "drafting", auto-start a new draft ─────────────────────
+    if body.reset_to == "drafting":
+        # Re-use the start_draft logic
+        draft_body = StartDraftRequest(
+            grant_id=body.grant_id,
+            override_guardrails=body.override_guardrails,
+            override_reason=f"Replay: re-testing workflow (by {user_email})",
+        )
+        return await start_draft(draft_body, background_tasks, _, user_email)
+
+    return {
+        "status": "grant_reset",
+        "grant_id": body.grant_id,
+        "grant_title": grant_title,
+        "reset_to": body.reset_to,
+        "cleaned": cleaned,
+    }
 
 
 # ── Dual Reviewer endpoints ───────────────────────────────────────────────────

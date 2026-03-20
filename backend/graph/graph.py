@@ -53,10 +53,26 @@ async def pipeline_update_node(state: GrantState) -> Dict:
 
     # Determine status: guardrail rejection takes precedence over triage decision
     guardrail_result = state.get("draft_guardrail_result")
-    if guardrail_result and not guardrail_result.get("passed", True):
+    if guardrail_result and not guardrail_result.get("passed", False):
         decision = "guardrail_rejected"
     else:
         decision = state.get("human_triage_decision", "pass")
+
+    # "pursue" never reaches pipeline_update in normal triage flow (it routes
+    # to company_brain instead).  The only way we arrive here with "pursue" is
+    # via the drafter empty-sections fallback or a similar edge case *after*
+    # start_draft already set grants_scored.status to "drafting".  Overwriting
+    # with "pursue" would revert the status — skip the DB update in this case.
+    if decision == "pursue":
+        logger.info("pipeline_update: skipping status update (decision=pursue, grant already in drafting state)")
+        return {
+            "audit_log": state.get("audit_log", []) + [{
+                "node": "pipeline_update",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "action": "skipped_pursue",
+                "reason": "grant already advanced past triage",
+            }]
+        }
 
     if grant_id:
         try:

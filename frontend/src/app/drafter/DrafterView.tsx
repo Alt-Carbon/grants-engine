@@ -36,6 +36,7 @@ import {
   ExternalLink,
   Target,
   Info,
+  Menu,
 } from "lucide-react";
 import { DrafterSettings } from "@/components/DrafterSettings";
 
@@ -564,6 +565,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const [grantIntelOpen, setGrantIntelOpen] = useState(true);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [grantData, setGrantData] = useState<Record<string, any>>({});
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1440,8 +1442,29 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   // =========================================================================
   return (
     <div className="relative flex h-full overflow-hidden">
+      {/* Mobile sidebar toggle */}
+      <button
+        onClick={() => setMobileSidebarOpen(true)}
+        className="fixed bottom-4 left-4 z-30 flex items-center gap-2 rounded-full bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg lg:hidden"
+      >
+        <Menu className="h-4 w-4" />
+        Sections
+      </button>
+
+      {/* Mobile overlay */}
+      {mobileSidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/40 lg:hidden"
+          onClick={() => setMobileSidebarOpen(false)}
+        />
+      )}
+
       {/* ---- LEFT SIDEBAR ------------------------------------------------ */}
-      <div className="flex w-[280px] shrink-0 flex-col border-r border-gray-200 bg-white shadow-sm">
+      <div
+        className={`fixed inset-y-0 left-0 z-50 flex w-[280px] flex-col border-r border-gray-200 bg-white shadow-sm transition-transform duration-200 lg:static lg:shrink-0 lg:translate-x-0 ${
+          mobileSidebarOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
         {/* Header */}
         <div className="border-b border-gray-100 px-4 py-3">
           <div className="flex items-center justify-between">
@@ -1704,6 +1727,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                     if (!isEditing) {
                       setActiveTileId(tile.id);
                       setError(null);
+                      setMobileSidebarOpen(false);
                     }
                   }}
                 >
