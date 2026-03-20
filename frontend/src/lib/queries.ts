@@ -110,7 +110,7 @@ export async function getDashboardStats() {
           complete: [
             {
               $match: {
-                status: { $in: ["draft_complete", "submitted", "won"] },
+                status: { $in: ["draft_complete", "reviewed", "submitted", "won"] },
               },
             },
             { $count: "n" },
@@ -217,7 +217,7 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
     else if (g.status === "pursue" || g.status === "pursuing") grouped.pursue.push(g);
     else if (g.status === "hold") grouped.hold.push(g);
     else if (g.status === "drafting") grouped.drafting.push(g);
-    else if (g.status === "draft_complete" || g.status === "submitted" || g.status === "won")
+    else if (g.status === "draft_complete" || g.status === "reviewed" || g.status === "submitted" || g.status === "won")
       grouped.submitted.push(g);
     else if (g.status === "passed" || g.status === "auto_pass" || g.status === "human_passed" || g.status === "reported" || g.status === "guardrail_rejected")
       grouped.rejected.push(g);
@@ -774,7 +774,7 @@ export async function getPipelineSummary(): Promise<PipelineSummary> {
             submitted: [
               {
                 $match: {
-                  status: { $in: ["draft_complete", "submitted", "won"] },
+                  status: { $in: ["draft_complete", "reviewed", "submitted", "won"] },
                 },
               },
               { $count: "n" },
@@ -1025,7 +1025,7 @@ export async function getReviewableGrants(): Promise<Grant[]> {
   const db = await getDb();
   const docs = await db
     .collection("grants_scored")
-    .find({ status: { $in: ["draft_complete", "submitted", "won"] } })
+    .find({ status: { $in: ["draft_complete", "reviewed", "submitted", "won"] } })
     .sort({ scored_at: -1 })
     .limit(100)
     .toArray();

@@ -124,6 +124,7 @@ function statusToColumn(status: string): ColumnId {
   if (
     status === "submitted" ||
     status === "draft_complete" ||
+    status === "reviewed" ||
     status === "won"
   )
     return "submitted";
