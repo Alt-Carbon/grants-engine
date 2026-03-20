@@ -34,6 +34,9 @@ import {
   RotateCcw,
   ShieldCheck,
   Type,
+  History,
+  GitCompare,
+  X,
 } from "lucide-react";
 import { ReviewerSettingsPanel } from "@/components/ReviewerSettingsPanel";
 import { fetchDraftContent, generateDraftPdf, downloadDraftMarkdown } from "@/lib/generateDraftPdf";
@@ -821,6 +824,323 @@ function WritingQualityPanel({
   );
 }
 
+// ── Types for Version History & Diff ────────────────────────────────────────
+
+interface VersionMeta {
+  version: number;
+  created_at: string;
+  source: string;
+  applied_suggestions: Record<string, string[]>;
+  section_count: number | null;
+}
+
+interface SectionDiff {
+  changed: boolean;
+  old_content?: string;
+  new_content?: string;
+  old_word_count?: number;
+  new_word_count?: number;
+  diff?: string;
+}
+
+interface DiffData {
+  grant_id: string;
+  v1: number;
+  v2: number;
+  sections: Record<string, SectionDiff>;
+}
+
+// ── Inline Diff Renderer ────────────────────────────────────────────────────
+
+function InlineDiffView({ oldText, newText }: { oldText: string; newText: string }) {
+  // Simple word-level diff highlighting
+  const oldWords = oldText.split(/(\s+)/);
+  const newWords = newText.split(/(\s+)/);
+
+  // LCS-based word diff (simplified)
+  const result: { text: string; type: "same" | "added" | "removed" }[] = [];
+  let oi = 0, ni = 0;
+  while (oi < oldWords.length && ni < newWords.length) {
+    if (oldWords[oi] === newWords[ni]) {
+      result.push({ text: oldWords[oi], type: "same" });
+      oi++; ni++;
+    } else {
+      // Look ahead to find next match
+      let foundOld = -1, foundNew = -1;
+      for (let k = 1; k < 20; k++) {
+        if (foundNew === -1 && ni + k < newWords.length && oldWords[oi] === newWords[ni + k]) foundNew = ni + k;
+        if (foundOld === -1 && oi + k < oldWords.length && oldWords[oi + k] === newWords[ni]) foundOld = oi + k;
+        if (foundOld !== -1 || foundNew !== -1) break;
+      }
+      if (foundOld !== -1 && (foundNew === -1 || foundOld - oi <= foundNew - ni)) {
+        while (oi < foundOld) { result.push({ text: oldWords[oi++], type: "removed" }); }
+      } else if (foundNew !== -1) {
+        while (ni < foundNew) { result.push({ text: newWords[ni++], type: "added" }); }
+      } else {
+        result.push({ text: oldWords[oi++], type: "removed" });
+        result.push({ text: newWords[ni++], type: "added" });
+      }
+    }
+  }
+  while (oi < oldWords.length) result.push({ text: oldWords[oi++], type: "removed" });
+  while (ni < newWords.length) result.push({ text: newWords[ni++], type: "added" });
+
+  return (
+    <p className="text-sm leading-relaxed whitespace-pre-wrap">
+      {result.map((r, i) => (
+        <span
+          key={i}
+          className={
+            r.type === "added"
+              ? "bg-emerald-100 text-emerald-900"
+              : r.type === "removed"
+              ? "bg-red-100 text-red-900 line-through"
+              : ""
+          }
+        >
+          {r.text}
+        </span>
+      ))}
+    </p>
+  );
+}
+
+// ── Diff Modal ──────────────────────────────────────────────────────────────
+
+function DiffModal({
+  diff,
+  onClose,
+}: {
+  diff: DiffData;
+  onClose: () => void;
+}) {
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(
+    () => new Set(Object.entries(diff.sections).filter(([, d]) => d.changed).map(([k]) => k))
+  );
+
+  const changedCount = Object.values(diff.sections).filter((d) => d.changed).length;
+  const totalSections = Object.keys(diff.sections).length;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-8 pb-8 overflow-y-auto">
+      <div className="fixed inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative z-10 w-full max-w-4xl rounded-2xl border border-gray-200 bg-white shadow-2xl mx-4">
+        {/* Header */}
+        <div className="sticky top-0 z-10 flex items-center justify-between rounded-t-2xl border-b border-gray-200 bg-white px-6 py-4">
+          <div className="flex items-center gap-3">
+            <GitCompare className="h-5 w-5 text-purple-600" />
+            <div>
+              <h2 className="text-base font-bold text-gray-900">
+                Diff: v{diff.v1} → v{diff.v2}
+              </h2>
+              <p className="text-xs text-gray-500">
+                {changedCount} of {totalSections} sections changed
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="px-6 py-4 space-y-3 max-h-[70vh] overflow-y-auto">
+          {Object.entries(diff.sections).map(([secName, secDiff]) => {
+            const isExpanded = expandedSections.has(secName);
+            return (
+              <div key={secName} className={`rounded-lg border ${secDiff.changed ? "border-purple-200" : "border-gray-100"}`}>
+                <button
+                  onClick={() => {
+                    setExpandedSections((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(secName)) next.delete(secName);
+                      else next.add(secName);
+                      return next;
+                    });
+                  }}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors"
+                >
+                  <span className={`h-2 w-2 rounded-full ${secDiff.changed ? "bg-purple-500" : "bg-gray-300"}`} />
+                  <span className="flex-1 text-sm font-medium text-gray-800">
+                    {secName.replace(/_/g, " ")}
+                  </span>
+                  {secDiff.changed ? (
+                    <div className="flex items-center gap-3 text-xs">
+                      {secDiff.old_word_count !== secDiff.new_word_count && (
+                        <span className={`font-medium ${(secDiff.new_word_count ?? 0) > (secDiff.old_word_count ?? 0) ? "text-emerald-600" : "text-red-600"}`}>
+                          {(secDiff.new_word_count ?? 0) - (secDiff.old_word_count ?? 0) > 0 ? "+" : ""}
+                          {(secDiff.new_word_count ?? 0) - (secDiff.old_word_count ?? 0)} words
+                        </span>
+                      )}
+                      <span className="text-purple-600 font-semibold">Modified</span>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-gray-400">Unchanged</span>
+                  )}
+                  {isExpanded ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+                </button>
+                {isExpanded && secDiff.changed && secDiff.old_content != null && secDiff.new_content != null && (
+                  <div className="border-t border-gray-100 px-4 py-3">
+                    <InlineDiffView oldText={secDiff.old_content} newText={secDiff.new_content} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Version History Panel ───────────────────────────────────────────────────
+
+function VersionHistoryPanel({
+  grantId,
+  currentVersion,
+}: {
+  grantId: string;
+  currentVersion?: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [versions, setVersions] = useState<VersionMeta[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [diffData, setDiffData] = useState<DiffData | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+
+  const fetchVersions = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/draft/${grantId}/versions`);
+      if (res.ok) {
+        const data = await res.json();
+        setVersions(data.versions || []);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [grantId]);
+
+  useEffect(() => {
+    if (open && versions.length === 0) fetchVersions();
+  }, [open, fetchVersions, versions.length]);
+
+  const loadDiff = useCallback(async (v1: number, v2: number) => {
+    setDiffLoading(true);
+    try {
+      const res = await fetch(`/api/draft/${grantId}/diff?v1=${v1}&v2=${v2}`);
+      if (res.ok) {
+        const data = await res.json();
+        setDiffData(data);
+      }
+    } finally {
+      setDiffLoading(false);
+    }
+  }, [grantId]);
+
+  const SOURCE_LABELS: Record<string, string> = {
+    drafter: "AI Drafter",
+    reviewer_suggestions: "Reviewer Apply",
+    manual: "Manual Edit",
+  };
+
+  return (
+    <div className="mt-4 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-3 px-5 py-4 text-left hover:bg-gray-50 transition-colors"
+      >
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-100">
+          <History className="h-5 w-5 text-gray-600" />
+        </div>
+        <div className="flex-1">
+          <h3 className="text-sm font-bold text-gray-900">Draft Version History</h3>
+          <p className="text-[11px] text-gray-400">
+            {versions.length > 0
+              ? `${versions.length} version${versions.length !== 1 ? "s" : ""} — current: v${currentVersion ?? versions[0]?.version ?? "?"}`
+              : "View and compare draft revisions"}
+          </p>
+        </div>
+        {open ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+      </button>
+
+      {open && (
+        <div className="border-t border-gray-100 px-5 py-4">
+          {loading ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader2 className="h-5 w-5 animate-spin text-gray-400" />
+            </div>
+          ) : versions.length === 0 ? (
+            <p className="text-sm text-gray-400 italic py-4">No draft versions found.</p>
+          ) : (
+            <div className="space-y-2">
+              {versions.map((v, idx) => {
+                const prevVersion = versions[idx + 1];
+                const sugSections = Object.keys(v.applied_suggestions || {});
+                return (
+                  <div
+                    key={v.version}
+                    className={`rounded-lg border p-3 ${
+                      v.version === currentVersion
+                        ? "border-purple-200 bg-purple-50"
+                        : "border-gray-100 bg-gray-50"
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold text-white ${
+                        v.version === currentVersion ? "bg-purple-600" : "bg-gray-400"
+                      }`}>
+                        v{v.version}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-800">
+                          {SOURCE_LABELS[v.source] || v.source}
+                          {v.version === currentVersion && (
+                            <span className="ml-2 text-[10px] text-purple-600 font-semibold">(current)</span>
+                          )}
+                        </p>
+                        <p className="text-[11px] text-gray-400">
+                          {v.created_at ? new Date(v.created_at).toLocaleString() : "Unknown date"}
+                        </p>
+                      </div>
+                      {prevVersion && (
+                        <button
+                          onClick={() => loadDiff(prevVersion.version, v.version)}
+                          disabled={diffLoading}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 px-2.5 py-1.5 text-[11px] font-medium text-gray-600 hover:bg-white hover:text-purple-600 hover:border-purple-200 transition-colors disabled:opacity-50"
+                          title={`Compare v${prevVersion.version} → v${v.version}`}
+                        >
+                          {diffLoading ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <GitCompare className="h-3 w-3" />
+                          )}
+                          Diff
+                        </button>
+                      )}
+                    </div>
+                    {sugSections.length > 0 && (
+                      <p className="mt-1.5 text-[10px] text-gray-500 ml-10">
+                        Applied to: {sugSections.map((s) => s.replace(/_/g, " ")).join(", ")}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Diff modal */}
+      {diffData && <DiffModal diff={diffData} onClose={() => setDiffData(null)} />}
+    </div>
+  );
+}
+
 // ── Apply Progress ──────────────────────────────────────────────────────────
 
 function ApplyProgress({ sections }: { sections: string[] }) {
@@ -864,6 +1184,10 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
 
   // Track user edits to suggestion text: maps original key -> edited text
   const [editedSuggestions, setEditedSuggestions] = useState<Map<string, string>>(new Map());
+
+  // Post-apply diff view
+  const [showDiffAfterApply, setShowDiffAfterApply] = useState(false);
+  const [postApplyDiff, setPostApplyDiff] = useState<DiffData | null>(null);
 
   const fetchReviews = useCallback(async (grantId: string) => {
     setLoading(true);
@@ -1066,12 +1390,28 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
     }
   }, [selectedId, acceptedSuggestions, editedSuggestions]);
 
+  // Load diff when "View Changes" is clicked after apply
+  useEffect(() => {
+    if (!showDiffAfterApply || !selectedId || !applyResult || applyResult.version <= 1) return;
+    setShowDiffAfterApply(false);
+    (async () => {
+      try {
+        const res = await fetch(`/api/draft/${selectedId}/diff?v1=${applyResult.version - 1}&v2=${applyResult.version}`);
+        if (res.ok) {
+          const data = await res.json();
+          setPostApplyDiff(data);
+        }
+      } catch { /* ignore */ }
+    })();
+  }, [showDiffAfterApply, selectedId, applyResult]);
+
   // Reset state when switching grants
   useEffect(() => {
     setAcceptedSuggestions(new Set());
     setEditedSuggestions(new Map());
     setApplyResult(null);
     setApplySections([]);
+    setPostApplyDiff(null);
   }, [selectedId]);
 
   const selectedGrant = grants.find((g) => g._id === selectedId);
@@ -1384,13 +1724,27 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
                             <p className="text-xs text-gray-500 mt-0.5">
                               Sections updated: {applyResult.sections.map((s) => s.replace(/_/g, " ")).join(", ")}
                             </p>
+                            <p className="text-[10px] text-emerald-600 mt-0.5">
+                              Synced to Notion
+                            </p>
                           </div>
                         </div>
-                        {/* Re-review prompt */}
-                        <div className="flex items-center gap-3 pt-2 border-t border-purple-200">
+                        {/* Action buttons */}
+                        <div className="flex items-center gap-3 pt-2 border-t border-purple-200 flex-wrap">
                           <p className="flex-1 text-xs text-purple-700">
                             Re-run the review to validate improvements on the revised draft.
                           </p>
+                          <button
+                            onClick={() => {
+                              if (selectedId && applyResult.version > 1) {
+                                setShowDiffAfterApply(true);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-purple-200 px-3 py-1.5 text-xs font-semibold text-purple-700 hover:bg-purple-100 transition-colors"
+                          >
+                            <GitCompare className="h-3.5 w-3.5" />
+                            View Changes
+                          </button>
                           <button
                             onClick={runReview}
                             disabled={runLoading}
@@ -1446,6 +1800,19 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
                   </div>
                 )}
               </>
+            )}
+
+            {/* Version History */}
+            {hasReviews && selectedId && (
+              <VersionHistoryPanel
+                grantId={selectedId}
+                currentVersion={applyResult?.version}
+              />
+            )}
+
+            {/* Post-apply diff modal */}
+            {postApplyDiff && (
+              <DiffModal diff={postApplyDiff} onClose={() => setPostApplyDiff(null)} />
             )}
 
             {/* Outcome Recorder */}

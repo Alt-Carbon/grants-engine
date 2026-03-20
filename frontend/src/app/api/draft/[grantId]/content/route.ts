@@ -32,7 +32,7 @@ export async function GET(
     if (!sections || Object.keys(sections).length === 0) {
       const draft = await db.collection("grant_drafts").findOne(
         { grant_id: grantId },
-        { sort: { created_at: -1 } }
+        { sort: { version: -1 } }
       );
       sections = draft?.sections;
     }
