@@ -238,6 +238,7 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
   const [error, setError] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mobileListOpen, setMobileListOpen] = useState(false);
 
   const fetchReviews = useCallback(async (grantId: string) => {
     setLoading(true);
@@ -314,51 +315,81 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
   const selectedGrant = grants.find((g) => g._id === selectedId);
   const hasReviews = reviews?.funder || reviews?.scientific;
 
+  const grantListContent = (
+    <>
+      <div className="px-4 py-3 border-b border-gray-200">
+        <h2 className="text-sm font-bold text-gray-900">Completed Drafts</h2>
+        <p className="text-[11px] text-gray-500 mt-0.5">
+          {grants.length} grant{grants.length !== 1 ? "s" : ""} ready for review
+        </p>
+      </div>
+      {grants.map((g) => (
+        <button
+          key={g._id}
+          onClick={() => {
+            setSelectedId(g._id);
+            setMobileListOpen(false);
+          }}
+          className={`flex w-full flex-col gap-1 border-b border-gray-100 px-4 py-3 text-left transition-colors ${
+            selectedId === g._id
+              ? "bg-white border-l-2 border-l-purple-600"
+              : "hover:bg-white"
+          }`}
+        >
+          <span className="text-sm font-medium text-gray-900 truncate">
+            {g.grant_name || g.title || "Untitled"}
+          </span>
+          <span className="text-[11px] text-gray-500 truncate">
+            {g.funder || "Unknown funder"}
+          </span>
+          {g.weighted_total != null && (
+            <span
+              className={`self-start rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                g.weighted_total >= 6.5
+                  ? "bg-green-100 text-green-800"
+                  : g.weighted_total >= 5
+                  ? "bg-amber-100 text-amber-800"
+                  : "bg-red-100 text-red-800"
+              }`}
+            >
+              Score: {g.weighted_total.toFixed(1)}
+            </span>
+          )}
+        </button>
+      ))}
+    </>
+  );
+
   return (
     <div className="flex flex-1 overflow-hidden">
-      {/* Left — Grant list */}
-      <div className="w-72 shrink-0 border-r border-gray-200 bg-gray-50 overflow-y-auto">
-        <div className="px-4 py-3 border-b border-gray-200">
-          <h2 className="text-sm font-bold text-gray-900">Completed Drafts</h2>
-          <p className="text-[11px] text-gray-500 mt-0.5">
-            {grants.length} grant{grants.length !== 1 ? "s" : ""} ready for review
-          </p>
-        </div>
-        {grants.map((g) => (
-          <button
-            key={g._id}
-            onClick={() => setSelectedId(g._id)}
-            className={`flex w-full flex-col gap-1 border-b border-gray-100 px-4 py-3 text-left transition-colors ${
-              selectedId === g._id
-                ? "bg-white border-l-2 border-l-purple-600"
-                : "hover:bg-white"
-            }`}
-          >
-            <span className="text-sm font-medium text-gray-900 truncate">
-              {g.grant_name || g.title || "Untitled"}
-            </span>
-            <span className="text-[11px] text-gray-500 truncate">
-              {g.funder || "Unknown funder"}
-            </span>
-            {g.weighted_total != null && (
-              <span
-                className={`self-start rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                  g.weighted_total >= 6.5
-                    ? "bg-green-100 text-green-800"
-                    : g.weighted_total >= 5
-                    ? "bg-amber-100 text-amber-800"
-                    : "bg-red-100 text-red-800"
-                }`}
-              >
-                Score: {g.weighted_total.toFixed(1)}
-              </span>
-            )}
-          </button>
-        ))}
+      {/* Mobile grant picker button */}
+      <button
+        onClick={() => setMobileListOpen(true)}
+        className="fixed bottom-4 left-4 z-30 flex items-center gap-2 rounded-full bg-purple-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg lg:hidden"
+      >
+        <PlayCircle className="h-4 w-4" />
+        {grants.find((g) => g._id === selectedId)?.grant_name?.slice(0, 20) || "Select Grant"}
+      </button>
+
+      {/* Mobile overlay */}
+      {mobileListOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/40 lg:hidden"
+          onClick={() => setMobileListOpen(false)}
+        />
+      )}
+
+      {/* Left — Grant list (desktop: static, mobile: slide-over) */}
+      <div
+        className={`fixed inset-y-0 left-0 z-50 w-72 border-r border-gray-200 bg-gray-50 overflow-y-auto transition-transform duration-200 lg:static lg:shrink-0 lg:translate-x-0 ${
+          mobileListOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        {grantListContent}
       </div>
 
       {/* Right — Review content */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
         {!selectedGrant ? (
           <div className="flex h-full items-center justify-center text-sm text-gray-400">
             Select a grant to view reviews
@@ -366,12 +397,12 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
         ) : (
           <div className="max-w-5xl mx-auto">
             {/* Header */}
-            <div className="flex items-start justify-between gap-4 mb-6">
-              <div>
-                <h1 className="text-xl font-bold text-gray-900">
+            <div className="flex flex-col gap-3 mb-6 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+              <div className="min-w-0">
+                <h1 className="text-lg font-bold text-gray-900 sm:text-xl truncate">
                   {selectedGrant.grant_name || selectedGrant.title}
                 </h1>
-                <p className="mt-1 text-sm text-gray-500">
+                <p className="mt-1 text-sm text-gray-500 truncate">
                   {selectedGrant.funder}
                 </p>
               </div>
@@ -422,7 +453,7 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
                 </p>
               </div>
             ) : (
-              <div className="flex gap-6">
+              <div className="flex flex-col gap-6 lg:flex-row">
                 {reviews?.funder && (
                   <ReviewPanel
                     review={reviews.funder}
