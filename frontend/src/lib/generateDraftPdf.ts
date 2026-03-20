@@ -238,7 +238,7 @@ export async function fetchDraftContent(
   grantId: string
 ): Promise<DraftContent | null> {
   try {
-    const res = await fetch(`/api/draft/${grantId}/content`);
+    const res = await fetch(`/api/draft/${grantId}/content`, { cache: "no-store" });
     if (!res.ok) return null;
     return (await res.json()) as DraftContent;
   } catch {
