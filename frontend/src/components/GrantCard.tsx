@@ -1,4 +1,4 @@
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Clock } from "lucide-react";
 import { DeadlineChip } from "./DeadlineChip";
 import { StatusPicker } from "./StatusPicker";
 import { ScoreBadge, PriorityBadge } from "./ScoreBadge";
@@ -27,6 +27,29 @@ function PassedLabel({ status }: { status: string }) {
       </span>
     );
   return null;
+}
+
+function MiniScoreBar({ score }: { score: number }) {
+  const pct = Math.min(100, (score / 10) * 100);
+  const color =
+    score >= 6.5
+      ? "bg-green-400"
+      : score >= 5.0
+      ? "bg-amber-400"
+      : "bg-red-400";
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className="h-1 flex-1 rounded-full bg-gray-100 overflow-hidden">
+        <div
+          className={`h-full rounded-full ${color} transition-all`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="text-[10px] font-bold text-gray-500 tabular-nums w-6 text-right">
+        {score.toFixed(1)}
+      </span>
+    </div>
+  );
 }
 
 export function GrantCard({
@@ -71,6 +94,9 @@ export function GrantCard({
         <p className="mt-1 truncate text-xs text-gray-500">{grant.funder}</p>
       )}
 
+      {/* Score progress bar — compact mode only */}
+      {compact && <div className="mt-1.5"><MiniScoreBar score={score} /></div>}
+
       {/* Theme badges */}
       {grant.themes_detected && grant.themes_detected.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1">
@@ -110,6 +136,13 @@ export function GrantCard({
             deadline={grant.deadline}
             daysLeft={grant.days_to_deadline}
           />
+        )}
+        {/* Compact deadline display when not urgent */}
+        {compact && !grant.deadline_urgent && grant.deadline && (
+          <span className="inline-flex items-center gap-0.5 rounded-full bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-500">
+            <Clock className="h-2.5 w-2.5" />
+            {grant.deadline}
+          </span>
         )}
         {grant.geography && (
           <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
