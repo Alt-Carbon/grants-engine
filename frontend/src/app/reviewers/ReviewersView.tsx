@@ -1,7 +1,12 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
-import type { Grant, DraftReview, SectionReview } from "@/lib/queries";
+import { useState, useCallback, useEffect, useRef } from "react";
+import type {
+  Grant, DraftReview, SectionReview,
+  CoherenceReview, CoherenceIssue,
+  ComplianceReview, ComplianceIssue,
+  WritingQualityReview,
+} from "@/lib/queries";
 import {
   PlayCircle,
   Loader2,
@@ -21,6 +26,14 @@ import {
   FileText,
   Globe,
   ExternalLink,
+  Wand2,
+  Square,
+  CheckSquare,
+  Link2,
+  Pencil,
+  RotateCcw,
+  ShieldCheck,
+  Type,
 } from "lucide-react";
 import { ReviewerSettingsPanel } from "@/components/ReviewerSettingsPanel";
 import { fetchDraftContent, generateDraftPdf, downloadDraftMarkdown } from "@/lib/generateDraftPdf";
@@ -46,10 +59,125 @@ const VERDICT_LABELS: Record<string, { label: string; color: string }> = {
   reconsider: { label: "Reconsider", color: "bg-red-100 text-red-800" },
 };
 
+const COHERENCE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
+  contradiction: { label: "Contradiction", color: "text-red-700 bg-red-50" },
+  budget_mismatch: { label: "Budget Mismatch", color: "text-orange-700 bg-orange-50" },
+  unsupported_claim: { label: "Unsupported Claim", color: "text-amber-700 bg-amber-50" },
+  repetition: { label: "Repetition", color: "text-blue-700 bg-blue-50" },
+  missing_thread: { label: "Missing Thread", color: "text-purple-700 bg-purple-50" },
+};
+
+/** Build the canonical key for a suggestion in the accepted set */
+function suggKey(perspective: string, section: string, suggestion: string) {
+  return `${perspective}::${section}::${suggestion}`;
+}
+
+// ── Editable Suggestion Item ─────────────────────────────────────────────────
+
+function EditableSuggestion({
+  text,
+  isAccepted,
+  onToggle,
+  onEdit,
+}: {
+  text: string;
+  isAccepted: boolean;
+  onToggle: () => void;
+  onEdit: (oldText: string, newText: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(text);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  const commitEdit = () => {
+    const trimmed = editValue.trim();
+    if (trimmed && trimmed !== text) {
+      onEdit(text, trimmed);
+    }
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="rounded-md border border-purple-300 bg-purple-50 p-2">
+        <textarea
+          ref={inputRef}
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitEdit(); }
+            if (e.key === "Escape") { setEditValue(text); setEditing(false); }
+          }}
+          rows={2}
+          className="w-full rounded border border-purple-200 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-purple-400 resize-none"
+        />
+        <p className="mt-1 text-[10px] text-purple-500">Enter to save, Esc to cancel</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group flex w-full items-start gap-1">
+      <button
+        type="button"
+        onClick={onToggle}
+        className={`flex flex-1 items-start gap-2 text-sm text-left rounded-md px-2 py-1.5 transition-colors ${
+          isAccepted
+            ? "bg-purple-50 text-purple-800 border border-purple-200"
+            : "text-gray-700 hover:bg-gray-50"
+        }`}
+      >
+        {isAccepted ? (
+          <CheckSquare className="mt-0.5 h-4 w-4 shrink-0 text-purple-600" />
+        ) : (
+          <Square className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" />
+        )}
+        <span className="flex-1">{text}</span>
+      </button>
+      <button
+        type="button"
+        onClick={() => { setEditValue(text); setEditing(true); }}
+        className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity rounded p-1 text-gray-400 hover:text-purple-600 hover:bg-purple-50"
+        title="Edit suggestion before applying"
+      >
+        <Pencil className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
+
 // ── Section Review Card ──────────────────────────────────────────────────────
 
-function SectionCard({ name, review }: { name: string; review: SectionReview }) {
+function SectionCard({
+  name,
+  review,
+  perspective,
+  acceptedSuggestions,
+  onToggleSuggestion,
+  onEditSuggestion,
+  onSelectAllSection,
+}: {
+  name: string;
+  review: SectionReview;
+  perspective: string;
+  acceptedSuggestions: Set<string>;
+  onToggleSuggestion: (perspective: string, section: string, suggestion: string) => void;
+  onEditSuggestion: (perspective: string, section: string, oldText: string, newText: string) => void;
+  onSelectAllSection: (perspective: string, section: string, suggestions: string[], select: boolean) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const sectionSuggestions = review.suggestions ?? [];
+  const acceptedCount = sectionSuggestions.filter((s) => acceptedSuggestions.has(suggKey(perspective, name, s))).length;
+  const allSelected = sectionSuggestions.length > 0 && acceptedCount === sectionSuggestions.length;
+
   return (
     <div className="rounded-lg border border-gray-200 bg-white">
       <button
@@ -66,6 +194,11 @@ function SectionCard({ name, review }: { name: string; review: SectionReview }) 
         <span className="flex-1 text-sm font-medium text-gray-800 truncate">
           {name.replace(/_/g, " ")}
         </span>
+        {acceptedCount > 0 && (
+          <span className="rounded-full bg-purple-100 text-purple-700 px-2 py-0.5 text-[10px] font-semibold">
+            {acceptedCount} accepted
+          </span>
+        )}
         {open ? (
           <ChevronUp className="h-4 w-4 text-gray-400" />
         ) : (
@@ -104,16 +237,29 @@ function SectionCard({ name, review }: { name: string; review: SectionReview }) 
               </ul>
             </div>
           )}
-          {review.suggestions?.length > 0 && (
+          {sectionSuggestions.length > 0 && (
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-600 mb-1">
-                Suggestions
-              </p>
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-600">
+                  Suggestions — click to accept
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onSelectAllSection(perspective, name, sectionSuggestions, !allSelected)}
+                  className="text-[10px] font-medium text-purple-600 hover:text-purple-800 transition-colors"
+                >
+                  {allSelected ? "Deselect All" : "Select All"}
+                </button>
+              </div>
               <ul className="space-y-1">
-                {review.suggestions.map((s, i) => (
-                  <li key={i} className="flex items-start gap-2 text-sm text-gray-700">
-                    <span className="mt-0.5 shrink-0 text-blue-500 font-bold">&rarr;</span>
-                    {s}
+                {sectionSuggestions.map((s, i) => (
+                  <li key={i}>
+                    <EditableSuggestion
+                      text={s}
+                      isAccepted={acceptedSuggestions.has(suggKey(perspective, name, s))}
+                      onToggle={() => onToggleSuggestion(perspective, name, s)}
+                      onEdit={(oldText, newText) => onEditSuggestion(perspective, name, oldText, newText)}
+                    />
                   </li>
                 ))}
               </ul>
@@ -131,15 +277,35 @@ function ReviewPanel({
   review,
   icon: Icon,
   label,
+  acceptedSuggestions,
+  onToggleSuggestion,
+  onEditSuggestion,
+  onSelectAllSection,
+  onSelectAllPerspective,
 }: {
   review: DraftReview;
   icon: React.ComponentType<{ className?: string }>;
   label: string;
+  acceptedSuggestions: Set<string>;
+  onToggleSuggestion: (perspective: string, section: string, suggestion: string) => void;
+  onEditSuggestion: (perspective: string, section: string, oldText: string, newText: string) => void;
+  onSelectAllSection: (perspective: string, section: string, suggestions: string[], select: boolean) => void;
+  onSelectAllPerspective: (perspective: string, review: DraftReview, select: boolean) => void;
 }) {
   const verdict = VERDICT_LABELS[review.verdict] || {
     label: review.verdict,
     color: "bg-gray-100 text-gray-700",
   };
+
+  // Count total suggestions and accepted in this perspective
+  const allSuggestions: string[] = [];
+  for (const [secName, sr] of Object.entries(review.section_reviews || {})) {
+    for (const s of sr.suggestions ?? []) {
+      allSuggestions.push(suggKey(review.perspective, secName, s));
+    }
+  }
+  const perspAccepted = allSuggestions.filter((k) => acceptedSuggestions.has(k)).length;
+  const allPerspSelected = allSuggestions.length > 0 && perspAccepted === allSuggestions.length;
 
   return (
     <div className="flex-1 min-w-0 space-y-4">
@@ -148,13 +314,21 @@ function ReviewPanel({
         <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-100">
           <Icon className="h-5 w-5 text-gray-600" />
         </div>
-        <div>
+        <div className="flex-1">
           <h3 className="text-sm font-bold text-gray-900">{label}</h3>
           <p className="text-[11px] text-gray-400">
             v{review.draft_version} &middot;{" "}
             {new Date(review.created_at).toLocaleDateString()}
           </p>
         </div>
+        {allSuggestions.length > 0 && (
+          <button
+            onClick={() => onSelectAllPerspective(review.perspective, review, !allPerspSelected)}
+            className="text-[10px] font-semibold text-purple-600 hover:text-purple-800 border border-purple-200 rounded-md px-2 py-1 hover:bg-purple-50 transition-colors"
+          >
+            {allPerspSelected ? "Deselect All" : `Accept All (${allSuggestions.length})`}
+          </button>
+        )}
       </div>
 
       {/* Score + Verdict */}
@@ -237,11 +411,427 @@ function ReviewPanel({
           </p>
           <div className="space-y-2">
             {Object.entries(review.section_reviews).map(([name, sr]) => (
-              <SectionCard key={name} name={name} review={sr} />
+              <SectionCard
+                key={name}
+                name={name}
+                review={sr}
+                perspective={review.perspective}
+                acceptedSuggestions={acceptedSuggestions}
+                onToggleSuggestion={onToggleSuggestion}
+                onEditSuggestion={onEditSuggestion}
+                onSelectAllSection={onSelectAllSection}
+              />
             ))}
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Coherence Panel ─────────────────────────────────────────────────────────
+
+function CoherencePanel({
+  review,
+  acceptedSuggestions,
+  onToggleSuggestion,
+  onEditSuggestion,
+}: {
+  review: CoherenceReview;
+  acceptedSuggestions: Set<string>;
+  onToggleSuggestion: (perspective: string, section: string, suggestion: string) => void;
+  onEditSuggestion: (perspective: string, section: string, oldText: string, newText: string) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const issues = review.issues ?? [];
+  const fixableIssues = issues.filter((i) => i.fix);
+
+  return (
+    <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-3 px-5 py-4 text-left hover:bg-gray-50 transition-colors"
+      >
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-100">
+          <Link2 className="h-5 w-5 text-gray-600" />
+        </div>
+        <div className="flex-1">
+          <h3 className="text-sm font-bold text-gray-900">Coherence Review</h3>
+          <p className="text-[11px] text-gray-400">
+            Cross-section consistency &middot;{" "}
+            {new Date(review.created_at).toLocaleDateString()}
+          </p>
+        </div>
+        <span
+          className={`inline-flex items-center rounded-xl border px-3 py-1 text-base font-bold ${scoreColor(
+            review.coherence_score
+          )}`}
+        >
+          {review.coherence_score.toFixed(1)}
+          <span className="ml-1 text-xs font-medium opacity-60">/ 10</span>
+        </span>
+        {open ? (
+          <ChevronUp className="h-4 w-4 text-gray-400" />
+        ) : (
+          <ChevronDown className="h-4 w-4 text-gray-400" />
+        )}
+      </button>
+
+      {open && (
+        <div className="border-t border-gray-100 px-5 py-4 space-y-4">
+          {/* Assessment */}
+          <p className="text-sm leading-relaxed text-gray-700">{review.overall_assessment}</p>
+
+          {/* Narrative consistency badge */}
+          <div className="flex items-center gap-2">
+            {review.narrative_consistent ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                <CheckCircle className="h-3.5 w-3.5" />
+                Narrative Consistent
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-700">
+                <XCircle className="h-3.5 w-3.5" />
+                Narrative Inconsistent
+              </span>
+            )}
+          </div>
+
+          {/* Issues */}
+          {issues.length > 0 && (
+            <div className="space-y-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                Issues Found ({issues.length})
+              </p>
+              {issues.map((issue, i) => {
+                const typeInfo = COHERENCE_TYPE_LABELS[issue.type] || {
+                  label: issue.type,
+                  color: "text-gray-700 bg-gray-50",
+                };
+                const fixKey = issue.fix ? suggKey("coherence", issue.sections_involved.join("+"), issue.fix) : "";
+                const isAccepted = fixKey ? acceptedSuggestions.has(fixKey) : false;
+
+                return (
+                  <div key={i} className="rounded-lg border border-gray-200 p-3 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${typeInfo.color}`}>
+                        {typeInfo.label}
+                      </span>
+                      {issue.sections_involved.length > 0 && (
+                        <span className="text-[10px] text-gray-400">
+                          {issue.sections_involved.map((s) => s.replace(/_/g, " ")).join(" / ")}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-gray-700">{issue.description}</p>
+                    {issue.fix && (
+                      <div className="group flex items-start gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onToggleSuggestion("coherence", issue.sections_involved.join("+"), issue.fix)}
+                          className={`flex flex-1 items-start gap-2 text-sm text-left rounded-md px-2 py-1.5 transition-colors ${
+                            isAccepted
+                              ? "bg-purple-50 text-purple-800 border border-purple-200"
+                              : "text-gray-600 hover:bg-gray-50"
+                          }`}
+                        >
+                          {isAccepted ? (
+                            <CheckSquare className="mt-0.5 h-4 w-4 shrink-0 text-purple-600" />
+                          ) : (
+                            <Square className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" />
+                          )}
+                          <span className="flex-1">
+                            <span className="font-medium text-purple-700">Fix: </span>
+                            {issue.fix}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const newFix = prompt("Edit fix suggestion:", issue.fix);
+                            if (newFix && newFix.trim() !== issue.fix) {
+                              onEditSuggestion("coherence", issue.sections_involved.join("+"), issue.fix, newFix.trim());
+                            }
+                          }}
+                          className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity rounded p-1 text-gray-400 hover:text-purple-600 hover:bg-purple-50"
+                          title="Edit fix before applying"
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {issues.length === 0 && (
+            <p className="text-sm text-gray-400 italic">No coherence issues detected.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Compliance Panel ─────────────────────────────────────────────────────────
+
+const COMPLIANCE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
+  missing_section: { label: "Missing Section", color: "text-red-700 bg-red-50" },
+  word_limit: { label: "Word Limit", color: "text-orange-700 bg-orange-50" },
+  eligibility: { label: "Eligibility", color: "text-amber-700 bg-amber-50" },
+  placeholder: { label: "Placeholder", color: "text-purple-700 bg-purple-50" },
+  budget: { label: "Budget", color: "text-blue-700 bg-blue-50" },
+  timeline: { label: "Timeline", color: "text-gray-700 bg-gray-100" },
+};
+
+function CompliancePanel({
+  review,
+  acceptedSuggestions,
+  onToggleSuggestion,
+}: {
+  review: ComplianceReview;
+  acceptedSuggestions: Set<string>;
+  onToggleSuggestion: (perspective: string, section: string, suggestion: string) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const issues = review.issues ?? [];
+
+  return (
+    <div className="mt-4 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-3 px-5 py-4 text-left hover:bg-gray-50 transition-colors"
+      >
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-100">
+          <ShieldCheck className="h-5 w-5 text-gray-600" />
+        </div>
+        <div className="flex-1">
+          <h3 className="text-sm font-bold text-gray-900">Compliance Check</h3>
+          <p className="text-[11px] text-gray-400">
+            Word limits, required sections, eligibility, placeholders
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {review.all_sections_present ? (
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+              All sections present
+            </span>
+          ) : (
+            <span className="rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+              Missing sections
+            </span>
+          )}
+          <span
+            className={`inline-flex items-center rounded-xl border px-3 py-1 text-base font-bold ${scoreColor(
+              review.compliance_score
+            )}`}
+          >
+            {review.compliance_score.toFixed(1)}
+            <span className="ml-1 text-xs font-medium opacity-60">/ 10</span>
+          </span>
+        </div>
+        {open ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+      </button>
+
+      {open && (
+        <div className="border-t border-gray-100 px-5 py-4 space-y-4">
+          <p className="text-sm leading-relaxed text-gray-700">{review.overall_assessment}</p>
+
+          {/* Quick status badges */}
+          <div className="flex flex-wrap gap-2">
+            {review.budget_in_range ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700">
+                <CheckCircle className="h-3 w-3" /> Budget in range
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2.5 py-1 text-[10px] font-semibold text-red-700">
+                <XCircle className="h-3 w-3" /> Budget out of range
+              </span>
+            )}
+            {(review.placeholder_markers?.length ?? 0) > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2.5 py-1 text-[10px] font-semibold text-purple-700">
+                <AlertTriangle className="h-3 w-3" /> {review.placeholder_markers.length} placeholder(s) remaining
+              </span>
+            )}
+            {(review.word_limit_violations?.length ?? 0) > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2.5 py-1 text-[10px] font-semibold text-orange-700">
+                <AlertTriangle className="h-3 w-3" /> {review.word_limit_violations.length} word limit violation(s)
+              </span>
+            )}
+          </div>
+
+          {/* Issues with fixable suggestions */}
+          {issues.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                Issues ({issues.length})
+              </p>
+              {issues.map((issue, i) => {
+                const typeInfo = COMPLIANCE_TYPE_LABELS[issue.type] || { label: issue.type, color: "text-gray-700 bg-gray-50" };
+                const fixKey = issue.fix ? suggKey("compliance", issue.type, issue.fix) : "";
+                const isAccepted = fixKey ? acceptedSuggestions.has(fixKey) : false;
+
+                return (
+                  <div key={i} className="rounded-lg border border-gray-200 p-3 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${typeInfo.color}`}>
+                        {typeInfo.label}
+                      </span>
+                    </div>
+                    <p className="text-sm text-gray-700">{issue.description}</p>
+                    {issue.fix && (
+                      <button
+                        type="button"
+                        onClick={() => onToggleSuggestion("compliance", issue.type, issue.fix)}
+                        className={`flex w-full items-start gap-2 text-sm text-left rounded-md px-2 py-1.5 transition-colors ${
+                          isAccepted
+                            ? "bg-purple-50 text-purple-800 border border-purple-200"
+                            : "text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        {isAccepted ? (
+                          <CheckSquare className="mt-0.5 h-4 w-4 shrink-0 text-purple-600" />
+                        ) : (
+                          <Square className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" />
+                        )}
+                        <span className="flex-1">
+                          <span className="font-medium text-purple-700">Fix: </span>
+                          {issue.fix}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Writing Quality Panel ────────────────────────────────────────────────────
+
+function WritingQualityPanel({
+  review,
+  acceptedSuggestions,
+  onToggleSuggestion,
+}: {
+  review: WritingQualityReview;
+  acceptedSuggestions: Set<string>;
+  onToggleSuggestion: (perspective: string, section: string, suggestion: string) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const sectionEntries = Object.entries(review.section_reviews || {});
+
+  return (
+    <div className="mt-4 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-3 px-5 py-4 text-left hover:bg-gray-50 transition-colors"
+      >
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-100">
+          <Type className="h-5 w-5 text-gray-600" />
+        </div>
+        <div className="flex-1">
+          <h3 className="text-sm font-bold text-gray-900">Writing Quality</h3>
+          <p className="text-[11px] text-gray-400">
+            Style rules, evidence density, voice consistency
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {review.total_violations === 0 ? (
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+              All checks passed
+            </span>
+          ) : (
+            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+              {review.total_violations} violation{review.total_violations !== 1 ? "s" : ""}
+            </span>
+          )}
+          <span
+            className={`inline-flex items-center rounded-xl border px-3 py-1 text-base font-bold ${scoreColor(
+              review.writing_score
+            )}`}
+          >
+            {review.writing_score.toFixed(1)}
+            <span className="ml-1 text-xs font-medium opacity-60">/ 10</span>
+          </span>
+        </div>
+        {open ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+      </button>
+
+      {open && (
+        <div className="border-t border-gray-100 px-5 py-4 space-y-4">
+          <p className="text-sm leading-relaxed text-gray-700">{review.overall_assessment}</p>
+
+          {sectionEntries.length > 0 && (
+            <div className="space-y-3">
+              {sectionEntries.map(([secName, sr]) => (
+                <div key={secName} className="rounded-lg border border-gray-200 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-800">{secName.replace(/_/g, " ")}</span>
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold text-white ${scoreBg(sr.score)}`}>
+                      {sr.score}/10
+                    </span>
+                  </div>
+                  {sr.issues.map((issue, i) => (
+                    <p key={i} className="flex items-start gap-2 text-sm text-red-700">
+                      <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      {issue}
+                    </p>
+                  ))}
+                  {sr.suggestions.map((sug, i) => {
+                    const key = suggKey("writing_quality", secName, sug);
+                    const isAccepted = acceptedSuggestions.has(key);
+                    return (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => onToggleSuggestion("writing_quality", secName, sug)}
+                        className={`flex w-full items-start gap-2 text-sm text-left rounded-md px-2 py-1.5 transition-colors ${
+                          isAccepted
+                            ? "bg-purple-50 text-purple-800 border border-purple-200"
+                            : "text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        {isAccepted ? (
+                          <CheckSquare className="mt-0.5 h-4 w-4 shrink-0 text-purple-600" />
+                        ) : (
+                          <Square className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" />
+                        )}
+                        <span className="flex-1">{sug}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {sectionEntries.length === 0 && (
+            <p className="text-sm text-emerald-600 italic">No writing quality issues detected.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Apply Progress ──────────────────────────────────────────────────────────
+
+function ApplyProgress({ sections }: { sections: string[] }) {
+  return (
+    <div className="space-y-1.5 mt-3">
+      {sections.map((sec) => (
+        <div key={sec} className="flex items-center gap-2 text-sm">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-purple-500" />
+          <span className="text-gray-600">Revising {sec.replace(/_/g, " ")}...</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -255,6 +845,9 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
   const [reviews, setReviews] = useState<{
     funder: DraftReview | null;
     scientific: DraftReview | null;
+    coherence: CoherenceReview | null;
+    compliance: ComplianceReview | null;
+    writing_quality: WritingQualityReview | null;
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [runLoading, setRunLoading] = useState(false);
@@ -264,6 +857,13 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
   const [mobileListOpen, setMobileListOpen] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [acceptedSuggestions, setAcceptedSuggestions] = useState<Set<string>>(new Set());
+  const [applyLoading, setApplyLoading] = useState(false);
+  const [applyResult, setApplyResult] = useState<{ version: number; sections: string[] } | null>(null);
+  const [applySections, setApplySections] = useState<string[]>([]);
+
+  // Track user edits to suggestion text: maps original key -> edited text
+  const [editedSuggestions, setEditedSuggestions] = useState<Map<string, string>>(new Map());
 
   const fetchReviews = useCallback(async (grantId: string) => {
     setLoading(true);
@@ -316,6 +916,7 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
     if (!selectedId) return;
     setRunLoading(true);
     setError(null);
+    setApplyResult(null);
     try {
       const res = await fetch("/api/review/run", {
         method: "POST",
@@ -328,7 +929,6 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
         setRunLoading(false);
         return;
       }
-      // Start polling for results
       setPollCount(0);
       setPolling(true);
     } catch {
@@ -357,6 +957,121 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
     } finally {
       setPdfLoading(false);
     }
+  }, [selectedId]);
+
+  // ── Suggestion handlers ──────────────────────────────────────────────────
+
+  const toggleSuggestion = useCallback((perspective: string, section: string, suggestion: string) => {
+    const key = suggKey(perspective, section, suggestion);
+    setAcceptedSuggestions((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setApplyResult(null);
+  }, []);
+
+  const editSuggestion = useCallback((perspective: string, section: string, oldText: string, newText: string) => {
+    const oldKey = suggKey(perspective, section, oldText);
+    const newKey = suggKey(perspective, section, newText);
+    setAcceptedSuggestions((prev) => {
+      const next = new Set(prev);
+      if (next.has(oldKey)) {
+        next.delete(oldKey);
+        next.add(newKey);
+      }
+      return next;
+    });
+    setEditedSuggestions((prev) => {
+      const next = new Map(prev);
+      next.set(oldKey, newText);
+      return next;
+    });
+    setApplyResult(null);
+  }, []);
+
+  const selectAllSection = useCallback((perspective: string, section: string, suggestions: string[], select: boolean) => {
+    setAcceptedSuggestions((prev) => {
+      const next = new Set(prev);
+      for (const s of suggestions) {
+        const key = suggKey(perspective, section, s);
+        if (select) next.add(key);
+        else next.delete(key);
+      }
+      return next;
+    });
+    setApplyResult(null);
+  }, []);
+
+  const selectAllPerspective = useCallback((perspective: string, review: DraftReview, select: boolean) => {
+    setAcceptedSuggestions((prev) => {
+      const next = new Set(prev);
+      for (const [secName, sr] of Object.entries(review.section_reviews || {})) {
+        for (const s of sr.suggestions ?? []) {
+          const key = suggKey(perspective, secName, s);
+          if (select) next.add(key);
+          else next.delete(key);
+        }
+      }
+      return next;
+    });
+    setApplyResult(null);
+  }, []);
+
+  const applySuggestions = useCallback(async () => {
+    if (!selectedId || acceptedSuggestions.size === 0) return;
+    setApplyLoading(true);
+    setApplyResult(null);
+    setError(null);
+
+    // Build accepted map, applying any user edits
+    const accepted: Record<string, Record<string, string[]>> = {};
+    const sectionsInvolved: string[] = [];
+
+    for (const key of acceptedSuggestions) {
+      const [perspective, section, ...rest] = key.split("::");
+      const originalText = rest.join("::");
+      // Use edited text if the user modified this suggestion
+      const finalText = editedSuggestions.get(suggKey(perspective, section, originalText)) || originalText;
+      if (!accepted[perspective]) accepted[perspective] = {};
+      if (!accepted[perspective][section]) {
+        accepted[perspective][section] = [];
+        sectionsInvolved.push(section);
+      }
+      accepted[perspective][section].push(finalText);
+    }
+
+    setApplySections(sectionsInvolved);
+
+    try {
+      const res = await fetch("/api/review/apply-suggestions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grant_id: selectedId, accepted }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data?.detail || "Failed to apply suggestions");
+        return;
+      }
+      setApplyResult({ version: data.new_version, sections: data.revised_sections });
+      setAcceptedSuggestions(new Set());
+      setEditedSuggestions(new Map());
+    } catch {
+      setError("Network error applying suggestions");
+    } finally {
+      setApplyLoading(false);
+      setApplySections([]);
+    }
+  }, [selectedId, acceptedSuggestions, editedSuggestions]);
+
+  // Reset state when switching grants
+  useEffect(() => {
+    setAcceptedSuggestions(new Set());
+    setEditedSuggestions(new Map());
+    setApplyResult(null);
+    setApplySections([]);
   }, [selectedId]);
 
   const selectedGrant = grants.find((g) => g._id === selectedId);
@@ -598,22 +1313,139 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
                 </p>
               </div>
             ) : (
-              <div className="flex flex-col gap-6 lg:flex-row">
-                {reviews?.funder && (
-                  <ReviewPanel
-                    review={reviews.funder}
-                    icon={Banknote}
-                    label="Funder Perspective"
+              <>
+                {/* Funder + Scientific panels */}
+                <div className="flex flex-col gap-6 lg:flex-row">
+                  {reviews?.funder && (
+                    <ReviewPanel
+                      review={reviews.funder}
+                      icon={Banknote}
+                      label="Funder Perspective"
+                      acceptedSuggestions={acceptedSuggestions}
+                      onToggleSuggestion={toggleSuggestion}
+                      onEditSuggestion={editSuggestion}
+                      onSelectAllSection={selectAllSection}
+                      onSelectAllPerspective={selectAllPerspective}
+                    />
+                  )}
+                  {reviews?.scientific && (
+                    <ReviewPanel
+                      review={reviews.scientific}
+                      icon={FlaskConical}
+                      label="Scientific Perspective"
+                      acceptedSuggestions={acceptedSuggestions}
+                      onToggleSuggestion={toggleSuggestion}
+                      onEditSuggestion={editSuggestion}
+                      onSelectAllSection={selectAllSection}
+                      onSelectAllPerspective={selectAllPerspective}
+                    />
+                  )}
+                </div>
+
+                {/* Coherence Panel */}
+                {reviews?.coherence && (
+                  <CoherencePanel
+                    review={reviews.coherence}
+                    acceptedSuggestions={acceptedSuggestions}
+                    onToggleSuggestion={toggleSuggestion}
+                    onEditSuggestion={editSuggestion}
                   />
                 )}
-                {reviews?.scientific && (
-                  <ReviewPanel
-                    review={reviews.scientific}
-                    icon={FlaskConical}
-                    label="Scientific Perspective"
+
+                {/* Compliance Panel */}
+                {reviews?.compliance && (
+                  <CompliancePanel
+                    review={reviews.compliance}
+                    acceptedSuggestions={acceptedSuggestions}
+                    onToggleSuggestion={toggleSuggestion}
                   />
                 )}
-              </div>
+
+                {/* Writing Quality Panel */}
+                {reviews?.writing_quality && (
+                  <WritingQualityPanel
+                    review={reviews.writing_quality}
+                    acceptedSuggestions={acceptedSuggestions}
+                    onToggleSuggestion={toggleSuggestion}
+                  />
+                )}
+
+                {/* Apply Suggestions Bar */}
+                {(acceptedSuggestions.size > 0 || applyResult) && (
+                  <div className="mt-4 rounded-xl border border-purple-200 bg-purple-50 px-5 py-4">
+                    {applyResult ? (
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-3">
+                          <CheckCircle className="h-5 w-5 text-emerald-600 shrink-0" />
+                          <div className="flex-1">
+                            <p className="text-sm font-semibold text-gray-900">
+                              Draft revised to v{applyResult.version}
+                            </p>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                              Sections updated: {applyResult.sections.map((s) => s.replace(/_/g, " ")).join(", ")}
+                            </p>
+                          </div>
+                        </div>
+                        {/* Re-review prompt */}
+                        <div className="flex items-center gap-3 pt-2 border-t border-purple-200">
+                          <p className="flex-1 text-xs text-purple-700">
+                            Re-run the review to validate improvements on the revised draft.
+                          </p>
+                          <button
+                            onClick={runReview}
+                            disabled={runLoading}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-purple-700 disabled:opacity-50 transition-colors"
+                          >
+                            {runLoading ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <RotateCcw className="h-3.5 w-3.5" />
+                            )}
+                            Re-run Review
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-purple-900">
+                              {acceptedSuggestions.size} suggestion{acceptedSuggestions.size !== 1 ? "s" : ""} selected
+                            </p>
+                            <p className="text-xs text-purple-600 mt-0.5">
+                              Click &ldquo;Apply&rdquo; to revise the draft with accepted suggestions
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              onClick={() => { setAcceptedSuggestions(new Set()); setEditedSuggestions(new Map()); }}
+                              className="rounded-lg border border-purple-200 px-3 py-1.5 text-xs font-medium text-purple-700 hover:bg-purple-100 transition-colors"
+                            >
+                              Clear All
+                            </button>
+                            <button
+                              onClick={applySuggestions}
+                              disabled={applyLoading}
+                              className="inline-flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-purple-700 disabled:opacity-50"
+                            >
+                              {applyLoading ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Wand2 className="h-4 w-4" />
+                              )}
+                              {applyLoading ? "Applying..." : "Apply & Revise Draft"}
+                            </button>
+                          </div>
+                        </div>
+                        {/* Per-section progress during apply */}
+                        {applyLoading && applySections.length > 0 && (
+                          <ApplyProgress sections={applySections} />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
             )}
 
             {/* Outcome Recorder */}
