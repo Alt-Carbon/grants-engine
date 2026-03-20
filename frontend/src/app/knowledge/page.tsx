@@ -28,11 +28,11 @@ export default async function KnowledgePage() {
   const [health, logs] = await Promise.all([getKnowledgeStatus(), getSyncLogs(5)]);
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex flex-col gap-4 p-4 sm:gap-6 sm:p-6">
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Knowledge Health</h1>
+          <h1 className="text-xl font-bold text-gray-900 sm:text-2xl">Knowledge Health</h1>
           <p className="mt-1 text-sm text-gray-500">
             Company Brain index — Notion + Google Drive
           </p>
