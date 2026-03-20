@@ -14,7 +14,9 @@ Features:
   - Loads the full grant document (raw page content) for complete context
   - Web research via Tavily: verifies claims, checks funder priorities, finds
     competing approaches before scoring
-  - Three parallel review perspectives: Funder, Scientific, Coherence
+  - Five parallel review perspectives: Funder, Scientific, Coherence, Compliance, Writing Quality
+  - Outcome-calibrated scoring: injects past win/loss lessons into reviewer prompts
+  - Golden example comparison: pulls top-scoring sections as benchmarks
 
 Usage:
     from backend.agents.dual_reviewer import run_dual_review
@@ -28,9 +30,327 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+import re
+
 from backend.utils.llm import chat, ANALYST_HEAVY
 
 logger = logging.getLogger(__name__)
+
+# ── Banned adjectives (shared with drafter writing rules) ────────────────────
+
+BANNED_ADJECTIVES = [
+    "innovative", "cutting-edge", "state-of-the-art", "world-class",
+    "groundbreaking", "revolutionary", "game-changing", "holistic",
+    "synergistic", "paradigm-shifting",
+]
+
+BANNED_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(w) for w in BANNED_ADJECTIVES) + r")\b",
+    re.IGNORECASE,
+)
+
+HEDGING_PATTERNS = re.compile(
+    r"\b(may potentially|could possibly|we believe|it is hoped|we aim to try|"
+    r"not only.*but also|it is worth noting)\b",
+    re.IGNORECASE,
+)
+
+
+# ── Outcome & Golden Example Loaders ─────────────────────────────────────────
+
+async def _load_outcome_lessons(grant: Dict) -> str:
+    """Load past win/loss lessons relevant to this grant's funder and themes.
+
+    Returns a formatted text block to inject into reviewer prompts.
+    Non-fatal: returns empty string on failure.
+    """
+    try:
+        from backend.agents.feedback_learner import get_lessons_for_grant
+        funder = grant.get("funder") or ""
+        themes = grant.get("themes_detected") or []
+        lessons = await get_lessons_for_grant(funder=funder, themes=themes)
+        if not lessons:
+            return ""
+
+        parts = ["LESSONS FROM PAST GRANT OUTCOMES (use to calibrate your scoring):"]
+        for lesson in lessons[:5]:
+            outcome = lesson.get("outcome", "unknown")
+            funder_name = lesson.get("funder", "")
+            what_worked = lesson.get("what_worked", [])
+            what_failed = lesson.get("what_failed", [])
+            summary = f"  [{outcome.upper()}] {funder_name}"
+            if what_worked:
+                summary += f" — Worked: {'; '.join(what_worked[:2])}"
+            if what_failed:
+                summary += f" — Failed: {'; '.join(what_failed[:2])}"
+            parts.append(summary)
+
+        return "\n".join(parts)
+    except Exception as e:
+        logger.debug("Outcome lessons load failed: %s", e)
+        return ""
+
+
+async def _load_golden_benchmarks(grant: Dict, section_names: List[str]) -> str:
+    """Load golden example sections as quality benchmarks.
+
+    Returns a formatted text block showing what a high-scoring section looks like.
+    Non-fatal: returns empty string on failure.
+    """
+    try:
+        from backend.agents.golden_examples.manager import get_golden_examples
+        themes = grant.get("themes_detected") or []
+        theme = themes[0] if themes else ""
+
+        examples = await get_golden_examples(
+            agent="drafter",
+            theme=theme,
+            example_type="section",
+            limit=2,
+        )
+        if not examples:
+            return ""
+
+        parts = ["BENCHMARK — High-scoring sections from past successful grants (for calibration):"]
+        for ex in examples[:2]:
+            title = ex.get("grant_title", "")
+            score = ex.get("quality_score", 0)
+            output = ex.get("output", "")
+            # Truncate to keep prompt reasonable
+            snippet = output[:500] + "..." if len(output) > 500 else output
+            parts.append(f"  [{score:.1f}/10] {title}")
+            parts.append(f"    {snippet}")
+
+        return "\n".join(parts)
+    except Exception as e:
+        logger.debug("Golden benchmarks load failed: %s", e)
+        return ""
+
+
+def _run_writing_quality_check(sections: Dict[str, Dict]) -> Dict:
+    """Deterministic writing quality audit — no LLM needed.
+
+    Checks each section for:
+    - Banned adjectives (empty marketing language)
+    - Hedging / weak language patterns
+    - Paragraph evidence density (paragraphs without numbers/data)
+    - Passive voice markers
+
+    Returns a compliance-style result dict with issues per section.
+    """
+    section_issues: Dict[str, Dict] = {}
+    total_violations = 0
+
+    for sec_name, sec_data in sections.items():
+        content = sec_data.get("content", "")
+        if not content:
+            continue
+
+        issues = []
+        suggestions = []
+
+        # Banned adjectives
+        banned_found = BANNED_PATTERN.findall(content)
+        if banned_found:
+            unique = list(set(w.lower() for w in banned_found))
+            issues.append(f"Contains {len(banned_found)} banned adjective(s): {', '.join(unique[:5])}")
+            suggestions.append(f"Replace empty adjectives ({', '.join(unique[:3])}) with specific, quantifiable claims")
+            total_violations += len(banned_found)
+
+        # Hedging language
+        hedging_found = HEDGING_PATTERNS.findall(content)
+        if hedging_found:
+            unique = list(set(h.lower() for h in hedging_found))
+            issues.append(f"Contains {len(hedging_found)} hedging/weak phrase(s): {', '.join(unique[:3])}")
+            suggestions.append("Replace hedging language with direct, declarative statements")
+            total_violations += len(hedging_found)
+
+        # Evidence density: paragraphs without any numbers/data
+        paragraphs = [p.strip() for p in content.split("\n\n") if len(p.strip()) > 80]
+        empty_paras = 0
+        for para in paragraphs:
+            has_number = bool(re.search(r"\d+", para))
+            has_citation = bool(re.search(r"\(.*?\d{4}\)|et al\.|doi:|https?://", para, re.IGNORECASE))
+            if not has_number and not has_citation:
+                empty_paras += 1
+        if paragraphs and empty_paras > len(paragraphs) * 0.5:
+            issues.append(f"{empty_paras}/{len(paragraphs)} paragraphs lack quantitative data or citations")
+            suggestions.append("Add specific numbers, percentages, or citations to support claims")
+            total_violations += empty_paras
+
+        # Passive voice markers (simple heuristic)
+        passive_matches = re.findall(r"\b(is|are|was|were|been|being)\s+\w+ed\b", content, re.IGNORECASE)
+        if len(passive_matches) > 5:
+            issues.append(f"High passive voice usage ({len(passive_matches)} instances)")
+            suggestions.append("Convert passive constructions to active, declarative voice")
+            total_violations += 1
+
+        if issues:
+            word_count = len(content.split())
+            section_issues[sec_name] = {
+                "score": max(1, 10 - len(issues) * 2),
+                "issues": issues,
+                "suggestions": suggestions,
+                "strengths": [],
+                "word_count": word_count,
+            }
+
+    # Compute overall score
+    if section_issues:
+        avg_score = sum(s["score"] for s in section_issues.values()) / len(section_issues)
+    else:
+        avg_score = 9.0
+
+    return {
+        "writing_score": round(avg_score, 1),
+        "total_violations": total_violations,
+        "section_reviews": section_issues,
+        "issues": [
+            f"Total writing quality violations: {total_violations}",
+        ] if total_violations > 0 else [],
+        "overall_assessment": (
+            f"Writing quality audit found {total_violations} violations across {len(section_issues)} sections."
+            if total_violations > 0
+            else "Writing quality passes all checks — no banned adjectives, hedging, or evidence gaps detected."
+        ),
+    }
+
+
+# ── Compliance Review ─────────────────────────────────────────────────────────
+
+COMPLIANCE_PROMPT = """You are a grant compliance officer performing a pre-submission checklist review.
+
+GRANT: {grant_title}
+FUNDER: {funder}
+
+{requirements_block}
+
+{eligibility_block}
+
+{word_limits_block}
+
+DRAFT SECTIONS PRESENT:
+{sections_list}
+
+COMPLETE DRAFT:
+{draft}
+
+Check this application for COMPLIANCE — not quality. Verify:
+
+1. REQUIRED SECTIONS: Are all required sections present? Are any missing entirely?
+2. WORD LIMITS: Does each section respect its word/character limit? (if limits were provided)
+3. ELIGIBILITY: Does the application clearly demonstrate it meets all eligibility criteria?
+4. BUDGET RANGE: Does the requested amount fall within the funder's stated range?
+5. FORMATTING: Are there placeholder markers like [EVIDENCE NEEDED], [TODO], [INSERT], or [TBD] still in the text?
+6. DEADLINE ALIGNMENT: Does the project timeline align with the grant's expected start/end dates?
+
+Respond ONLY with valid JSON:
+{{
+  "compliance_score": <float 1-10>,
+  "all_sections_present": <bool>,
+  "missing_sections": ["<section_name>"],
+  "word_limit_violations": [
+    {{"section": "<name>", "limit": <int>, "actual": <int>, "over_by": <int>}}
+  ],
+  "eligibility_issues": ["<specific gap in eligibility demonstration>"],
+  "placeholder_markers": ["<section with remaining placeholders>"],
+  "budget_in_range": <bool>,
+  "issues": [
+    {{"type": "<missing_section|word_limit|eligibility|placeholder|budget|timeline>", "description": "<specific issue>", "fix": "<actionable fix>"}}
+  ],
+  "overall_assessment": "<2-3 sentence compliance assessment>"
+}}"""
+
+
+async def _run_compliance_review(
+    grant: Dict,
+    draft_text: str,
+    sections: Dict[str, Dict],
+) -> Dict:
+    """Check the draft against the grant's hard requirements: word limits,
+    required sections, eligibility, budget range, and placeholders."""
+
+    deep = grant.get("deep_analysis") or {}
+
+    # Build requirements block
+    reqs = deep.get("requirements") or {}
+    requirements_block = ""
+    if reqs:
+        if isinstance(reqs, dict):
+            requirements_block = "GRANT REQUIREMENTS:\n" + json.dumps(reqs, indent=2, default=str)[:3000]
+        else:
+            requirements_block = f"GRANT REQUIREMENTS:\n{str(reqs)[:3000]}"
+
+    # Eligibility block
+    elig = deep.get("eligibility") or {}
+    eligibility_block = ""
+    if elig:
+        if isinstance(elig, dict):
+            eligibility_block = "ELIGIBILITY CRITERIA:\n" + json.dumps(elig, indent=2, default=str)[:2000]
+        else:
+            eligibility_block = f"ELIGIBILITY CRITERIA:\n{str(elig)[:2000]}"
+
+    # Word limits
+    word_limits_parts = []
+    sections_required = deep.get("sections_required") or []
+    if sections_required:
+        for sr in sections_required:
+            if isinstance(sr, dict):
+                name = sr.get("name") or sr.get("section", "")
+                limit = sr.get("word_limit") or sr.get("max_words", "")
+                if name:
+                    word_limits_parts.append(f"  - {name}: {limit} words" if limit else f"  - {name}")
+            elif isinstance(sr, str):
+                word_limits_parts.append(f"  - {sr}")
+    word_limits_block = ""
+    if word_limits_parts:
+        word_limits_block = "REQUIRED SECTIONS & WORD LIMITS:\n" + "\n".join(word_limits_parts)
+
+    # Sections present
+    sections_list = "\n".join(
+        f"  - {name} ({sec.get('word_count', len(sec.get('content', '').split()))} words)"
+        for name, sec in sections.items()
+    )
+
+    prompt = COMPLIANCE_PROMPT.format(
+        grant_title=grant.get("title") or grant.get("grant_name") or "Untitled",
+        funder=grant.get("funder") or "Unknown",
+        requirements_block=requirements_block,
+        eligibility_block=eligibility_block,
+        word_limits_block=word_limits_block,
+        sections_list=sections_list,
+        draft=draft_text[:15000],
+    )
+
+    try:
+        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=3000, temperature=0.15)
+        result = _parse_json_response(raw)
+    except json.JSONDecodeError as e:
+        logger.error("Compliance review JSON parse failed: %s", e)
+        result = {
+            "compliance_score": 0,
+            "issues": [{"type": "error", "description": f"Parse error: {e}", "fix": "Retry"}],
+            "overall_assessment": "Compliance review could not be completed.",
+        }
+    except Exception as e:
+        logger.error("Compliance review LLM call failed: %s", e)
+        result = {
+            "compliance_score": 0,
+            "issues": [],
+            "overall_assessment": f"Compliance review failed: {e}",
+        }
+
+    result.setdefault("compliance_score", 5.0)
+    result.setdefault("all_sections_present", True)
+    result.setdefault("missing_sections", [])
+    result.setdefault("word_limit_violations", [])
+    result.setdefault("eligibility_issues", [])
+    result.setdefault("placeholder_markers", [])
+    result.setdefault("budget_in_range", True)
+    result.setdefault("issues", [])
+    result.setdefault("overall_assessment", "Review completed.")
+    return result
+
 
 # ── Default reviewer profiles ─────────────────────────────────────────────────
 
@@ -102,8 +422,12 @@ FOCUS YOUR REVIEW ON:
 COMPLETE DRAFT APPLICATION:
 {draft}
 
+{outcome_lessons_block}
+
+{golden_benchmarks_block}
+
 Review this application thoroughly. Be specific and constructive. {perspective_guidance}
-Use the original grant document and web research context (if provided) to verify claims, check alignment with funder priorities, and identify gaps.
+Use the original grant document, web research context, past outcome lessons, and benchmark examples (if provided) to verify claims, calibrate scores, and identify gaps.
 
 Respond ONLY with valid JSON:
 {{
@@ -250,12 +574,16 @@ async def _run_single_review(
     settings: Dict,
     research: Optional[Dict[str, List[str]]] = None,
     grant_raw_doc: str = "",
+    outcome_lessons: str = "",
+    golden_benchmarks: str = "",
 ) -> Dict:
     """Run a single review perspective with configurable settings.
 
     Args:
         research: Web research findings from _web_research_for_review.
         grant_raw_doc: Original grant page content for full context.
+        outcome_lessons: Formatted text block with past win/loss lessons.
+        golden_benchmarks: Formatted text block with high-scoring example sections.
     """
     profile = REVIEWER_PROFILES.get(perspective, REVIEWER_PROFILES["funder"])
 
@@ -336,6 +664,8 @@ async def _run_single_review(
         research_block=research_block,
         focus_areas=focus_areas,
         custom_instructions_block=custom_instructions_block,
+        outcome_lessons_block=outcome_lessons,
+        golden_benchmarks_block=golden_benchmarks,
         draft=draft_text[:15000],
         perspective_guidance=PERSPECTIVE_GUIDANCE.get(perspective, ""),
     )
@@ -508,8 +838,12 @@ async def run_dual_review(grant_id: str) -> Dict:
             grant_raw_parts.append(f"FUNDING TERMS: {json.dumps(ft, default=str)[:1500]}")
     grant_raw_doc = "\n\n".join(grant_raw_parts)
 
-    # Step 1: Web research (runs before reviews to inform them)
-    research = await _web_research_for_review(grant, draft_text)
+    # Step 1: Pre-review context gathering (run in parallel)
+    research, outcome_lessons, golden_benchmarks = await asyncio.gather(
+        _web_research_for_review(grant, draft_text),
+        _load_outcome_lessons(grant),
+        _load_golden_benchmarks(grant, list(sections.keys())),
+    )
 
     # Load per-grant reviewer settings (stored by the frontend settings panel)
     grant_reviewer_cfg = (grant or {}).get("reviewer_settings") or {}
@@ -538,30 +872,45 @@ async def run_dual_review(grant_id: str) -> Dict:
         scientific_settings["custom_instructions"] = grant_reviewer_cfg["custom_instructions"]
 
     grant_title = grant.get("title") or grant.get("grant_name") or "Untitled"
+    context_stats = {
+        "research_snippets": sum(len(v) for v in research.values()),
+        "has_outcome_lessons": bool(outcome_lessons),
+        "has_golden_benchmarks": bool(golden_benchmarks),
+    }
     logger.info(
-        "Starting dual review for '%s' (grant_id=%s, draft v%d, funder_strictness=%s, sci_strictness=%s, research_snippets=%d)",
+        "Starting full review for '%s' (grant_id=%s, draft v%d, funder_strictness=%s, sci_strictness=%s, %s)",
         grant_title, grant_id, draft_doc.get("version", 0),
         funder_settings.get("strictness", "balanced"),
         scientific_settings.get("strictness", "balanced"),
-        sum(len(v) for v in research.values()),
+        context_stats,
     )
 
-    # Step 2: Run all three perspectives in parallel (with research + grant doc context)
-    funder_result, scientific_result, coherence_result = await asyncio.gather(
-        _run_single_review(grant, draft_text, "funder", funder_settings, research=research, grant_raw_doc=grant_raw_doc),
-        _run_single_review(grant, draft_text, "scientific", scientific_settings, research=research, grant_raw_doc=grant_raw_doc),
+    # Step 2: Run writing quality check (deterministic, instant)
+    writing_result = _run_writing_quality_check(sections)
+
+    # Step 3: Run all four LLM perspectives in parallel (with enriched context)
+    funder_result, scientific_result, coherence_result, compliance_result = await asyncio.gather(
+        _run_single_review(grant, draft_text, "funder", funder_settings,
+                           research=research, grant_raw_doc=grant_raw_doc,
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
+        _run_single_review(grant, draft_text, "scientific", scientific_settings,
+                           research=research, grant_raw_doc=grant_raw_doc,
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
         _run_coherence_review(grant, draft_text),
+        _run_compliance_review(grant, draft_text, sections),
     )
 
     now = datetime.now(timezone.utc).isoformat()
     draft_id = str(draft_doc["_id"])
     draft_version = draft_doc.get("version", 0)
 
-    # Store reviews (funder, scientific, coherence) — include research metadata
+    # Store all five reviews
     for perspective, result in [
         ("funder", funder_result),
         ("scientific", scientific_result),
         ("coherence", coherence_result),
+        ("compliance", compliance_result),
+        ("writing_quality", writing_result),
     ]:
         review_doc = {
             "grant_id": grant_id,
@@ -570,6 +919,8 @@ async def run_dual_review(grant_id: str) -> Dict:
             "perspective": perspective,
             **result,
             "web_research_used": bool(any(research.values())),
+            "outcome_lessons_used": bool(outcome_lessons),
+            "golden_benchmarks_used": bool(golden_benchmarks),
             "created_at": now,
         }
         await draft_reviews().replace_one(
@@ -578,8 +929,9 @@ async def run_dual_review(grant_id: str) -> Dict:
             upsert=True,
         )
 
-    # Log coherence issues as critical if found
+    # Log issues
     coherence_issues = coherence_result.get("issues", [])
+    compliance_issues = compliance_result.get("issues", [])
     if coherence_issues:
         logger.warning(
             "Coherence review found %d issues for '%s': %s",
@@ -587,15 +939,26 @@ async def run_dual_review(grant_id: str) -> Dict:
             grant_title,
             [i.get("type") for i in coherence_issues[:5]],
         )
+    if compliance_issues:
+        logger.warning(
+            "Compliance review found %d issues for '%s': %s",
+            len(compliance_issues),
+            grant_title,
+            [i.get("type", i.get("description", "")[:40]) for i in compliance_issues[:5]],
+        )
 
     logger.info(
-        "Triple review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), coherence=%.1f",
+        "Full review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), "
+        "coherence=%.1f, compliance=%.1f, writing=%.1f (%d violations)",
         grant_title,
         funder_result.get("overall_score", 0),
         funder_result.get("verdict", "?"),
         scientific_result.get("overall_score", 0),
         scientific_result.get("verdict", "?"),
         coherence_result.get("coherence_score", 0),
+        compliance_result.get("compliance_score", 0),
+        writing_result.get("writing_score", 0),
+        writing_result.get("total_violations", 0),
     )
 
     # Update heartbeat
@@ -607,9 +970,13 @@ async def run_dual_review(grant_id: str) -> Dict:
             "funder_score": funder_result.get("overall_score", 0),
             "scientific_score": scientific_result.get("overall_score", 0),
             "coherence_score": coherence_result.get("coherence_score", 0),
+            "compliance_score": compliance_result.get("compliance_score", 0),
+            "writing_score": writing_result.get("writing_score", 0),
             "funder_verdict": funder_result.get("verdict", ""),
             "scientific_verdict": scientific_result.get("verdict", ""),
             "coherence_issues": len(coherence_issues),
+            "compliance_issues": len(compliance_issues),
+            "writing_violations": writing_result.get("total_violations", 0),
         })
     except Exception:
         logger.debug("Heartbeat update skipped (reviewer)", exc_info=True)
@@ -618,6 +985,8 @@ async def run_dual_review(grant_id: str) -> Dict:
         "funder": funder_result,
         "scientific": scientific_result,
         "coherence": coherence_result,
+        "compliance": compliance_result,
+        "writing_quality": writing_result,
     }
 
 
@@ -697,8 +1066,12 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     if not grant_raw_doc and state.get("grant_raw_doc"):
         grant_raw_doc = (state.get("grant_raw_doc") or "")[:8000]
 
-    # Step 1: Web research
-    research = await _web_research_for_review(grant, draft_text)
+    # Step 1: Pre-review context gathering (run in parallel)
+    research, outcome_lessons, golden_benchmarks = await asyncio.gather(
+        _web_research_for_review(grant, draft_text),
+        _load_outcome_lessons(grant),
+        _load_golden_benchmarks(grant, list(approved_sections.keys())),
+    )
 
     # Load reviewer settings (global + per-grant overrides)
     grant_reviewer_cfg = grant.get("reviewer_settings") or {}
@@ -724,16 +1097,25 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
 
     grant_title = grant.get("title") or grant.get("grant_name") or "Untitled"
     logger.info(
-        "Pipeline dual review for '%s' (grant_id=%s, sections=%d, research_snippets=%d)",
+        "Pipeline full review for '%s' (grant_id=%s, sections=%d, research=%d, lessons=%s, benchmarks=%s)",
         grant_title, grant_id, len(approved_sections),
         sum(len(v) for v in research.values()),
+        bool(outcome_lessons), bool(golden_benchmarks),
     )
 
-    # Step 2: Run all three reviews in parallel
-    funder_result, scientific_result, coherence_result = await asyncio.gather(
-        _run_single_review(grant, draft_text, "funder", funder_settings, research=research, grant_raw_doc=grant_raw_doc),
-        _run_single_review(grant, draft_text, "scientific", scientific_settings, research=research, grant_raw_doc=grant_raw_doc),
+    # Step 2: Writing quality check (deterministic, instant)
+    writing_result = _run_writing_quality_check(approved_sections)
+
+    # Step 3: Run all four LLM perspectives in parallel (with enriched context)
+    funder_result, scientific_result, coherence_result, compliance_result = await asyncio.gather(
+        _run_single_review(grant, draft_text, "funder", funder_settings,
+                           research=research, grant_raw_doc=grant_raw_doc,
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
+        _run_single_review(grant, draft_text, "scientific", scientific_settings,
+                           research=research, grant_raw_doc=grant_raw_doc,
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
         _run_coherence_review(grant, draft_text),
+        _run_compliance_review(grant, draft_text, approved_sections),
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -746,11 +1128,13 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     draft_id = str(draft_doc["_id"]) if draft_doc else ""
     draft_version = draft_doc.get("version", 0) if draft_doc else state.get("draft_version", 0)
 
-    # Save to draft_reviews collection (so the Reviewers UI can display them)
+    # Save all five reviews to draft_reviews collection
     for perspective, result in [
         ("funder", funder_result),
         ("scientific", scientific_result),
         ("coherence", coherence_result),
+        ("compliance", compliance_result),
+        ("writing_quality", writing_result),
     ]:
         review_doc = {
             "grant_id": grant_id,
@@ -759,6 +1143,8 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
             "perspective": perspective,
             **result,
             "web_research_used": bool(any(research.values())),
+            "outcome_lessons_used": bool(outcome_lessons),
+            "golden_benchmarks_used": bool(golden_benchmarks),
             "source": "pipeline",
             "created_at": now,
         }
@@ -769,27 +1155,31 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
         )
 
     coherence_issues = coherence_result.get("issues", [])
-    if coherence_issues:
-        logger.warning(
-            "Pipeline coherence review: %d issues for '%s'",
-            len(coherence_issues), grant_title,
-        )
+    compliance_issues = compliance_result.get("issues", [])
 
-    # Compute combined score for backward compatibility
+    # Compute combined score (all 5 perspectives)
     funder_score = funder_result.get("overall_score", 0)
     scientific_score = scientific_result.get("overall_score", 0)
     coherence_score = coherence_result.get("coherence_score", 0)
-    combined_score = round((funder_score + scientific_score + coherence_score) / 3, 1)
+    compliance_score = compliance_result.get("compliance_score", 0)
+    writing_score = writing_result.get("writing_score", 0)
+    combined_score = round(
+        (funder_score + scientific_score + coherence_score + compliance_score + writing_score) / 5, 1
+    )
 
-    # Determine ready_for_export based on verdicts
+    # Determine ready_for_export: verdicts + compliance must pass
     verdicts = [funder_result.get("verdict", ""), scientific_result.get("verdict", "")]
-    ready = all(v in ("strong_submit", "submit_with_revisions") for v in verdicts)
+    ready = (
+        all(v in ("strong_submit", "submit_with_revisions") for v in verdicts)
+        and compliance_score >= 6.0
+    )
 
     logger.info(
-        "Pipeline dual review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), coherence=%.1f, combined=%.1f, ready=%s",
+        "Pipeline full review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), "
+        "coherence=%.1f, compliance=%.1f, writing=%.1f, combined=%.1f, ready=%s",
         grant_title, funder_score, funder_result.get("verdict", "?"),
         scientific_score, scientific_result.get("verdict", "?"),
-        coherence_score, combined_score, ready,
+        coherence_score, compliance_score, writing_score, combined_score, ready,
     )
 
     # Update heartbeat
@@ -802,9 +1192,13 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
             "funder_score": funder_score,
             "scientific_score": scientific_score,
             "coherence_score": coherence_score,
+            "compliance_score": compliance_score,
+            "writing_score": writing_score,
             "funder_verdict": funder_result.get("verdict", ""),
             "scientific_verdict": scientific_result.get("verdict", ""),
             "coherence_issues": len(coherence_issues),
+            "compliance_issues": len(compliance_issues),
+            "writing_violations": writing_result.get("total_violations", 0),
         })
     except Exception:
         logger.debug("Heartbeat update skipped (reviewer pipeline)", exc_info=True)
@@ -818,7 +1212,7 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     except Exception as e:
         logger.warning("dual_reviewer_node: failed to update grant status: %s", e)
 
-    # Build reviewer_output — backward-compatible shape + full triple review
+    # Build reviewer_output — backward-compatible shape + full review
     reviewer_output = {
         "overall_score": combined_score,
         "ready_for_export": ready,
@@ -826,7 +1220,11 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
         "funder": funder_result,
         "scientific": scientific_result,
         "coherence": coherence_result,
+        "compliance": compliance_result,
+        "writing_quality": writing_result,
         "web_research_used": bool(any(research.values())),
+        "outcome_lessons_used": bool(outcome_lessons),
+        "golden_benchmarks_used": bool(golden_benchmarks),
     }
 
     audit_entry = {
@@ -835,6 +1233,8 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
         "funder_score": funder_score,
         "scientific_score": scientific_score,
         "coherence_score": coherence_score,
+        "compliance_score": compliance_score,
+        "writing_score": writing_score,
         "combined_score": combined_score,
         "funder_verdict": funder_result.get("verdict", ""),
         "scientific_verdict": scientific_result.get("verdict", ""),

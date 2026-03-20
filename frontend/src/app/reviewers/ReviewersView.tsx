@@ -1,7 +1,12 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import type { Grant, DraftReview, SectionReview, CoherenceReview, CoherenceIssue } from "@/lib/queries";
+import type {
+  Grant, DraftReview, SectionReview,
+  CoherenceReview, CoherenceIssue,
+  ComplianceReview, ComplianceIssue,
+  WritingQualityReview,
+} from "@/lib/queries";
 import {
   PlayCircle,
   Loader2,
@@ -27,6 +32,8 @@ import {
   Link2,
   Pencil,
   RotateCcw,
+  ShieldCheck,
+  Type,
 } from "lucide-react";
 import { ReviewerSettingsPanel } from "@/components/ReviewerSettingsPanel";
 import { fetchDraftContent, generateDraftPdf, downloadDraftMarkdown } from "@/lib/generateDraftPdf";
@@ -568,6 +575,252 @@ function CoherencePanel({
   );
 }
 
+// ── Compliance Panel ─────────────────────────────────────────────────────────
+
+const COMPLIANCE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
+  missing_section: { label: "Missing Section", color: "text-red-700 bg-red-50" },
+  word_limit: { label: "Word Limit", color: "text-orange-700 bg-orange-50" },
+  eligibility: { label: "Eligibility", color: "text-amber-700 bg-amber-50" },
+  placeholder: { label: "Placeholder", color: "text-purple-700 bg-purple-50" },
+  budget: { label: "Budget", color: "text-blue-700 bg-blue-50" },
+  timeline: { label: "Timeline", color: "text-gray-700 bg-gray-100" },
+};
+
+function CompliancePanel({
+  review,
+  acceptedSuggestions,
+  onToggleSuggestion,
+}: {
+  review: ComplianceReview;
+  acceptedSuggestions: Set<string>;
+  onToggleSuggestion: (perspective: string, section: string, suggestion: string) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const issues = review.issues ?? [];
+
+  return (
+    <div className="mt-4 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-3 px-5 py-4 text-left hover:bg-gray-50 transition-colors"
+      >
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-100">
+          <ShieldCheck className="h-5 w-5 text-gray-600" />
+        </div>
+        <div className="flex-1">
+          <h3 className="text-sm font-bold text-gray-900">Compliance Check</h3>
+          <p className="text-[11px] text-gray-400">
+            Word limits, required sections, eligibility, placeholders
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {review.all_sections_present ? (
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+              All sections present
+            </span>
+          ) : (
+            <span className="rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+              Missing sections
+            </span>
+          )}
+          <span
+            className={`inline-flex items-center rounded-xl border px-3 py-1 text-base font-bold ${scoreColor(
+              review.compliance_score
+            )}`}
+          >
+            {review.compliance_score.toFixed(1)}
+            <span className="ml-1 text-xs font-medium opacity-60">/ 10</span>
+          </span>
+        </div>
+        {open ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+      </button>
+
+      {open && (
+        <div className="border-t border-gray-100 px-5 py-4 space-y-4">
+          <p className="text-sm leading-relaxed text-gray-700">{review.overall_assessment}</p>
+
+          {/* Quick status badges */}
+          <div className="flex flex-wrap gap-2">
+            {review.budget_in_range ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700">
+                <CheckCircle className="h-3 w-3" /> Budget in range
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2.5 py-1 text-[10px] font-semibold text-red-700">
+                <XCircle className="h-3 w-3" /> Budget out of range
+              </span>
+            )}
+            {(review.placeholder_markers?.length ?? 0) > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2.5 py-1 text-[10px] font-semibold text-purple-700">
+                <AlertTriangle className="h-3 w-3" /> {review.placeholder_markers.length} placeholder(s) remaining
+              </span>
+            )}
+            {(review.word_limit_violations?.length ?? 0) > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2.5 py-1 text-[10px] font-semibold text-orange-700">
+                <AlertTriangle className="h-3 w-3" /> {review.word_limit_violations.length} word limit violation(s)
+              </span>
+            )}
+          </div>
+
+          {/* Issues with fixable suggestions */}
+          {issues.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                Issues ({issues.length})
+              </p>
+              {issues.map((issue, i) => {
+                const typeInfo = COMPLIANCE_TYPE_LABELS[issue.type] || { label: issue.type, color: "text-gray-700 bg-gray-50" };
+                const fixKey = issue.fix ? suggKey("compliance", issue.type, issue.fix) : "";
+                const isAccepted = fixKey ? acceptedSuggestions.has(fixKey) : false;
+
+                return (
+                  <div key={i} className="rounded-lg border border-gray-200 p-3 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${typeInfo.color}`}>
+                        {typeInfo.label}
+                      </span>
+                    </div>
+                    <p className="text-sm text-gray-700">{issue.description}</p>
+                    {issue.fix && (
+                      <button
+                        type="button"
+                        onClick={() => onToggleSuggestion("compliance", issue.type, issue.fix)}
+                        className={`flex w-full items-start gap-2 text-sm text-left rounded-md px-2 py-1.5 transition-colors ${
+                          isAccepted
+                            ? "bg-purple-50 text-purple-800 border border-purple-200"
+                            : "text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        {isAccepted ? (
+                          <CheckSquare className="mt-0.5 h-4 w-4 shrink-0 text-purple-600" />
+                        ) : (
+                          <Square className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" />
+                        )}
+                        <span className="flex-1">
+                          <span className="font-medium text-purple-700">Fix: </span>
+                          {issue.fix}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Writing Quality Panel ────────────────────────────────────────────────────
+
+function WritingQualityPanel({
+  review,
+  acceptedSuggestions,
+  onToggleSuggestion,
+}: {
+  review: WritingQualityReview;
+  acceptedSuggestions: Set<string>;
+  onToggleSuggestion: (perspective: string, section: string, suggestion: string) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const sectionEntries = Object.entries(review.section_reviews || {});
+
+  return (
+    <div className="mt-4 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-3 px-5 py-4 text-left hover:bg-gray-50 transition-colors"
+      >
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-100">
+          <Type className="h-5 w-5 text-gray-600" />
+        </div>
+        <div className="flex-1">
+          <h3 className="text-sm font-bold text-gray-900">Writing Quality</h3>
+          <p className="text-[11px] text-gray-400">
+            Style rules, evidence density, voice consistency
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {review.total_violations === 0 ? (
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+              All checks passed
+            </span>
+          ) : (
+            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+              {review.total_violations} violation{review.total_violations !== 1 ? "s" : ""}
+            </span>
+          )}
+          <span
+            className={`inline-flex items-center rounded-xl border px-3 py-1 text-base font-bold ${scoreColor(
+              review.writing_score
+            )}`}
+          >
+            {review.writing_score.toFixed(1)}
+            <span className="ml-1 text-xs font-medium opacity-60">/ 10</span>
+          </span>
+        </div>
+        {open ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+      </button>
+
+      {open && (
+        <div className="border-t border-gray-100 px-5 py-4 space-y-4">
+          <p className="text-sm leading-relaxed text-gray-700">{review.overall_assessment}</p>
+
+          {sectionEntries.length > 0 && (
+            <div className="space-y-3">
+              {sectionEntries.map(([secName, sr]) => (
+                <div key={secName} className="rounded-lg border border-gray-200 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-800">{secName.replace(/_/g, " ")}</span>
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold text-white ${scoreBg(sr.score)}`}>
+                      {sr.score}/10
+                    </span>
+                  </div>
+                  {sr.issues.map((issue, i) => (
+                    <p key={i} className="flex items-start gap-2 text-sm text-red-700">
+                      <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      {issue}
+                    </p>
+                  ))}
+                  {sr.suggestions.map((sug, i) => {
+                    const key = suggKey("writing_quality", secName, sug);
+                    const isAccepted = acceptedSuggestions.has(key);
+                    return (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => onToggleSuggestion("writing_quality", secName, sug)}
+                        className={`flex w-full items-start gap-2 text-sm text-left rounded-md px-2 py-1.5 transition-colors ${
+                          isAccepted
+                            ? "bg-purple-50 text-purple-800 border border-purple-200"
+                            : "text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        {isAccepted ? (
+                          <CheckSquare className="mt-0.5 h-4 w-4 shrink-0 text-purple-600" />
+                        ) : (
+                          <Square className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" />
+                        )}
+                        <span className="flex-1">{sug}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {sectionEntries.length === 0 && (
+            <p className="text-sm text-emerald-600 italic">No writing quality issues detected.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Apply Progress ──────────────────────────────────────────────────────────
 
 function ApplyProgress({ sections }: { sections: string[] }) {
@@ -593,6 +846,8 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
     funder: DraftReview | null;
     scientific: DraftReview | null;
     coherence: CoherenceReview | null;
+    compliance: ComplianceReview | null;
+    writing_quality: WritingQualityReview | null;
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [runLoading, setRunLoading] = useState(false);
@@ -1094,6 +1349,24 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
                     acceptedSuggestions={acceptedSuggestions}
                     onToggleSuggestion={toggleSuggestion}
                     onEditSuggestion={editSuggestion}
+                  />
+                )}
+
+                {/* Compliance Panel */}
+                {reviews?.compliance && (
+                  <CompliancePanel
+                    review={reviews.compliance}
+                    acceptedSuggestions={acceptedSuggestions}
+                    onToggleSuggestion={toggleSuggestion}
+                  />
+                )}
+
+                {/* Writing Quality Panel */}
+                {reviews?.writing_quality && (
+                  <WritingQualityPanel
+                    review={reviews.writing_quality}
+                    acceptedSuggestions={acceptedSuggestions}
+                    onToggleSuggestion={toggleSuggestion}
                   />
                 )}
 

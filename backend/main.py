@@ -3232,7 +3232,7 @@ async def get_reviews(grant_id: str, _: None = Depends(verify_internal)):
         {"grant_id": grant_id}
     ).sort("created_at", -1).to_list(20)
 
-    result = {"funder": None, "scientific": None, "coherence": None}
+    result = {"funder": None, "scientific": None, "coherence": None, "compliance": None, "writing_quality": None}
     for doc in docs:
         doc["_id"] = str(doc["_id"])
         perspective = doc.get("perspective")
