@@ -414,19 +414,23 @@ def get_user_email(x_user_email: Optional[str] = Header(default=None)) -> str:
 
 # ── Request/Response models ────────────────────────────────────────────────────
 
-_VALID_TRIAGE_DECISIONS = {"pursue", "watch", "pass"}
+_VALID_TRIAGE_DECISIONS = {"pursue", "pass"}
 _VALID_REVIEW_ACTIONS = {"approve", "revise"}
-_VALID_STATUSES = {
-    "triage", "pursue", "pursuing", "watch", "drafting",
-    "draft_complete", "reviewed", "submitted", "won", "passed", "auto_pass",
-    "human_passed", "hold", "reported", "guardrail_rejected",
-}
+
+from backend.pipeline.status_contract import (
+    draft_startable_statuses,
+    is_valid_transition,
+    pre_draft_cleanup_statuses,
+    valid_statuses,
+)
+
+_VALID_STATUSES = valid_statuses()
 
 
 class TriageResumeRequest(BaseModel):
     thread_id: str
     grant_id: str
-    decision: str                      # "pursue" | "watch" | "pass"
+    decision: str                      # "pursue" | "pass"
     notes: Optional[str] = Field(default=None, max_length=2000)
     human_override: bool = False       # True when human overrides the AI recommendation
     override_reason: Optional[str] = Field(default=None, max_length=1000)
@@ -490,6 +494,7 @@ class DrafterChatRequest(BaseModel):
 class UpdateGrantStatusRequest(BaseModel):
     grant_id: str
     status: str
+    hold_reason: Optional[str] = Field(default=None, max_length=1000)
 
     @field_validator("status")
     @classmethod
@@ -497,6 +502,12 @@ class UpdateGrantStatusRequest(BaseModel):
         if v not in _VALID_STATUSES:
             raise ValueError(f"status must be one of {_VALID_STATUSES}")
         return v
+
+    @model_validator(mode="after")
+    def validate_hold_reason(self):
+        if self.status == "hold" and not (self.hold_reason or "").strip():
+            raise ValueError("hold_reason is required when status is 'hold'")
+        return self
 
 
 class ManualGrantRequest(BaseModel):
@@ -2852,11 +2863,13 @@ async def _predraft_validate(grant: dict) -> dict | None:
     """Layer 1 deterministic pre-draft checks. Returns error dict or None if OK."""
     from backend.agents.analyst import parse_deadline
 
-    # 1. Status — reject if auto_pass, pass, or watch
+    # 1. Status — only explicitly draftable states should reach the drafter
     status = (grant.get("status") or "").lower()
-    blocked_statuses = {"auto_pass", "pass", "watch"}
-    if status in blocked_statuses:
-        return {"check": "status", "reason": f"Grant status is '{status}' — not eligible for drafting"}
+    if status not in draft_startable_statuses():
+        return {
+            "check": "status",
+            "reason": f"Grant status is '{status}' — only pursue-stage grants can start drafting",
+        }
 
     # 2. Deadline freshness
     deadline_str = grant.get("deadline")
@@ -2887,6 +2900,28 @@ async def start_draft(
     grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)})
     if not grant:
         raise HTTPException(status_code=404, detail="Grant not found")
+
+    current_status = (grant.get("status") or "").lower()
+    if current_status == "guardrail_rejected" and not body.override_guardrails:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "guardrail_override_required",
+                "reason": "Grant is guardrail_rejected — start draft with an explicit override.",
+                "grant_id": body.grant_id,
+            },
+        )
+    if current_status not in draft_startable_statuses() and current_status != "guardrail_rejected":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_draft_start_status",
+                "reason": (
+                    f"Grant status is '{current_status}' — only pursue-stage grants can start drafting."
+                ),
+                "grant_id": body.grant_id,
+            },
+        )
 
     # ── Guard: prevent concurrent drafts for the same grant ──────────────────
     existing_draft = await grants_pipeline().find_one({
@@ -3567,7 +3602,7 @@ async def pipeline_status():
             "watching":  [{"$match": {"status": "watch"}}, {"$count": "n"}],
             "on_hold":   [{"$match": {"status": "hold"}}, {"$count": "n"}],
             "deadline_urgent": [
-                {"$match": {"deadline_urgent": True, "status": {"$in": ["triage", "pursue", "watch"]}}},
+                {"$match": {"deadline_urgent": True, "status": {"$in": ["triage", "pursue"]}}},
                 {"$count": "n"},
             ],
             "drafting":  [{"$match": {"status": "drafting"}}, {"$count": "n"}],
@@ -3692,7 +3727,7 @@ async def notion_webhook_triage(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
 ):
-    """Notion automation fires this when a grant Status changes to Pursue/Watch/Pass.
+    """Notion automation fires this when a grant Status changes to Pursue/Pass.
 
     Finds the matching LangGraph thread and resumes the human_triage checkpoint.
     """
@@ -3702,7 +3737,6 @@ async def notion_webhook_triage(
     # Normalize Notion status → internal status
     status_map = {
         "Pursue": "pursue", "pursue": "pursue",
-        "Watch": "watch", "watch": "watch",
         "Pass": "pass", "pass": "pass",
     }
     decision = status_map.get(body.new_status)
@@ -3864,12 +3898,6 @@ async def admin_notion_backfill(
 
 # ── Grant management ───────────────────────────────────────────────────────────
 
-_VALID_STATUSES = {
-    "triage", "pursue", "pursuing", "watch", "drafting",
-    "draft_complete", "reviewed", "submitted", "won", "passed", "auto_pass",
-    "human_passed", "hold", "reported",
-}
-
 
 @app.post("/grants/manual")
 async def add_manual_grant(
@@ -4001,9 +4029,10 @@ async def add_manual_grant(
 async def update_grant_status_api(
     body: UpdateGrantStatusRequest,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
     """Move a grant to a new Kanban stage (called by the drag-and-drop UI)."""
-    from backend.db.mongo import grants_scored
+    from backend.db.mongo import audit_logs, grants_pipeline, grants_scored
     from bson import ObjectId
 
     if body.status not in _VALID_STATUSES:
@@ -4013,12 +4042,64 @@ async def update_grant_status_api(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid grant_id")
 
-    result = await grants_scored().update_one(
-        {"_id": oid},
-        {"$set": {"status": body.status, "updated_at": datetime.now(timezone.utc).isoformat()}},
-    )
-    if result.matched_count == 0:
+    grant = await grants_scored().find_one({"_id": oid}, {"status": 1, "title": 1, "grant_name": 1})
+    if not grant:
         raise HTTPException(status_code=404, detail="Grant not found")
+
+    current_status = (grant.get("status") or "").lower()
+    if not is_valid_transition(current_status, body.status):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Invalid pipeline transition: {current_status or 'unknown'} -> {body.status}. "
+                "Use the appropriate pipeline action instead of forcing the status."
+            ),
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+    update_doc = {"status": body.status, "updated_at": now}
+    unset_doc = {}
+    if body.status == "human_passed":
+        update_doc["human_override"] = True
+        update_doc["override_at"] = now
+    if body.status == "hold":
+        update_doc["hold_reason"] = (body.hold_reason or "").strip()
+        update_doc["hold_at"] = now
+    else:
+        unset_doc["hold_reason"] = ""
+        unset_doc["hold_at"] = ""
+
+    grant_update = {"$set": update_doc}
+    if unset_doc:
+        grant_update["$unset"] = unset_doc
+
+    await grants_scored().update_one({"_id": oid}, grant_update)
+
+    if body.status in pre_draft_cleanup_statuses():
+        await grants_pipeline().update_many(
+            {"grant_id": body.grant_id, "status": {"$in": ["drafting", "pending_interrupt"]}},
+            {"$set": {"status": "cancelled", "updated_at": now}},
+        )
+    else:
+        await grants_pipeline().update_many(
+            {"grant_id": body.grant_id, "status": {"$nin": ["cancelled"]}},
+            {"$set": {"status": body.status, "updated_at": now}},
+        )
+
+    try:
+        await audit_logs().insert_one({
+            "node": "pipeline_status",
+            "action": "status_changed",
+            "grant_id": body.grant_id,
+            "grant_name": grant.get("title") or grant.get("grant_name") or "",
+            "from_status": current_status,
+            "to_status": body.status,
+            "hold_reason": body.hold_reason.strip() if body.status == "hold" and body.hold_reason else None,
+            "user_email": user_email,
+            "created_at": now,
+        })
+    except Exception:
+        logger.debug("Audit log skipped for grant %s", body.grant_id, exc_info=True)
 
     # Sync status change to Notion
     try:

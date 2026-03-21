@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 
 const STATUS_STYLES: Record<string, string> = {
   triage:         "bg-amber-100 text-amber-800 hover:ring-2 hover:ring-amber-300",
+  watch:          "bg-yellow-100 text-yellow-800 hover:ring-2 hover:ring-yellow-300",
   pursue:         "bg-green-100 text-green-800 hover:ring-2 hover:ring-green-300",
   pursuing:       "bg-green-100 text-green-800 hover:ring-2 hover:ring-green-300",
   drafting:       "bg-purple-100 text-purple-800 hover:ring-2 hover:ring-purple-300",
@@ -17,10 +18,12 @@ const STATUS_STYLES: Record<string, string> = {
   human_passed:   "bg-gray-200 text-gray-600 hover:ring-2 hover:ring-gray-400",
   hold:           "bg-orange-100 text-orange-800 hover:ring-2 hover:ring-orange-300",
   reported:       "bg-red-100 text-red-600 hover:ring-2 hover:ring-red-300",
+  guardrail_rejected: "bg-rose-100 text-rose-700 hover:ring-2 hover:ring-rose-300",
 };
 
 const STATUS_LABELS: Record<string, string> = {
   triage:         "Shortlisted",
+  watch:          "Watch",
   pursue:         "Pursue",
   pursuing:       "Pursuing",
   drafting:       "Drafting",
@@ -33,14 +36,15 @@ const STATUS_LABELS: Record<string, string> = {
   human_passed:   "Rejected",
   hold:           "Hold",
   reported:       "Reported",
+  guardrail_rejected: "Guardrail Rejected",
 };
 
 const MOVE_OPTIONS = [
   { value: "triage",       label: "Shortlisted", dot: "bg-amber-400" },
   { value: "pursue",       label: "Pursue",      dot: "bg-green-400" },
   { value: "hold",         label: "Hold",         dot: "bg-orange-400" },
-  { value: "drafting",     label: "Drafting",     dot: "bg-purple-400" },
   { value: "submitted",    label: "Submitted",    dot: "bg-cyan-400" },
+  { value: "won",          label: "Won",          dot: "bg-emerald-400" },
   { value: "human_passed", label: "Rejected",      dot: "bg-red-400" },
 ];
 

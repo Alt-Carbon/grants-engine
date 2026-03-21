@@ -25,6 +25,8 @@ import { GrantDetailSheet } from "./GrantDetailSheet";
 import { useLastSeen, isNewSince } from "@/hooks/useLastSeen";
 import { useGrantUrl } from "@/hooks/useGrantUrl";
 import type { Grant } from "@/lib/queries";
+import { canStartDraftFromStatus, getColumnForStatus } from "@/lib/pipelineStatus";
+import { requestHoldReason } from "@/lib/holdReason";
 
 // ── Column definitions ───────────────────────────────────────────────────────
 
@@ -117,18 +119,7 @@ const SORT_OPTIONS: { key: SortKey; label: string; icon: typeof ArrowUpDown }[] 
 ];
 
 function statusToColumn(status: string): ColumnId {
-  if (status === "triage") return "shortlisted";
-  if (status === "pursue" || status === "pursuing") return "pursue";
-  if (status === "hold") return "hold";
-  if (status === "drafting") return "drafting";
-  if (
-    status === "submitted" ||
-    status === "draft_complete" ||
-    status === "reviewed" ||
-    status === "won"
-  )
-    return "submitted";
-  return "rejected";
+  return getColumnForStatus(status) as ColumnId;
 }
 
 function sortGrants(grants: Grant[], sortKey: SortKey): Grant[] {
@@ -388,11 +379,19 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
     });
   }, []);
 
-  async function persistStatus(grantId: string, newStatus: string) {
+  async function persistStatus(
+    grantId: string,
+    newStatus: string,
+    holdReason?: string
+  ) {
     const res = await fetch("/api/grants/status", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ grant_id: grantId, status: newStatus }),
+      body: JSON.stringify({
+        grant_id: grantId,
+        status: newStatus,
+        hold_reason: holdReason,
+      }),
     });
     if (!res.ok) throw new Error(await res.text());
   }
@@ -415,6 +414,18 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
     }
     const dstColId = statusToColumn(newStatus);
     const snapshot = { ...grants };
+    const currentGrant = srcColId
+      ? grants[srcColId]?.find((g) => g._id === grantId)
+      : undefined;
+    const holdReason =
+      newStatus === "hold"
+        ? requestHoldReason((currentGrant as { hold_reason?: string } | undefined)?.hold_reason)
+        : undefined;
+
+    if (newStatus === "hold" && !holdReason) {
+      markUpdating(grantId, false);
+      return;
+    }
 
     if (srcColId && srcColId !== dstColId) {
       setGrants((prev) => {
@@ -427,14 +438,21 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
         if (!movedGrant) return prev;
         const dstList = [
           ...(prev[dstColId] ?? []),
-          { ...movedGrant, status: newStatus },
+          { ...movedGrant, status: newStatus, hold_reason: holdReason },
         ];
         return { ...prev, [srcColId!]: srcList, [dstColId]: dstList };
       });
+    } else if (srcColId && newStatus === "hold" && holdReason) {
+      setGrants((prev) => ({
+        ...prev,
+        [srcColId!]: (prev[srcColId!] ?? []).map((g) =>
+          g._id === grantId ? { ...g, hold_reason: holdReason } : g
+        ),
+      }));
     }
 
     try {
-      await persistStatus(grantId, newStatus);
+      await persistStatus(grantId, newStatus, holdReason);
     } catch (e) {
       setGrants(snapshot);
       setError(
@@ -480,33 +498,58 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
     const srcIndex = srcList.findIndex((g) => g._id === draggableId);
     if (srcIndex < 0) return;
 
-    const [moved] = srcList.splice(srcIndex, 1);
-    const updatedGrant = { ...moved, status: column.targetStatus };
-    dstList.splice(dstIndex, 0, updatedGrant);
-
     const snapshot = { ...grants };
-    setGrants((prev) => ({ ...prev, [srcId]: srcList, [dstId]: dstList }));
     markUpdating(draggableId, true);
     setError(null);
 
     try {
-      await persistStatus(draggableId, column.targetStatus);
+      const moved = srcList[srcIndex];
+      const holdReason =
+        dstId === "hold"
+          ? requestHoldReason((moved as { hold_reason?: string } | undefined)?.hold_reason)
+          : undefined;
 
-      // If moved to Drafting -> trigger start-draft and navigate to drafter
+      if (dstId === "hold" && !holdReason) {
+        return;
+      }
+
       if (dstId === "drafting") {
+        if (!moved || !canStartDraftFromStatus(moved.status)) {
+          setError("Only pursue-stage grants can be moved into Drafting.");
+          return;
+        }
+
         try {
           const triggerRes = await fetch("/api/drafter/trigger", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ grant_id: draggableId }),
           });
+          const triggerData = await triggerRes.json();
           if (!triggerRes.ok) {
-            setError("Grant moved to Drafting but draft trigger failed — start draft manually from the Drafter page.");
+            throw new Error(
+              triggerData?.detail?.reason ||
+                triggerData?.detail ||
+                triggerData?.error ||
+                "Failed to start draft"
+            );
           }
+          const [movedGrant] = srcList.splice(srcIndex, 1);
+          dstList.splice(dstIndex, 0, { ...movedGrant, status: column.targetStatus });
+          setGrants((prev) => ({ ...prev, [srcId]: srcList, [dstId]: dstList }));
         } catch {
-          setError("Grant moved to Drafting but draft trigger failed — start draft manually from the Drafter page.");
+          throw new Error("Draft trigger failed — the grant was not moved to Drafting.");
         }
         router.push("/drafter");
+      } else {
+        const [moved] = srcList.splice(srcIndex, 1);
+        dstList.splice(dstIndex, 0, {
+          ...moved,
+          status: column.targetStatus,
+          hold_reason: holdReason,
+        });
+        setGrants((prev) => ({ ...prev, [srcId]: srcList, [dstId]: dstList }));
+        await persistStatus(draggableId, column.targetStatus, holdReason);
       }
     } catch (e) {
       setGrants(snapshot);

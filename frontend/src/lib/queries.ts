@@ -22,6 +22,7 @@ export interface Grant {
   themes_detected?: string[];
   recommended_action?: string;
   rationale?: string;
+  hold_reason?: string;
   scores?: Record<string, number>;
   human_override?: boolean;
   override_reason?: string;
@@ -119,7 +120,7 @@ export async function getDashboardStats() {
             {
               $match: {
                 deadline_urgent: true,
-                status: { $in: ["triage", "pursue"] },
+                status: { $in: ["triage", "pursue", "pursuing"] },
               },
             },
             { $count: "n" },
@@ -213,7 +214,7 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
     const g = serializeId(doc as Record<string, unknown>) as unknown as Grant;
     if (!g.grant_name && g.title) g.grant_name = g.title;
 
-    if (g.status === "triage") grouped.shortlisted.push(g);
+    if (g.status === "triage" || g.status === "watch") grouped.shortlisted.push(g);
     else if (g.status === "pursue" || g.status === "pursuing") grouped.pursue.push(g);
     else if (g.status === "hold") grouped.hold.push(g);
     else if (g.status === "drafting") grouped.drafting.push(g);

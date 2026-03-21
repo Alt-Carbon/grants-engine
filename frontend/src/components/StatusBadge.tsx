@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 
 const STATUS_STYLES: Record<string, string> = {
   triage:         "bg-amber-100 text-amber-800",
+  watch:          "bg-yellow-100 text-yellow-800",
   pursue:         "bg-green-100 text-green-800",
   pursuing:       "bg-green-100 text-green-800",
   drafting:       "bg-purple-100 text-purple-800",
@@ -14,11 +15,13 @@ const STATUS_STYLES: Record<string, string> = {
   human_passed:   "bg-red-200 text-red-700",
   hold:           "bg-orange-100 text-orange-800",
   reported:       "bg-red-100 text-red-600",
+  guardrail_rejected: "bg-rose-100 text-rose-700",
 };
 
 /** Display-friendly labels — internal status key → UI label */
 const STATUS_LABELS: Record<string, string> = {
   triage:         "Shortlisted",
+  watch:          "Watch",
   pursue:         "Pursue",
   pursuing:       "Pursuing",
   drafting:       "Drafting",
@@ -31,6 +34,7 @@ const STATUS_LABELS: Record<string, string> = {
   human_passed:   "Rejected",
   hold:           "Hold",
   reported:       "Reported",
+  guardrail_rejected: "Guardrail Rejected",
 };
 
 export function getStatusLabel(status: string): string {

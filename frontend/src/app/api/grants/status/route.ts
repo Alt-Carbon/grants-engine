@@ -1,86 +1,40 @@
 /**
  * POST /api/grants/status
- * Update a grant's status directly in MongoDB.
+ * Proxy to FastAPI POST /update/grant-status so there is a single mutation path.
  */
-import { ObjectId } from "mongodb";
-import { getDb } from "@/lib/mongodb";
-
-const VALID_STATUSES = new Set([
-  "triage",
-  "pursue",
-  "pursuing",
-  "drafting",
-  "draft_complete",
-  "reviewed",
-  "submitted",
-  "won",
-  "passed",
-  "auto_pass",
-  "human_passed",
-  "hold",
-  "reported",
-]);
+import { proxyHeaders } from "@/lib/api";
+import { auth } from "@/lib/auth";
 
 export async function POST(req: Request) {
-  try {
-    const { grant_id, status } = await req.json();
+  const session = await auth();
+  if (!session?.user) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
-    if (!grant_id || !status) {
+  const url = (process.env.FASTAPI_URL ?? "").replace(/\/+$/, "");
+
+  try {
+    const body = await req.json();
+    const grantId = body.grant_id ?? body.grantId;
+    const status = body.status;
+    const holdReason = body.hold_reason;
+
+    if (!grantId || !status) {
       return Response.json(
         { error: "grant_id and status are required" },
         { status: 400 }
       );
     }
 
-    if (!VALID_STATUSES.has(status)) {
-      return Response.json(
-        { error: `Invalid status: ${status}` },
-        { status: 400 }
-      );
-    }
+    const res = await fetch(`${url}/update/grant-status`, {
+      method: "POST",
+      headers: await proxyHeaders(),
+      body: JSON.stringify({ grant_id: grantId, status, hold_reason: holdReason }),
+      cache: "no-store",
+    });
 
-    const db = await getDb();
-
-    // Build the update — track human overrides for passed statuses
-    const isHumanOverride = status === "human_passed";
-    const update: Record<string, unknown> = { status };
-    if (isHumanOverride) {
-      update.human_override = true;
-      update.override_at = new Date().toISOString();
-    }
-
-    let filter: Record<string, unknown>;
-    try {
-      filter = { _id: new ObjectId(grant_id) };
-    } catch {
-      // If grant_id isn't a valid ObjectId, try as string
-      filter = { _id: grant_id };
-    }
-
-    const result = await db
-      .collection("grants_scored")
-      .updateOne(filter, { $set: update });
-
-    if (result.matchedCount === 0) {
-      return Response.json(
-        { error: "Grant not found" },
-        { status: 404 }
-      );
-    }
-
-    // When moving a grant back to a pre-drafting status, clean up stale
-    // grants_pipeline records so the drafter sidebar doesn't show it.
-    const preDraftStatuses = new Set(["triage", "pursue", "pursuing", "passed", "auto_pass", "human_passed", "hold"]);
-    if (preDraftStatuses.has(status)) {
-      await db
-        .collection("grants_pipeline")
-        .updateMany(
-          { grant_id: grant_id, status: { $in: ["drafting", "pending_interrupt"] } },
-          { $set: { status: "cancelled" } },
-        );
-    }
-
-    return Response.json({ ok: true, status });
+    const data = await res.json();
+    return Response.json(data, { status: res.status });
   } catch (e) {
     return Response.json(
       { error: e instanceof Error ? e.message : "Unknown error" },
