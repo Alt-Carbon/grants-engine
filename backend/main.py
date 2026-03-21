@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -3355,11 +3355,142 @@ async def apply_suggestions(body: ApplySuggestionsRequest, _: None = Depends(ver
         grant_title, len(revised_names), new_version,
     )
 
+    # Fire-and-forget Notion sync for revised sections
+    try:
+        from backend.integrations.notion_sync import sync_draft_section
+
+        async def _sync_all():
+            for sec_name in revised_names:
+                sec = new_sections.get(sec_name, {})
+                try:
+                    await sync_draft_section(
+                        grant_id=body.grant_id,
+                        grant_name=grant_title,
+                        section_name=sec_name,
+                        content=sec.get("content", ""),
+                        word_count=sec.get("word_count", 0),
+                        word_limit=sec.get("word_limit", 0),
+                        version=new_version,
+                        status="Revised",
+                        revision_notes=", ".join(section_suggestions.get(sec_name, []))[:2000],
+                    )
+                except Exception as e:
+                    logger.warning("Notion sync failed for section %s: %s", sec_name, e)
+
+        asyncio.create_task(_sync_all())
+    except Exception as e:
+        logger.debug("Notion sync skipped after apply: %s", e)
+
     return {
         "status": "applied",
         "grant_id": body.grant_id,
         "new_version": new_version,
         "revised_sections": revised_names,
+    }
+
+
+# ── Draft Version History & Diff ──────────────────────────────────────────────
+
+@app.get("/draft/{grant_id}/versions")
+async def get_draft_versions(grant_id: str, _: None = Depends(verify_internal)):
+    """Return all draft versions for a grant (metadata only)."""
+    from backend.db.mongo import grant_drafts
+
+    cursor = grant_drafts().find(
+        {"grant_id": grant_id},
+    ).sort("version", -1)
+    versions = []
+    async for doc in cursor:
+        secs = doc.get("sections", {})
+        versions.append({
+            "version": doc.get("version", 0),
+            "created_at": doc.get("created_at", ""),
+            "source": doc.get("source", "drafter"),
+            "applied_suggestions": doc.get("applied_suggestions", {}),
+            "section_count": len(secs),
+        })
+    return {"grant_id": grant_id, "versions": versions}
+
+
+@app.get("/draft/{grant_id}/version/{version}")
+async def get_draft_version(grant_id: str, version: int, _: None = Depends(verify_internal)):
+    """Return full sections for a specific draft version."""
+    from backend.db.mongo import grant_drafts
+
+    doc = await grant_drafts().find_one(
+        {"grant_id": grant_id, "version": version}
+    )
+    if not doc:
+        raise HTTPException(404, f"Version {version} not found for grant {grant_id}")
+
+    sections = doc.get("sections", {})
+    return {
+        "grant_id": grant_id,
+        "version": version,
+        "created_at": doc.get("created_at", ""),
+        "source": doc.get("source", "drafter"),
+        "sections": {
+            name: {
+                "content": sec.get("content", ""),
+                "word_count": sec.get("word_count", 0),
+            }
+            for name, sec in sections.items()
+        },
+    }
+
+
+@app.get("/draft/{grant_id}/diff")
+async def get_draft_diff(
+    grant_id: str,
+    v1: int = Query(..., description="Older version"),
+    v2: int = Query(..., description="Newer version"),
+    _: None = Depends(verify_internal),
+):
+    """Return a section-by-section diff between two draft versions."""
+    from backend.db.mongo import grant_drafts
+    import difflib
+
+    doc1 = await grant_drafts().find_one({"grant_id": grant_id, "version": v1})
+    doc2 = await grant_drafts().find_one({"grant_id": grant_id, "version": v2})
+    if not doc1:
+        raise HTTPException(404, f"Version {v1} not found")
+    if not doc2:
+        raise HTTPException(404, f"Version {v2} not found")
+
+    secs1 = doc1.get("sections", {})
+    secs2 = doc2.get("sections", {})
+    all_sections = sorted(set(list(secs1.keys()) + list(secs2.keys())))
+
+    diffs = {}
+    for sec in all_sections:
+        old_content = secs1.get(sec, {}).get("content", "")
+        new_content = secs2.get(sec, {}).get("content", "")
+        if old_content == new_content:
+            diffs[sec] = {"changed": False}
+            continue
+
+        # Generate unified diff
+        old_lines = old_content.splitlines(keepends=True)
+        new_lines = new_content.splitlines(keepends=True)
+        diff_lines = list(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile=f"v{v1}/{sec}", tofile=f"v{v2}/{sec}",
+            lineterm="",
+        ))
+        diffs[sec] = {
+            "changed": True,
+            "old_content": old_content,
+            "new_content": new_content,
+            "old_word_count": len(old_content.split()),
+            "new_word_count": len(new_content.split()),
+            "diff": "\n".join(diff_lines),
+        }
+
+    return {
+        "grant_id": grant_id,
+        "v1": v1,
+        "v2": v2,
+        "sections": diffs,
     }
 
 
