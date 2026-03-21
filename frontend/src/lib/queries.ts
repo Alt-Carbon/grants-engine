@@ -1041,50 +1041,6 @@ export interface CoherenceReview {
   created_at: string;
 }
 
-export interface ComplianceIssue {
-  type: "missing_section" | "word_limit" | "eligibility" | "placeholder" | "budget" | "timeline";
-  description: string;
-  fix: string;
-}
-
-export interface ComplianceReview {
-  _id: string;
-  grant_id: string;
-  draft_id: string;
-  draft_version: number;
-  perspective: "compliance";
-  compliance_score: number;
-  all_sections_present: boolean;
-  missing_sections: string[];
-  word_limit_violations: { section: string; limit: number; actual: number; over_by: number }[];
-  eligibility_issues: string[];
-  placeholder_markers: string[];
-  budget_in_range: boolean;
-  issues: ComplianceIssue[];
-  overall_assessment: string;
-  created_at: string;
-}
-
-export interface WritingQualityReview {
-  _id: string;
-  grant_id: string;
-  draft_id: string;
-  draft_version: number;
-  perspective: "writing_quality";
-  writing_score: number;
-  total_violations: number;
-  section_reviews: Record<string, {
-    score: number;
-    issues: string[];
-    suggestions: string[];
-    strengths: string[];
-    word_count: number;
-  }>;
-  issues: string[];
-  overall_assessment: string;
-  created_at: string;
-}
-
 export async function getReviewableGrants(): Promise<Grant[]> {
   const db = await getDb();
   const docs = await db
@@ -1105,8 +1061,6 @@ export async function getReviewsForGrant(grantId: string): Promise<{
   funder: DraftReview | null;
   scientific: DraftReview | null;
   coherence: CoherenceReview | null;
-  compliance: ComplianceReview | null;
-  writing_quality: WritingQualityReview | null;
 }> {
   const db = await getDb();
   const docs = await db
@@ -1120,22 +1074,16 @@ export async function getReviewsForGrant(grantId: string): Promise<{
     funder: DraftReview | null;
     scientific: DraftReview | null;
     coherence: CoherenceReview | null;
-    compliance: ComplianceReview | null;
-    writing_quality: WritingQualityReview | null;
   } = {
     funder: null,
     scientific: null,
     coherence: null,
-    compliance: null,
-    writing_quality: null,
   };
   for (const doc of docs) {
     const r = serializeId(doc as Record<string, unknown>) as any;
     if (r.perspective === "funder" && !result.funder) result.funder = r;
     if (r.perspective === "scientific" && !result.scientific) result.scientific = r;
     if (r.perspective === "coherence" && !result.coherence) result.coherence = r;
-    if (r.perspective === "compliance" && !result.compliance) result.compliance = r;
-    if (r.perspective === "writing_quality" && !result.writing_quality) result.writing_quality = r;
   }
   return result;
 }
