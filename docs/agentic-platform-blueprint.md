@@ -83,7 +83,7 @@ between ad hoc `BackgroundTasks` and a future durable runtime like Temporal.
 
 - workflow requests are persisted in `workflow_runs` before execution
 - workers claim jobs with leases, so queued work survives process restarts
-- the first live paths using this are reviewer execution, analyst execution, draft start, and human resume actions
+- the first live paths using this are reviewer execution, analyst execution, draft start, human resume actions, scout, knowledge sync, and admin maintenance jobs
 - immediate execution still happens in-process by draining the durable queue
 
 This is not the final orchestration architecture, but it is a safer migration

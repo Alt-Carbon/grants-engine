@@ -31,9 +31,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from backend.config.settings import get_settings
 from backend.db.mongo import ensure_indexes, get_db
 from backend.graph.graph import get_graph
-from backend.jobs.backfill_job import run_field_backfill, run_deduplication
-from backend.jobs.knowledge_job import run_knowledge_sync
-from backend.jobs.scout_job import run_scout_pipeline
 from backend.jobs.scheduler import setup_scheduler, teardown_scheduler, get_scheduler_status
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -314,12 +311,6 @@ def _build_grant_context(grant: dict) -> str:
         parts.append(f"STRATEGIC NOTE:\n{da['strategic_note']}")
 
     return "\n\n".join(parts)
-
-
-# ── Scout job state (lock-protected) ──────────────────────────────────────────
-_scout_lock = asyncio.Lock()
-_scout_running: bool = False
-_scout_started_at: Optional[str] = None
 
 
 @asynccontextmanager
@@ -1035,10 +1026,21 @@ async def api_health_status():
 async def scout_status():
     """Current scout job state + last run info. Polled by Streamlit."""
     from backend.db.mongo import scout_runs
+    from backend.projects.grants_engine.workflow_runtime import (
+        SCOUT_RUN_WORKFLOW_NAME,
+        get_latest_workflow_run,
+    )
+
     last = await scout_runs().find_one(sort=[("run_at", -1)])
+    active = await get_latest_workflow_run(
+        workflow_names=[SCOUT_RUN_WORKFLOW_NAME],
+        statuses=["pending", "running"],
+    )
     return {
-        "running": _scout_running,
-        "started_at": _scout_started_at,
+        "running": bool(active),
+        "queued": bool(active and active.get("status") == "pending"),
+        "started_at": (active or {}).get("started_at") or (active or {}).get("created_at"),
+        "workflow_id": (active or {}).get("workflow_id"),
         "last_run_at": last["run_at"] if last else None,
         "last_run_new_grants": last.get("new_grants", 0) if last else 0,
         "last_run_total_found": last.get("total_found", 0) if last else 0,
@@ -1325,8 +1327,23 @@ async def cron_scout(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_cron),
 ):
-    background_tasks.add_task(run_scout_pipeline)
-    return {"status": "scout_job_started"}
+    from backend.projects.grants_engine.workflow_runtime import (
+        SCOUT_RUN_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_scout_run,
+    )
+
+    handle = await enqueue_scout_run(user_email="system:cron")
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[SCOUT_RUN_WORKFLOW_NAME],
+        limit=1,
+    )
+    return {
+        "status": "scout_job_started" if not handle.get("deduplicated") else "scout_already_running",
+        "workflow_id": handle.get("workflow_id"),
+        "workflow_status": handle.get("status") or "pending",
+    }
 
 
 @app.post("/cron/knowledge-sync")
@@ -1334,8 +1351,23 @@ async def cron_knowledge_sync(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_cron),
 ):
-    background_tasks.add_task(run_knowledge_sync)
-    return {"status": "knowledge_sync_started"}
+    from backend.projects.grants_engine.workflow_runtime import (
+        KNOWLEDGE_SYNC_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_knowledge_sync_run,
+    )
+
+    handle = await enqueue_knowledge_sync_run(user_email="system:cron")
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[KNOWLEDGE_SYNC_WORKFLOW_NAME],
+        limit=1,
+    )
+    return {
+        "status": "knowledge_sync_started" if not handle.get("deduplicated") else "knowledge_sync_already_running",
+        "workflow_id": handle.get("workflow_id"),
+        "workflow_status": handle.get("status") or "pending",
+    }
 
 
 # ── Manual run endpoints (called by Streamlit) ────────────────────────────────
@@ -1344,49 +1376,50 @@ async def cron_knowledge_sync(
 async def manual_scout(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
-    global _scout_running, _scout_started_at
-    async with _scout_lock:
-        if _scout_running:
-            return {"status": "scout_already_running", "started_at": _scout_started_at}
-        _scout_running = True
-        _scout_started_at = datetime.now(timezone.utc).isoformat()
+    from backend.projects.grants_engine.workflow_runtime import (
+        SCOUT_RUN_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_scout_run,
+    )
 
-    async def _run():
-        global _scout_running, _scout_started_at
-        try:
-            result = await run_scout_pipeline()
-            # Emit scout completion notification
-            try:
-                from backend.notifications.hub import notify_scout_complete
-                await notify_scout_complete(
-                    new_grants=result.get("new_grants", 0) if isinstance(result, dict) else 0,
-                    total_found=result.get("total_found", 0) if isinstance(result, dict) else 0,
-                )
-            except Exception:
-                logger.debug("Scout notification failed", exc_info=True)
-        except Exception as e:
-            try:
-                from backend.notifications.hub import notify_agent_error
-                await notify_agent_error("scout", str(e))
-            except Exception:
-                pass
-        finally:
-            async with _scout_lock:
-                _scout_running = False
-                _scout_started_at = None
-
-    background_tasks.add_task(_run)
-    return {"status": "scout_job_started", "started_at": _scout_started_at}
+    handle = await enqueue_scout_run(user_email=user_email)
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[SCOUT_RUN_WORKFLOW_NAME],
+        limit=1,
+    )
+    return {
+        "status": "scout_job_started" if not handle.get("deduplicated") else "scout_already_running",
+        "workflow_id": handle.get("workflow_id"),
+        "workflow_status": handle.get("status") or "pending",
+    }
 
 
 @app.post("/run/knowledge-sync")
 async def manual_knowledge_sync(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
-    background_tasks.add_task(run_knowledge_sync)
-    return {"status": "knowledge_sync_started"}
+    from backend.projects.grants_engine.workflow_runtime import (
+        KNOWLEDGE_SYNC_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_knowledge_sync_run,
+    )
+
+    handle = await enqueue_knowledge_sync_run(user_email=user_email)
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[KNOWLEDGE_SYNC_WORKFLOW_NAME],
+        limit=1,
+    )
+    return {
+        "status": "knowledge_sync_started" if not handle.get("deduplicated") else "knowledge_sync_already_running",
+        "workflow_id": handle.get("workflow_id"),
+        "workflow_status": handle.get("status") or "pending",
+    }
 
 
 @app.post("/run/sync-profile")
@@ -3287,21 +3320,55 @@ async def thread_status(thread_id: str, _: None = Depends(verify_internal)):
 async def admin_backfill_fields(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
     """Backfill structured fields (grant_type, geography, eligibility, application_url,
     amount, rationale) on all existing grants missing these fields."""
-    background_tasks.add_task(run_field_backfill)
-    return {"status": "backfill_started", "ts": datetime.now(timezone.utc).isoformat()}
+    from backend.projects.grants_engine.workflow_runtime import (
+        FIELD_BACKFILL_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_field_backfill_run,
+    )
+
+    handle = await enqueue_field_backfill_run(user_email=user_email)
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[FIELD_BACKFILL_WORKFLOW_NAME],
+        limit=1,
+    )
+    return {
+        "status": "backfill_started" if not handle.get("deduplicated") else "backfill_already_running",
+        "workflow_id": handle.get("workflow_id"),
+        "workflow_status": handle.get("status") or "pending",
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.post("/admin/deduplicate")
 async def admin_deduplicate(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
     """Remove duplicate grants from grants_raw and grants_scored collections."""
-    background_tasks.add_task(run_deduplication)
-    return {"status": "deduplication_started", "ts": datetime.now(timezone.utc).isoformat()}
+    from backend.projects.grants_engine.workflow_runtime import (
+        DEDUPLICATION_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_deduplication_run,
+    )
+
+    handle = await enqueue_deduplication_run(user_email=user_email)
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[DEDUPLICATION_WORKFLOW_NAME],
+        limit=1,
+    )
+    return {
+        "status": "deduplication_started" if not handle.get("deduplicated") else "deduplication_already_running",
+        "workflow_id": handle.get("workflow_id"),
+        "workflow_status": handle.get("status") or "pending",
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ── Notion webhook endpoints (for Notion → Backend automation) ──────────────
@@ -3377,31 +3444,34 @@ async def notion_webhook_triage(
         thread_id = pipeline.get("thread_id")
 
     if thread_id:
-        async def _resume():
-            try:
-                graph = get_graph()
-                config = {"configurable": {"thread_id": thread_id}}
-                await graph.ainvoke(
-                    {
-                        "human_triage_decision": decision,
-                        "selected_grant_id": body.mongo_id,
-                        "triage_notes": body.notes,
-                    },
-                    config=config,
-                )
-            except Exception as e:
-                logger.error("Notion webhook triage resume failed: %s", e)
+        from backend.projects.grants_engine.workflow_runtime import (
+            TRIAGE_RESUME_WORKFLOW_NAME,
+            drain_grants_workflows,
+            enqueue_resume_triage_workflow,
+        )
 
-        background_tasks.add_task(_resume)
+        handle = await enqueue_resume_triage_workflow(
+            thread_id=thread_id,
+            grant_id=body.mongo_id,
+            decision=decision,
+            notes=body.notes,
+            user_email="system:notion_webhook",
+        )
+        background_tasks.add_task(
+            drain_grants_workflows,
+            workflow_names=[TRIAGE_RESUME_WORKFLOW_NAME],
+            limit=1,
+        )
         logger.info(
             "Notion webhook: triage %s for grant %s (thread %s)",
             decision, body.mongo_id, thread_id,
         )
         return {
-            "status": "triage_resumed",
+            "status": "triage_resumed" if not handle.get("deduplicated") else "triage_already_queued",
             "decision": decision,
             "grant_id": body.mongo_id,
             "thread_id": thread_id,
+            "workflow_id": handle.get("workflow_id"),
         }
     else:
         # No active thread — just update the status (already done above)
@@ -3451,30 +3521,37 @@ async def notion_webhook_section_review(
 
     thread_id = pipeline["thread_id"]
 
-    async def _resume():
-        try:
-            from langgraph.types import Command
+    from backend.projects.grants_engine.workflow_runtime import (
+        SECTION_REVIEW_RESUME_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_resume_section_review_workflow,
+    )
 
-            graph = get_graph()
-            config = {"configurable": {"thread_id": thread_id}}
-            update: dict = {"section_review_decision": action}
-            if body.revision_notes and action == "revise":
-                update["section_revision_instructions"] = {body.section_name: body.revision_notes}
-            await graph.ainvoke(Command(resume=True, update=update), config=config)
-        except Exception as e:
-            logger.error("Notion webhook section review resume failed: %s", e)
-
-    background_tasks.add_task(_resume)
+    handle = await enqueue_resume_section_review_workflow(
+        thread_id=thread_id,
+        section_name=body.section_name,
+        action=action,
+        edited_content=None,
+        instructions=body.revision_notes if action == "revise" else None,
+        critique=None,
+        user_email="system:notion_webhook",
+    )
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[SECTION_REVIEW_RESUME_WORKFLOW_NAME],
+        limit=1,
+    )
     logger.info(
         "Notion webhook: section '%s' %s for grant %s (thread %s)",
         body.section_name, action, body.mongo_grant_id, thread_id,
     )
     return {
-        "status": "section_review_resumed",
+        "status": "section_review_resumed" if not handle.get("deduplicated") else "section_review_already_queued",
         "action": action,
         "section_name": body.section_name,
         "grant_id": body.mongo_grant_id,
         "thread_id": thread_id,
+        "workflow_id": handle.get("workflow_id"),
     }
 
 
@@ -3482,19 +3559,27 @@ async def notion_webhook_section_review(
 async def admin_notion_backfill(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
     """Backfill all scored grants to Notion Mission Control."""
-    from backend.db.mongo import grants_scored
-    from backend.integrations.notion_sync import backfill_grants
+    from backend.projects.grants_engine.workflow_runtime import (
+        NOTION_BACKFILL_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_notion_backfill_run,
+    )
 
-    async def _backfill():
-        cursor = grants_scored().find({}).sort("weighted_total", -1)
-        all_grants = await cursor.to_list(length=2000)
-        count = await backfill_grants(all_grants)
-        logger.info("Notion backfill complete: %d grants synced", count)
-
-    background_tasks.add_task(_backfill)
-    return {"status": "notion_backfill_started", "ts": datetime.now(timezone.utc).isoformat()}
+    handle = await enqueue_notion_backfill_run(user_email=user_email)
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[NOTION_BACKFILL_WORKFLOW_NAME],
+        limit=1,
+    )
+    return {
+        "status": "notion_backfill_started" if not handle.get("deduplicated") else "notion_backfill_already_running",
+        "workflow_id": handle.get("workflow_id"),
+        "workflow_status": handle.get("status") or "pending",
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ── Grant management ───────────────────────────────────────────────────────────

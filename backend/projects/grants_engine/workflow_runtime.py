@@ -18,6 +18,11 @@ REVIEW_WORKFLOW_NAME = "grants_engine.review_bundle"
 DRAFT_START_WORKFLOW_NAME = "grants_engine.draft.start"
 TRIAGE_RESUME_WORKFLOW_NAME = "grants_engine.triage.resume"
 SECTION_REVIEW_RESUME_WORKFLOW_NAME = "grants_engine.section_review.resume"
+SCOUT_RUN_WORKFLOW_NAME = "grants_engine.scout.run"
+KNOWLEDGE_SYNC_WORKFLOW_NAME = "grants_engine.knowledge_sync.run"
+FIELD_BACKFILL_WORKFLOW_NAME = "grants_engine.backfill.fields"
+DEDUPLICATION_WORKFLOW_NAME = "grants_engine.deduplication.run"
+NOTION_BACKFILL_WORKFLOW_NAME = "grants_engine.notion_backfill.run"
 ANALYST_RUN_WORKFLOW_NAME = "grants_engine.analyst.run"
 ANALYST_RESCORE_WORKFLOW_NAME = "grants_engine.analyst.rescore"
 ANALYST_RESCORE_SINGLE_WORKFLOW_NAME = "grants_engine.analyst.rescore_single"
@@ -290,6 +295,68 @@ async def _run_resume_section_review(payload: dict, context: AgentExecutionConte
     }
 
 
+async def _run_scout(payload: dict, context: AgentExecutionContext) -> dict:
+    from backend.jobs.scout_job import run_scout_pipeline
+
+    result = await run_scout_pipeline()
+    if result.get("status") == "error":
+        error_message = result.get("error") or "Scout workflow failed"
+        try:
+            from backend.notifications.hub import notify_agent_error
+
+            await notify_agent_error("scout", error_message)
+        except Exception:
+            logger.debug("Scout error notification failed", exc_info=True)
+        raise RuntimeError(error_message)
+
+    try:
+        from backend.notifications.hub import notify_scout_complete
+
+        await notify_scout_complete(
+            new_grants=result.get("new_grants", 0) if isinstance(result, dict) else 0,
+            total_found=result.get("total_found", 0) if isinstance(result, dict) else 0,
+        )
+    except Exception:
+        logger.debug("Scout notification failed", exc_info=True)
+
+    return result
+
+
+async def _run_knowledge_sync(payload: dict, context: AgentExecutionContext) -> dict:
+    from backend.jobs.knowledge_job import run_knowledge_sync
+
+    result = await run_knowledge_sync()
+    if result.get("status") == "error":
+        raise RuntimeError(result.get("error") or "Knowledge sync failed")
+    return result
+
+
+async def _run_field_backfill(payload: dict, context: AgentExecutionContext) -> dict:
+    from backend.jobs.backfill_job import run_field_backfill
+
+    return await run_field_backfill()
+
+
+async def _run_deduplication(payload: dict, context: AgentExecutionContext) -> dict:
+    from backend.jobs.backfill_job import run_deduplication
+
+    return await run_deduplication()
+
+
+async def _run_notion_backfill(payload: dict, context: AgentExecutionContext) -> dict:
+    from backend.db.mongo import grants_scored
+    from backend.integrations.notion_sync import backfill_grants
+
+    cursor = grants_scored().find({}).sort("weighted_total", -1)
+    all_grants = await cursor.to_list(length=2000)
+    count = await backfill_grants(all_grants)
+    return {
+        "status": "ok",
+        "synced_count": count,
+        "input_count": len(all_grants),
+    }
+
+
 async def _run_analyst(payload: dict, context: AgentExecutionContext) -> dict:
     from backend.agents.analyst import AnalystAgent, DEFAULT_WEIGHTS
     from backend.config.settings import get_settings
@@ -522,6 +589,11 @@ def get_grants_orchestrator() -> MongoWorkflowOrchestrator:
             DRAFT_START_WORKFLOW_NAME: _run_start_draft,
             TRIAGE_RESUME_WORKFLOW_NAME: _run_resume_triage,
             SECTION_REVIEW_RESUME_WORKFLOW_NAME: _run_resume_section_review,
+            SCOUT_RUN_WORKFLOW_NAME: _run_scout,
+            KNOWLEDGE_SYNC_WORKFLOW_NAME: _run_knowledge_sync,
+            FIELD_BACKFILL_WORKFLOW_NAME: _run_field_backfill,
+            DEDUPLICATION_WORKFLOW_NAME: _run_deduplication,
+            NOTION_BACKFILL_WORKFLOW_NAME: _run_notion_backfill,
             ANALYST_RUN_WORKFLOW_NAME: _run_analyst,
             ANALYST_RESCORE_WORKFLOW_NAME: _run_analyst_rescore,
             ANALYST_RESCORE_SINGLE_WORKFLOW_NAME: _run_analyst_rescore_single,
@@ -690,6 +762,111 @@ async def enqueue_resume_section_review_workflow(
             "instructions": instructions,
             "critique": critique,
         },
+        user_email=user_email,
+    )
+
+
+async def enqueue_scout_run(*, user_email: str) -> dict:
+    orchestrator = get_grants_orchestrator()
+    existing = await orchestrator.find_active_run(
+        workflow_name=SCOUT_RUN_WORKFLOW_NAME,
+        payload_match={},
+    )
+    if existing:
+        return {
+            "workflow_id": existing["workflow_id"],
+            "workflow_name": existing["workflow_name"],
+            "status": existing["status"],
+            "deduplicated": True,
+        }
+
+    return await _enqueue_workflow(
+        workflow_name=SCOUT_RUN_WORKFLOW_NAME,
+        payload={},
+        user_email=user_email,
+    )
+
+
+async def enqueue_knowledge_sync_run(*, user_email: str) -> dict:
+    orchestrator = get_grants_orchestrator()
+    existing = await orchestrator.find_active_run(
+        workflow_name=KNOWLEDGE_SYNC_WORKFLOW_NAME,
+        payload_match={},
+    )
+    if existing:
+        return {
+            "workflow_id": existing["workflow_id"],
+            "workflow_name": existing["workflow_name"],
+            "status": existing["status"],
+            "deduplicated": True,
+        }
+
+    return await _enqueue_workflow(
+        workflow_name=KNOWLEDGE_SYNC_WORKFLOW_NAME,
+        payload={},
+        user_email=user_email,
+    )
+
+
+async def enqueue_field_backfill_run(*, user_email: str) -> dict:
+    orchestrator = get_grants_orchestrator()
+    existing = await orchestrator.find_active_run(
+        workflow_name=FIELD_BACKFILL_WORKFLOW_NAME,
+        payload_match={},
+    )
+    if existing:
+        return {
+            "workflow_id": existing["workflow_id"],
+            "workflow_name": existing["workflow_name"],
+            "status": existing["status"],
+            "deduplicated": True,
+        }
+
+    return await _enqueue_workflow(
+        workflow_name=FIELD_BACKFILL_WORKFLOW_NAME,
+        payload={},
+        user_email=user_email,
+    )
+
+
+async def enqueue_deduplication_run(*, user_email: str) -> dict:
+    orchestrator = get_grants_orchestrator()
+    existing = await orchestrator.find_active_run(
+        workflow_name=DEDUPLICATION_WORKFLOW_NAME,
+        payload_match={},
+    )
+    if existing:
+        return {
+            "workflow_id": existing["workflow_id"],
+            "workflow_name": existing["workflow_name"],
+            "status": existing["status"],
+            "deduplicated": True,
+        }
+
+    return await _enqueue_workflow(
+        workflow_name=DEDUPLICATION_WORKFLOW_NAME,
+        payload={},
+        user_email=user_email,
+    )
+
+
+async def enqueue_notion_backfill_run(*, user_email: str) -> dict:
+    orchestrator = get_grants_orchestrator()
+    existing = await orchestrator.find_active_run(
+        workflow_name=NOTION_BACKFILL_WORKFLOW_NAME,
+        payload_match={},
+    )
+    if existing:
+        return {
+            "workflow_id": existing["workflow_id"],
+            "workflow_name": existing["workflow_name"],
+            "status": existing["status"],
+            "deduplicated": True,
+        }
+
+    return await _enqueue_workflow(
+        workflow_name=NOTION_BACKFILL_WORKFLOW_NAME,
+        payload={},
         user_email=user_email,
     )
 
