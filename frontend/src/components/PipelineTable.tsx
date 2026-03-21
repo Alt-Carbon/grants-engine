@@ -9,6 +9,7 @@ import { ScoreCell, PriorityBadge } from "./ScoreBadge";
 import { getThemeLabel, formatCurrency, formatRelativeTime, formatDateShort } from "@/lib/utils";
 import { useLastSeen, isNewSince } from "@/hooks/useLastSeen";
 import { useGrantUrl } from "@/hooks/useGrantUrl";
+import { requestHoldReason } from "@/lib/holdReason";
 import type { Grant } from "@/lib/queries";
 import {
   ChevronUp,
@@ -89,16 +90,29 @@ export function PipelineTable({
   }, [initialGrants]);
 
   async function handleStatusChange(grantId: string, newStatus: string) {
+    const existingGrant = allGrants.find((g) => g._id === grantId);
+    const holdReason =
+      newStatus === "hold"
+        ? requestHoldReason((existingGrant as { hold_reason?: string } | undefined)?.hold_reason)
+        : undefined;
+    if (newStatus === "hold" && !holdReason) return;
+
     // Optimistic: update local state immediately
     setAllGrants((prev) =>
-      prev.map((g) => (g._id === grantId ? { ...g, status: newStatus } : g))
+      prev.map((g) =>
+        g._id === grantId ? { ...g, status: newStatus, hold_reason: holdReason } : g
+      )
     );
     // Persist to backend
     try {
       const res = await fetch("/api/grants/status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ grant_id: grantId, status: newStatus }),
+        body: JSON.stringify({
+          grant_id: grantId,
+          status: newStatus,
+          hold_reason: holdReason,
+        }),
       });
       if (!res.ok) {
         // Revert on failure
@@ -125,7 +139,7 @@ export function PipelineTable({
         isNewSince(g.scored_at || g.scraped_at, lastSeenAt)
       );
     if (statusFilter === "shortlisted")
-      return allGrants.filter((g) => g.status === "triage");
+      return allGrants.filter((g) => g.status === "triage" || g.status === "watch");
     if (statusFilter === "pursue")
       return allGrants.filter(
         (g) => g.status === "pursue" || g.status === "pursuing"
@@ -205,6 +219,8 @@ export function PipelineTable({
       if (isNewSince(g.scored_at || g.scraped_at, lastSeenAt)) newCount++;
       const key =
         g.status === "triage"
+          ? "shortlisted"
+          : g.status === "watch"
           ? "shortlisted"
           : g.status === "pursuing"
           ? "pursue"

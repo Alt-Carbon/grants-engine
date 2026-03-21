@@ -6,6 +6,7 @@ import { ScoreRadar } from "@/components/ScoreRadar";
 import { StatusPicker } from "@/components/StatusPicker";
 import { CommentThread } from "@/components/CommentThread";
 import { GrantActivity } from "@/components/GrantActivity";
+import { requestHoldReason } from "@/lib/holdReason";
 import { formatCurrency as formatCurrencyUtil } from "@/lib/utils";
 import {
   ArrowLeft,
@@ -143,6 +144,7 @@ function ScoreBar({ label, value, max = 10 }: { label: string; value: number; ma
 export function GrantDetailPage({ grant }: { grant: GrantFull }) {
   const router = useRouter();
   const [currentStatus, setCurrentStatus] = useState(grant.status);
+  const [currentHoldReason, setCurrentHoldReason] = useState(grant.hold_reason || "");
   const [copied, setCopied] = useState(false);
   const [collabTab, setCollabTab] = useState<"discussion" | "activity">("discussion");
   const [draftLoading, setDraftLoading] = useState(false);
@@ -160,18 +162,31 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
 
   const handleStatusChange = useCallback(
     async (_grantId: string, newStatus: string) => {
+      const holdReason =
+        newStatus === "hold"
+          ? requestHoldReason(grant.hold_reason || "")
+          : undefined;
+      if (newStatus === "hold" && !holdReason) return;
+
       try {
         const res = await fetch("/api/grants/status", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ grantId: grant._id, status: newStatus }),
+          body: JSON.stringify({
+            grant_id: grant._id,
+            status: newStatus,
+            hold_reason: holdReason,
+          }),
         });
-        if (res.ok) setCurrentStatus(newStatus);
+        if (res.ok) {
+          setCurrentStatus(newStatus);
+          setCurrentHoldReason(newStatus === "hold" ? holdReason || "" : "");
+        }
       } catch (e) {
         console.error("Failed to update grant status:", e);
       }
     },
-    [grant._id]
+    [grant._id, grant.hold_reason]
   );
 
   const copyLink = useCallback(() => {
@@ -340,6 +355,12 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
               <span className="inline-flex items-center gap-1 rounded-full bg-purple-100 px-2.5 py-1 text-xs font-semibold text-purple-700">
                 <FileText className="h-3 w-3" />
                 Drafting in progress
+              </span>
+            )}
+            {currentStatus === "hold" && currentHoldReason && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2.5 py-1 text-xs font-semibold text-orange-700">
+                <AlertTriangle className="h-3 w-3" />
+                Hold reason: {currentHoldReason}
               </span>
             )}
             {!reanalyzeStarted && (

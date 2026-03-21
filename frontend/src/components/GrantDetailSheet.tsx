@@ -314,6 +314,12 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                     Drafting
                   </span>
                 )}
+                {grant.status === "hold" && grant.hold_reason && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2.5 py-0.5 text-xs font-semibold text-orange-700">
+                    <AlertTriangle className="h-3 w-3" />
+                    Hold reason: {grant.hold_reason}
+                  </span>
+                )}
                 {!reanalyzeStarted && (
                   <button
                     onClick={async () => {

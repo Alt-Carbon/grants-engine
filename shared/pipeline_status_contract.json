@@ -1,0 +1,98 @@
+{
+  "statuses": [
+    "triage",
+    "watch",
+    "hold",
+    "pursue",
+    "pursuing",
+    "drafting",
+    "draft_complete",
+    "reviewed",
+    "submitted",
+    "won",
+    "passed",
+    "auto_pass",
+    "human_passed",
+    "reported",
+    "guardrail_rejected"
+  ],
+  "human_editable_statuses": [
+    "triage",
+    "hold",
+    "pursue",
+    "submitted",
+    "won",
+    "human_passed"
+  ],
+  "pre_draft_cleanup_statuses": [
+    "triage",
+    "watch",
+    "hold",
+    "pursue",
+    "pursuing",
+    "passed",
+    "auto_pass",
+    "human_passed",
+    "guardrail_rejected",
+    "reported"
+  ],
+  "draft_startable_statuses": [
+    "pursue",
+    "pursuing"
+  ],
+  "columns": [
+    {
+      "id": "shortlisted",
+      "label": "Shortlisted",
+      "target_status": "triage",
+      "statuses": ["triage", "watch"]
+    },
+    {
+      "id": "pursue",
+      "label": "Pursue",
+      "target_status": "pursue",
+      "statuses": ["pursue", "pursuing"]
+    },
+    {
+      "id": "hold",
+      "label": "Hold",
+      "target_status": "hold",
+      "statuses": ["hold"]
+    },
+    {
+      "id": "drafting",
+      "label": "Drafting",
+      "target_status": "drafting",
+      "statuses": ["drafting"]
+    },
+    {
+      "id": "submitted",
+      "label": "Submitted",
+      "target_status": "submitted",
+      "statuses": ["draft_complete", "reviewed", "submitted", "won"]
+    },
+    {
+      "id": "rejected",
+      "label": "Rejected",
+      "target_status": "human_passed",
+      "statuses": ["passed", "auto_pass", "human_passed", "reported", "guardrail_rejected"]
+    }
+  ],
+  "transitions": {
+    "triage": ["watch", "hold", "pursue", "passed", "human_passed"],
+    "watch": ["triage", "hold", "pursue", "passed", "human_passed"],
+    "hold": ["triage", "watch", "pursue", "human_passed"],
+    "pursue": ["triage", "watch", "hold", "human_passed", "submitted"],
+    "pursuing": ["triage", "watch", "hold", "human_passed", "submitted"],
+    "drafting": ["pursue", "hold", "human_passed"],
+    "draft_complete": ["reviewed", "submitted", "hold", "human_passed"],
+    "reviewed": ["submitted", "hold", "human_passed"],
+    "submitted": ["won", "reported", "hold", "human_passed"],
+    "won": ["reported"],
+    "passed": ["triage", "watch", "hold", "pursue"],
+    "auto_pass": ["triage", "watch", "hold", "pursue"],
+    "human_passed": ["triage", "watch", "hold", "pursue"],
+    "reported": [],
+    "guardrail_rejected": ["hold", "pursue", "human_passed"]
+  }
+}
