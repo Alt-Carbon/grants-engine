@@ -1528,7 +1528,7 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
                               Clear All
                             </button>
                             <button
-                              onClick={applySuggestions}
+                              onClick={() => applySuggestions()}
                               disabled={applyLoading}
                               className="inline-flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-purple-700 disabled:opacity-50"
                             >
