@@ -382,34 +382,32 @@ app.add_middleware(
 # ── Auth helpers ───────────────────────────────────────────────────────────────
 
 def verify_cron(x_cron_secret: Optional[str] = Header(default=None)):
-    expected = os.environ.get("CRON_SECRET", "dev-cron-secret")
-    if x_cron_secret != expected:
-        raise HTTPException(status_code=401, detail="Invalid cron secret")
+    from backend.platform.services.auth_service import verify_cron_secret
+
+    verify_cron_secret(x_cron_secret)
 
 
 def verify_internal(
     x_internal_secret: Optional[str] = Header(default=None),
     x_user_email: Optional[str] = Header(default=None),
 ):
-    expected = os.environ.get("INTERNAL_SECRET", "dev-internal-secret")
-    if x_internal_secret != expected:
-        raise HTTPException(status_code=401, detail="Invalid internal secret")
+    from backend.platform.services.auth_service import verify_internal_secret
 
-
-ALLOWED_EMAIL_DOMAIN = get_settings().company_domain
+    verify_internal_secret(x_internal_secret)
 
 
 def get_user_email(x_user_email: Optional[str] = Header(default=None)) -> str:
     """Extract user email from request headers. Validates domain server-side."""
-    if not x_user_email:
-        return "system"
-    email = x_user_email.strip().lower()
-    if "@" in email and not email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Unauthorized email domain. Only @{ALLOWED_EMAIL_DOMAIN} allowed.",
-        )
-    return email
+    from backend.platform.services.auth_service import normalize_user_email
+
+    return normalize_user_email(x_user_email, allow_system=True)
+
+
+def get_authenticated_user_email(x_user_email: Optional[str] = Header(default=None)) -> str:
+    """Extract a real authenticated user email for user-scoped endpoints."""
+    from backend.platform.services.auth_service import normalize_user_email
+
+    return normalize_user_email(x_user_email, allow_system=False)
 
 
 # ── Request/Response models ────────────────────────────────────────────────────
@@ -419,8 +417,6 @@ _VALID_REVIEW_ACTIONS = {"approve", "revise"}
 
 from backend.pipeline.status_contract import (
     draft_startable_statuses,
-    is_valid_transition,
-    pre_draft_cleanup_statuses,
     valid_statuses,
 )
 
@@ -1429,27 +1425,33 @@ async def sync_past_grants(
     return result
 
 
-# ── Analyst job state (lock-protected) ────────────────────────────────────────
-_analyst_lock = asyncio.Lock()
-_analyst_running: bool = False
-_analyst_started_at: Optional[str] = None
-
-
 @app.get("/status/analyst")
 async def analyst_status():
     """Current analyst job state + last run info."""
     from backend.db.mongo import get_db
+    from backend.projects.grants_engine.workflow_runtime import (
+        ANALYST_WORKFLOW_NAMES,
+        get_latest_workflow_run,
+    )
+
     db = get_db()
-    last = await db["audit_logs"].find_one(
-        {"event": "analyst_run_complete"},
-        sort=[("created_at", -1)],
+    active = await get_latest_workflow_run(
+        workflow_names=ANALYST_WORKFLOW_NAMES,
+        statuses=["pending", "running"],
+    )
+    last = await get_latest_workflow_run(
+        workflow_names=ANALYST_WORKFLOW_NAMES,
+        statuses=["completed"],
     )
     pending = await db["grants_raw"].count_documents({"processed": False})
+    last_result = last.get("result") if last else {}
     return {
-        "running": _analyst_running,
-        "started_at": _analyst_started_at,
-        "last_run_at": last["created_at"] if last else None,
-        "last_run_scored": last.get("scored_count", 0) if last else 0,
+        "running": bool(active),
+        "queued": bool(active and active.get("status") == "pending"),
+        "started_at": (active or {}).get("started_at") or (active or {}).get("created_at"),
+        "workflow_id": (active or {}).get("workflow_id"),
+        "last_run_at": (last or {}).get("completed_at") or (last or {}).get("updated_at"),
+        "last_run_scored": (last_result or {}).get("scored_count", 0),
         "pending_unprocessed": pending,
     }
 
@@ -1458,101 +1460,26 @@ async def analyst_status():
 async def manual_analyst(
     background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
 ):
     """Run the Analyst on all unprocessed grants_raw entries (including manually
     added ones). Idempotent — already-scored grants are skipped automatically."""
-    global _analyst_running, _analyst_started_at
-    async with _analyst_lock:
-        if _analyst_running:
-            return {"status": "analyst_already_running", "started_at": _analyst_started_at}
-        _analyst_running = True
-        _analyst_started_at = datetime.now(timezone.utc).isoformat()
+    from backend.projects.grants_engine.workflow_runtime import (
+        ANALYST_RUN_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_analyst_run,
+    )
 
-    async def _run():
-        global _analyst_running, _analyst_started_at
-        try:
-            from backend.agents.analyst import AnalystAgent
-            from backend.config.settings import get_settings
-            from backend.db.mongo import grants_raw, agent_config, get_db
-
-            s = get_settings()
-            cfg_doc = await agent_config().find_one({"agent": "analyst"}) or {}
-            from backend.agents.analyst import DEFAULT_WEIGHTS
-            weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
-            min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
-
-            # Fetch ALL unprocessed raw grants
-            raw_docs = await grants_raw().find({"processed": False}).to_list(length=2000)
-            logger.info("Analyst run: %d unprocessed grants found", len(raw_docs))
-
-            agent = AnalystAgent(
-                perplexity_api_key=s.perplexity_api_key,
-                gateway_api_key=s.ai_gateway_api_key,
-                gateway_url=s.ai_gateway_url,
-                weights=weights,
-                min_funding=min_funding,
-            )
-            scored = await agent.run(raw_docs)
-            scored_count = len(scored)
-            logger.info("Analyst run: %d grants scored", scored_count)
-
-            # Write run audit entry so /status/analyst can report last run
-            db = get_db()
-            await db["audit_logs"].insert_one({
-                "event": "analyst_run_complete",
-                "scored_count": scored_count,
-                "input_count": len(raw_docs),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
-
-            # Emit analyst completion notification
-            try:
-                from backend.notifications.hub import notify_analyst_complete
-                triage_count = sum(1 for g in scored if g.get("status") == "triage")
-                pursue_count = sum(1 for g in scored if g.get("recommended_action") == "pursue")
-                await notify_analyst_complete(
-                    scored_count=scored_count,
-                    triage_count=triage_count,
-                    pursue_count=pursue_count,
-                )
-                # Notify for individual high-score grants
-                from backend.notifications.hub import notify_high_score_grant
-                for g in scored:
-                    wt = g.get("weighted_total", 0)
-                    if wt >= 7.0:
-                        await notify_high_score_grant(
-                            grant_name=g.get("grant_name") or g.get("title") or "Unknown",
-                            grant_id=str(g.get("_id", "")),
-                            score=wt,
-                            funder=g.get("funder", ""),
-                        )
-            except Exception:
-                logger.debug("Analyst notification failed", exc_info=True)
-        except Exception as e:
-            logger.error("Analyst run failed: %s", e)
-            try:
-                import traceback as _tb
-                from backend.integrations.notion_sync import log_error
-                await log_error(
-                    agent="analyst",
-                    error=e,
-                    tb=_tb.format_exc(),
-                    severity="Critical",
-                )
-            except Exception:
-                logger.debug("Notion error sync skipped (analyst job)", exc_info=True)
-            try:
-                from backend.notifications.hub import notify_agent_error
-                await notify_agent_error("analyst", str(e))
-            except Exception:
-                pass
-        finally:
-            async with _analyst_lock:
-                _analyst_running = False
-                _analyst_started_at = None
-
-    background_tasks.add_task(_run)
-    return {"status": "analyst_job_started", "started_at": _analyst_started_at}
+    handle = await enqueue_analyst_run(user_email=user_email)
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[ANALYST_RUN_WORKFLOW_NAME],
+        limit=1,
+    )
+    return {
+        "status": "analyst_job_queued" if not handle.get("deduplicated") else "analyst_already_running",
+        "workflow_id": handle.get("workflow_id"),
+    }
 
 
 @app.post("/run/analyst/rescore")
@@ -1568,116 +1495,25 @@ async def rescore_analyst(
     and updates the grants_scored collection in place. Grants keep their current status
     unless the new score triggers a status change.
     """
-    global _analyst_running, _analyst_started_at
-    async with _analyst_lock:
-        if _analyst_running:
-            return {"status": "analyst_already_running", "started_at": _analyst_started_at}
-        _analyst_running = True
-        _analyst_started_at = datetime.now(timezone.utc).isoformat()
+    from backend.projects.grants_engine.workflow_runtime import (
+        ANALYST_RESCORE_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_analyst_rescore,
+    )
 
-    async def _run():
-        global _analyst_running, _analyst_started_at
-        try:
-            from backend.agents.analyst import AnalystAgent
-            from backend.config.settings import get_settings
-            from backend.db.mongo import grants_scored, grants_raw, agent_config, get_db
-
-            s = get_settings()
-            cfg_doc = await agent_config().find_one({"agent": "analyst"}) or {}
-            from backend.agents.analyst import DEFAULT_WEIGHTS
-            weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
-            min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
-
-            # 1. Fetch all grants to rescore
-            rescore_grants = await grants_scored().find(
-                {"weighted_total": {"$gte": min_score}}
-            ).to_list(2000)
-            logger.info("Rescore: %d grants with score >= %.1f", len(rescore_grants), min_score)
-
-            if not rescore_grants:
-                logger.info("Rescore: no grants to process")
-                return
-
-            # 2. Convert scored grants back to raw-like format for the analyst
-            raw_like = []
-            for g in rescore_grants:
-                raw_doc = {
-                    "_id": g["_id"],
-                    "title": g.get("title") or g.get("grant_name") or "",
-                    "url": g.get("url") or g.get("source_url") or "",
-                    "url_hash": g.get("url_hash", ""),
-                    "content_hash": g.get("content_hash", ""),
-                    "funder": g.get("funder", ""),
-                    "deadline": g.get("deadline", ""),
-                    "amount": g.get("amount") or g.get("max_funding") or "",
-                    "eligibility": g.get("eligibility", ""),
-                    "geography": g.get("geography", ""),
-                    "grant_type": g.get("grant_type", ""),
-                    "themes_detected": g.get("themes_detected", []),
-                    "about_opportunity": g.get("about_opportunity", ""),
-                    "application_process": g.get("application_process", ""),
-                    "scraped_at": g.get("scraped_at", ""),
-                }
-                raw_like.append(raw_doc)
-
-            # 3. Delete existing scored records so analyst doesn't skip them
-            scored_ids = [g["_id"] for g in rescore_grants]
-            delete_result = await grants_scored().delete_many({"_id": {"$in": scored_ids}})
-            logger.info("Rescore: deleted %d existing scored records", delete_result.deleted_count)
-
-            # 4. Run analyst on raw-like grants
-            agent = AnalystAgent(
-                perplexity_api_key=s.perplexity_api_key,
-                gateway_api_key=s.ai_gateway_api_key,
-                gateway_url=s.ai_gateway_url,
-                weights=weights,
-                min_funding=min_funding,
-            )
-            scored = await agent.run(raw_like)
-            logger.info("Rescore: %d grants re-scored", len(scored))
-
-            # 5. Log the run
-            db = get_db()
-            await db["audit_logs"].insert_one({
-                "event": "analyst_rescore_complete",
-                "scored_count": len(scored),
-                "input_count": len(rescore_grants),
-                "min_score_filter": min_score,
-                "triggered_by": user_email,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
-
-            # 6. Notify
-            try:
-                from backend.notifications.hub import notify_analyst_complete
-                triage_count = sum(1 for g in scored if g.get("status") == "triage")
-                pursue_count = sum(1 for g in scored if g.get("recommended_action") == "pursue")
-                await notify_analyst_complete(
-                    scored_count=len(scored),
-                    triage_count=triage_count,
-                    pursue_count=pursue_count,
-                )
-            except Exception:
-                logger.debug("Rescore notification failed", exc_info=True)
-
-        except Exception as e:
-            logger.error("Rescore failed: %s", e)
-            try:
-                import traceback as _tb
-                from backend.integrations.notion_sync import log_error
-                await log_error(agent="analyst", error=e, tb=_tb.format_exc(), severity="Critical")
-            except Exception:
-                pass
-        finally:
-            async with _analyst_lock:
-                _analyst_running = False
-                _analyst_started_at = None
-
-    background_tasks.add_task(_run)
+    handle = await enqueue_analyst_rescore(
+        min_score=min_score,
+        user_email=user_email,
+    )
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[ANALYST_RESCORE_WORKFLOW_NAME],
+        limit=1,
+    )
     return {
-        "status": "rescore_job_started",
+        "status": "rescore_job_queued" if not handle.get("deduplicated") else "analyst_already_running",
         "min_score": min_score,
-        "started_at": _analyst_started_at,
+        "workflow_id": handle.get("workflow_id"),
     }
 
 
@@ -1691,99 +1527,25 @@ async def rescore_single_grant(
     """Re-run analyst deep analysis + scoring on a single grant by ID."""
     from bson import ObjectId
 
-    global _analyst_running, _analyst_started_at
-    async with _analyst_lock:
-        if _analyst_running:
-            return {"status": "analyst_already_running", "started_at": _analyst_started_at}
-        _analyst_running = True
-        _analyst_started_at = datetime.now(timezone.utc).isoformat()
+    from backend.projects.grants_engine.workflow_runtime import (
+        ANALYST_RESCORE_SINGLE_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_analyst_rescore_single,
+    )
 
-    async def _run():
-        global _analyst_running, _analyst_started_at
-        try:
-            from backend.agents.analyst import AnalystAgent, DEFAULT_WEIGHTS
-            from backend.config.settings import get_settings
-            from backend.db.mongo import grants_scored, agent_config, get_db
-
-            s = get_settings()
-            cfg_doc = await agent_config().find_one({"agent": "analyst"}) or {}
-            weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
-            min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
-
-            # 1. Fetch the grant
-            try:
-                oid = ObjectId(grant_id)
-            except Exception:
-                logger.error("Rescore single: invalid grant_id %s", grant_id)
-                return
-            grant_doc = await grants_scored().find_one({"_id": oid})
-            if not grant_doc:
-                logger.error("Rescore single: grant %s not found", grant_id)
-                return
-
-            # 2. Convert to raw-like format
-            raw_doc = {
-                "_id": grant_doc["_id"],
-                "title": grant_doc.get("title") or grant_doc.get("grant_name") or "",
-                "url": grant_doc.get("url") or grant_doc.get("source_url") or "",
-                "url_hash": grant_doc.get("url_hash", ""),
-                "content_hash": grant_doc.get("content_hash", ""),
-                "funder": grant_doc.get("funder", ""),
-                "deadline": grant_doc.get("deadline", ""),
-                "amount": grant_doc.get("amount") or grant_doc.get("max_funding") or "",
-                "eligibility": grant_doc.get("eligibility", ""),
-                "geography": grant_doc.get("geography", ""),
-                "grant_type": grant_doc.get("grant_type", ""),
-                "themes_detected": grant_doc.get("themes_detected", []),
-                "about_opportunity": grant_doc.get("about_opportunity", ""),
-                "application_process": grant_doc.get("application_process", ""),
-                "scraped_at": grant_doc.get("scraped_at", ""),
-            }
-
-            # 3. Delete existing scored record so analyst doesn't skip it
-            await grants_scored().delete_one({"_id": oid})
-            logger.info("Rescore single: deleted existing record for %s", grant_id)
-
-            # 4. Run analyst
-            agent = AnalystAgent(
-                perplexity_api_key=s.perplexity_api_key,
-                gateway_api_key=s.ai_gateway_api_key,
-                gateway_url=s.ai_gateway_url,
-                weights=weights,
-                min_funding=min_funding,
-            )
-            scored = await agent.run([raw_doc])
-            logger.info("Rescore single: grant %s re-scored", grant_id)
-
-            # 5. Audit log
-            db = get_db()
-            await db["audit_logs"].insert_one({
-                "event": "analyst_rescore_single",
-                "grant_id": grant_id,
-                "grant_name": grant_doc.get("grant_name") or grant_doc.get("title") or "",
-                "triggered_by": user_email,
-                "scored_count": len(scored),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
-
-        except Exception as e:
-            logger.error("Rescore single failed for %s: %s", grant_id, e)
-            try:
-                import traceback as _tb
-                from backend.integrations.notion_sync import log_error
-                await log_error(agent="analyst", error=e, tb=_tb.format_exc(), severity="Warning")
-            except Exception:
-                pass
-        finally:
-            async with _analyst_lock:
-                _analyst_running = False
-                _analyst_started_at = None
-
-    background_tasks.add_task(_run)
+    handle = await enqueue_analyst_rescore_single(
+        grant_id=grant_id,
+        user_email=user_email,
+    )
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[ANALYST_RESCORE_SINGLE_WORKFLOW_NAME],
+        limit=1,
+    )
     return {
-        "status": "rescore_single_started",
+        "status": "rescore_single_queued" if not handle.get("deduplicated") else "analyst_already_running",
         "grant_id": grant_id,
-        "started_at": _analyst_started_at,
+        "workflow_id": handle.get("workflow_id"),
     }
 
 
@@ -1802,6 +1564,27 @@ async def resume_triage(
     immediately (before the graph resumes) so the Streamlit UI can display them
     instantly and the flag survives even if the LangGraph resume fails.
     """
+    from backend.projects.grants_engine.workflow_runtime import (
+        TRIAGE_RESUME_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_resume_triage_workflow,
+    )
+
+    handle = await enqueue_resume_triage_workflow(
+        thread_id=body.thread_id,
+        grant_id=body.grant_id,
+        decision=body.decision,
+        notes=body.notes,
+        user_email=user_email,
+    )
+    if handle.get("deduplicated"):
+        return {
+            "status": "triage_already_queued",
+            "thread_id": handle.get("thread_id") or body.thread_id,
+            "workflow_id": handle.get("workflow_id"),
+            "workflow_status": handle.get("status") or "pending",
+        }
+
     # Durably persist the human override decision to MongoDB (fix #15).
     if body.human_override:
         from backend.db.mongo import grants_scored
@@ -1864,20 +1647,17 @@ async def resume_triage(
     except Exception:
         logger.debug("Notion triage sync skipped", exc_info=True)
 
-    async def _resume():
-        graph = get_graph()
-        config = {"configurable": {"thread_id": body.thread_id}}
-        await graph.ainvoke(
-            {
-                "human_triage_decision": body.decision,
-                "selected_grant_id": body.grant_id,
-                "triage_notes": body.notes,
-            },
-            config=config,
-        )
-
-    background_tasks.add_task(_resume)
-    return {"status": "triage_resumed", "thread_id": body.thread_id}
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[TRIAGE_RESUME_WORKFLOW_NAME],
+        limit=1,
+    )
+    return {
+        "status": "triage_resumed",
+        "thread_id": body.thread_id,
+        "workflow_id": handle.get("workflow_id"),
+        "workflow_status": handle.get("status") or "pending",
+    }
 
 
 @app.post("/resume/section-review")
@@ -1888,6 +1668,29 @@ async def resume_section_review(
     user_email: str = Depends(get_user_email),
 ):
     """Human approved or requested revision on a section. Resume drafter."""
+    from backend.projects.grants_engine.workflow_runtime import (
+        SECTION_REVIEW_RESUME_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_resume_section_review_workflow,
+    )
+
+    handle = await enqueue_resume_section_review_workflow(
+        thread_id=body.thread_id,
+        section_name=body.section_name,
+        action=body.action,
+        edited_content=body.edited_content,
+        instructions=body.instructions,
+        critique=body.critique,
+        user_email=user_email,
+    )
+    if handle.get("deduplicated"):
+        return {
+            "status": "section_review_already_queued",
+            "thread_id": handle.get("thread_id") or body.thread_id,
+            "workflow_id": handle.get("workflow_id"),
+            "workflow_status": handle.get("status") or "pending",
+        }
+
     # ── Audit log — record who reviewed the section ──────────────────
     try:
         from backend.db.mongo import audit_logs
@@ -1904,28 +1707,17 @@ async def resume_section_review(
     except Exception:
         logger.debug("Audit log insert failed (section review)", exc_info=True)
 
-    async def _resume():
-        try:
-            from langgraph.types import Command
-
-            graph = get_graph()
-            config = {"configurable": {"thread_id": body.thread_id}}
-            update: dict = {"section_review_decision": body.action}
-            if body.edited_content:
-                update["section_edited_content"] = body.edited_content
-            if body.instructions:
-                update["section_revision_instructions"] = {body.section_name: body.instructions}
-            if body.critique:
-                update["section_critiques"] = {body.section_name: body.critique}
-
-            # Resume the interrupted drafter using Command — this properly
-            # resumes from interrupt_before and injects state updates.
-            await graph.ainvoke(Command(resume=True, update=update), config=config)
-        except Exception as e:
-            logger.error("Section review resume failed for thread %s: %s", body.thread_id, e, exc_info=True)
-
-    background_tasks.add_task(_resume)
-    return {"status": "section_review_resumed", "thread_id": body.thread_id}
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[SECTION_REVIEW_RESUME_WORKFLOW_NAME],
+        limit=1,
+    )
+    return {
+        "status": "section_review_resumed",
+        "thread_id": body.thread_id,
+        "workflow_id": handle.get("workflow_id"),
+        "workflow_status": handle.get("status") or "pending",
+    }
 
 
 @app.post("/drafter/chat")
@@ -2598,198 +2390,65 @@ class ChatHistorySaveRequest(BaseModel):
 @app.get("/drafter/chat-history/{pipeline_id}")
 async def get_chat_history(
     pipeline_id: str,
-    user_email: Optional[str] = None,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_authenticated_user_email),
 ):
-    """Load persisted chat history for a pipeline (optionally scoped to user).
+    """Load persisted chat history for the authenticated user and pipeline."""
+    from backend.platform.services.session_service import load_chat_history
 
-    Tries user-scoped query first, falls back to unscoped if no match.
-    This handles the case where history was saved before user_email was available.
-    If an unscoped doc is found, it is migrated to the user-scoped key.
-    """
-    from backend.db.mongo import drafter_chat_history
-
-    doc = None
-
-    # 1. Try user-scoped query first
-    if user_email:
-        doc = await drafter_chat_history().find_one(
-            {"pipeline_id": pipeline_id, "user_email": user_email}
-        )
-
-    # 2. Fall back to unscoped (no user_email field or null)
-    if not doc:
-        doc = await drafter_chat_history().find_one(
-            {"pipeline_id": pipeline_id, "user_email": {"$exists": False}}
-        )
-        # Also try where user_email is explicitly null
-        if not doc:
-            doc = await drafter_chat_history().find_one(
-                {"pipeline_id": pipeline_id, "user_email": None}
-            )
-
-        # 3. Migrate: attach user_email to this doc so future loads find it directly
-        if doc and user_email:
-            await drafter_chat_history().update_one(
-                {"_id": doc["_id"]},
-                {"$set": {"user_email": user_email}},
-            )
-
-    if not doc:
-        return {"pipeline_id": pipeline_id, "sections": {}, "user_email": user_email}
-    doc.pop("_id", None)
-    return doc
+    return await load_chat_history(pipeline_id=pipeline_id, user_email=user_email)
 
 
 @app.put("/drafter/chat-history")
 async def save_chat_history(
     body: ChatHistorySaveRequest,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_authenticated_user_email),
 ):
-    """Save/upsert chat history for a pipeline. Snapshots previous version for history."""
-    from backend.db.mongo import drafter_chat_history, chat_snapshots
-    from pymongo.errors import DuplicateKeyError as DupKeyError
+    """Save/upsert chat history for the authenticated user and pipeline."""
+    from backend.platform.services.session_service import save_chat_history as save_user_chat_history
 
-    now_iso = datetime.now(timezone.utc).isoformat()
-    update_doc: dict = {
-        "pipeline_id": body.pipeline_id,
-        "grant_id": body.grant_id,
-        "sections": body.sections,
-        "updated_at": now_iso,
-    }
-    if body.user_email:
-        update_doc["user_email"] = body.user_email
-    if body.session_id:
-        update_doc["session_id"] = body.session_id
-
-    query: dict = {"pipeline_id": body.pipeline_id}
-    if body.user_email:
-        query["user_email"] = body.user_email
-
-    # Snapshot the previous version before overwriting (for conversation history)
-    try:
-        existing = await drafter_chat_history().find_one(query)
-        if existing:
-            existing_sections = existing.get("sections", {})
-            # Only snapshot if there are actual messages (not just system init messages)
-            has_content = any(
-                len(msgs) > 1 for msgs in existing_sections.values()
-                if isinstance(msgs, list)
-            )
-            if has_content:
-                # Check if last snapshot is different (avoid duplicate snapshots from rapid saves)
-                last_snap = await chat_snapshots().find_one(
-                    {"pipeline_id": body.pipeline_id, "user_email": body.user_email or None},
-                    sort=[("snapshot_at", -1)],
-                )
-                # Only create new snapshot if >5 min since last one or session_id changed
-                should_snapshot = True
-                if last_snap:
-                    last_session = last_snap.get("session_id", "")
-                    if last_session == body.session_id:
-                        # Same session — only snapshot every 5 minutes
-                        try:
-                            last_time = last_snap["snapshot_at"] if isinstance(last_snap["snapshot_at"], datetime) else datetime.fromisoformat(str(last_snap["snapshot_at"]).replace("Z", "+00:00"))
-                            now_time = datetime.now(timezone.utc)
-                            if (now_time - last_time).total_seconds() < 300:
-                                should_snapshot = False
-                        except Exception:
-                            pass
-
-                if should_snapshot:
-                    snapshot = {
-                        "pipeline_id": body.pipeline_id,
-                        "grant_id": body.grant_id,
-                        "user_email": body.user_email,
-                        "session_id": body.session_id or existing.get("session_id"),
-                        "sections": existing_sections,
-                        "snapshot_at": datetime.now(timezone.utc),
-                        "message_count": sum(
-                            len(msgs) for msgs in existing_sections.values()
-                            if isinstance(msgs, list)
-                        ),
-                        "section_names": list(existing_sections.keys()),
-                    }
-                    await chat_snapshots().insert_one(snapshot)
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).debug("Chat snapshot failed (non-critical): %s", e)
-
-    # Save current version
-    try:
-        await drafter_chat_history().replace_one(query, update_doc, upsert=True)
-    except DupKeyError:
-        await drafter_chat_history().update_one(query, {"$set": update_doc})
-
-    # Clean up orphan docs
-    if body.user_email:
-        try:
-            await drafter_chat_history().delete_many(
-                {"pipeline_id": body.pipeline_id, "user_email": None}
-            )
-            await drafter_chat_history().delete_many(
-                {"pipeline_id": body.pipeline_id, "user_email": {"$exists": False}}
-            )
-        except Exception:
-            pass
-
-    return {"status": "saved", "pipeline_id": body.pipeline_id, "user_email": body.user_email}
+    return await save_user_chat_history(
+        pipeline_id=body.pipeline_id,
+        grant_id=body.grant_id,
+        sections=body.sections,
+        user_email=user_email,
+        session_id=body.session_id,
+    )
 
 
 @app.delete("/drafter/chat-history/{pipeline_id}/{section_name}")
 async def clear_section_history(
     pipeline_id: str,
     section_name: str,
-    user_email: Optional[str] = None,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_authenticated_user_email),
 ):
-    """Clear chat history for a single section within a pipeline."""
-    from backend.db.mongo import drafter_chat_history
+    """Clear chat history for one section for the authenticated user."""
+    from backend.platform.services.session_service import clear_section_history as clear_user_section_history
 
-    query: dict = {"pipeline_id": pipeline_id}
-    if user_email:
-        query["user_email"] = user_email
-
-    await drafter_chat_history().update_one(
-        query,
-        {"$unset": {f"sections.{section_name}": ""}},
+    return await clear_user_section_history(
+        pipeline_id=pipeline_id,
+        section_name=section_name,
+        user_email=user_email,
     )
-    return {"status": "cleared", "pipeline_id": pipeline_id, "section_name": section_name}
 
 
 @app.get("/drafter/chat-sessions/{pipeline_id}")
 async def list_chat_sessions(
     pipeline_id: str,
-    user_email: Optional[str] = None,
     limit: int = 20,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_authenticated_user_email),
 ):
-    """List past conversation snapshots for a pipeline (for session history UI)."""
-    from backend.db.mongo import chat_snapshots
+    """List past conversation snapshots for the authenticated user."""
+    from backend.platform.services.session_service import list_chat_sessions as list_user_chat_sessions
 
-    query: dict = {"pipeline_id": pipeline_id}
-    if user_email:
-        query["user_email"] = user_email
-
-    docs = await chat_snapshots().find(
-        query,
-        {
-            "sections": 0,  # Don't send full messages in the list — too heavy
-        },
-    ).sort("snapshot_at", -1).to_list(limit)
-
-    sessions = []
-    for doc in docs:
-        sessions.append({
-            "id": str(doc["_id"]),
-            "session_id": doc.get("session_id"),
-            "snapshot_at": doc.get("snapshot_at", "").isoformat() if hasattr(doc.get("snapshot_at", ""), "isoformat") else str(doc.get("snapshot_at", "")),
-            "message_count": doc.get("message_count", 0),
-            "section_names": doc.get("section_names", []),
-            "user_email": doc.get("user_email"),
-        })
-
-    return {"pipeline_id": pipeline_id, "sessions": sessions}
+    return await list_user_chat_sessions(
+        pipeline_id=pipeline_id,
+        user_email=user_email,
+        limit=limit,
+    )
 
 
 @app.get("/drafter/chat-sessions/{pipeline_id}/{snapshot_id}")
@@ -2797,66 +2456,33 @@ async def get_chat_snapshot(
     pipeline_id: str,
     snapshot_id: str,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_authenticated_user_email),
 ):
-    """Load a specific conversation snapshot (full messages)."""
-    from backend.db.mongo import chat_snapshots
-    from bson import ObjectId
+    """Load one conversation snapshot for the authenticated user."""
+    from backend.platform.services.session_service import get_chat_snapshot as get_user_chat_snapshot
 
-    try:
-        doc = await chat_snapshots().find_one({"_id": ObjectId(snapshot_id), "pipeline_id": pipeline_id})
-    except Exception:
-        doc = None
-
-    if not doc:
-        return {"error": "Snapshot not found"}
-
-    doc.pop("_id", None)
-    if hasattr(doc.get("snapshot_at"), "isoformat"):
-        doc["snapshot_at"] = doc["snapshot_at"].isoformat()
-    return doc
+    return await get_user_chat_snapshot(
+        pipeline_id=pipeline_id,
+        snapshot_id=snapshot_id,
+        user_email=user_email,
+    )
 
 
 @app.post("/drafter/chat-sessions/{pipeline_id}/{snapshot_id}/restore")
 async def restore_chat_snapshot(
     pipeline_id: str,
     snapshot_id: str,
-    user_email: Optional[str] = None,
     _: None = Depends(verify_internal),
+    user_email: str = Depends(get_authenticated_user_email),
 ):
-    """Restore a past snapshot as the current conversation."""
-    from backend.db.mongo import chat_snapshots, drafter_chat_history
-    from bson import ObjectId
-    from pymongo.errors import DuplicateKeyError as DupKeyError
+    """Restore one past snapshot for the authenticated user."""
+    from backend.platform.services.session_service import restore_chat_snapshot as restore_user_chat_snapshot
 
-    try:
-        snap = await chat_snapshots().find_one({"_id": ObjectId(snapshot_id), "pipeline_id": pipeline_id})
-    except Exception:
-        snap = None
-
-    if not snap:
-        return {"error": "Snapshot not found"}
-
-    # Restore: overwrite the current chat history with the snapshot
-    restore_doc: dict = {
-        "pipeline_id": pipeline_id,
-        "grant_id": snap.get("grant_id", ""),
-        "sections": snap.get("sections", {}),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "session_id": snap.get("session_id"),
-    }
-    if user_email:
-        restore_doc["user_email"] = user_email
-
-    query: dict = {"pipeline_id": pipeline_id}
-    if user_email:
-        query["user_email"] = user_email
-
-    try:
-        await drafter_chat_history().replace_one(query, restore_doc, upsert=True)
-    except DupKeyError:
-        await drafter_chat_history().update_one(query, {"$set": restore_doc})
-
-    return {"status": "restored", "pipeline_id": pipeline_id, "snapshot_id": snapshot_id}
+    return await restore_user_chat_snapshot(
+        pipeline_id=pipeline_id,
+        snapshot_id=snapshot_id,
+        user_email=user_email,
+    )
 
 
 async def _predraft_validate(grant: dict) -> dict | None:
@@ -2894,7 +2520,7 @@ async def start_draft(
     user_email: str = Depends(get_user_email),
 ):
     """Start a new draft pipeline for an already-triaged grant."""
-    from backend.db.mongo import grants_pipeline, grants_scored, audit_logs
+    from backend.db.mongo import grants_pipeline, grants_scored
     from bson import ObjectId
 
     grant = await grants_scored().find_one({"_id": ObjectId(body.grant_id)})
@@ -2981,100 +2607,34 @@ async def start_draft(
     thread_id = body.thread_id or f"draft_{body.grant_id[:8]}_{uuid.uuid4().hex[:6]}"
     run_id = str(uuid.uuid4())
 
-    # Create pipeline record and sync grants_scored status
-    pipeline_id = None
-    try:
-        result = await grants_pipeline().insert_one({
-            "grant_id": body.grant_id,
-            "thread_id": thread_id,
-            "status": "drafting",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "draft_started_at": datetime.now(timezone.utc).isoformat(),
-            "current_draft_version": 0,
-            "final_draft_url": None,
-            "override_guardrails": body.override_guardrails,
-            "override_reason": body.override_reason,
-            "started_by": user_email,
-        })
-        pipeline_id = str(result.inserted_id)
-        # Keep grants_scored status in sync so dashboard/pipeline views reflect drafting
-        await grants_scored().update_one(
-            {"_id": ObjectId(body.grant_id)},
-            {"$set": {"status": "drafting"}},
-        )
-        # Audit log
-        await audit_logs().insert_one({
-            "node": "drafter",
-            "action": "draft_started",
-            "grant_id": body.grant_id,
-            "grant_name": grant.get("title") or grant.get("grant_name") or "",
-            "user_email": user_email,
-            "thread_id": thread_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    from backend.projects.grants_engine.workflow_runtime import (
+        DRAFT_START_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_start_draft_workflow,
+    )
 
-    async def _run_draft():
-        graph = get_graph()
-        config = {"configurable": {"thread_id": thread_id}}
-
-        # Inject state as if human_triage just ran with "pursue" decision.
-        # This skips scout/analyst/notify_triage entirely and resumes from
-        # the next node after human_triage → company_brain.
-        triage_state = {
-            "raw_grants": [],
-            "scored_grants": [],
-            "human_triage_decision": "pursue",
-            "selected_grant_id": body.grant_id,
-            "triage_notes": None,
-            "grant_requirements": None,
-            "grant_raw_doc": None,
-            "company_profile": None,
-            "company_context": None,
-            "style_examples": None,
-            "style_examples_loaded": False,
-            "draft_guardrail_result": None,
-            "override_guardrails": body.override_guardrails,
-            "current_section_index": 0,
-            "approved_sections": {},
-            "section_critiques": {},
-            "section_revision_instructions": {},
-            "pending_interrupt": None,
-            "section_review_decision": None,
-            "section_edited_content": None,
-            "reviewer_output": None,
-            "draft_version": 0,
-            "draft_filepath": None,
-            "draft_filename": None,
-            "markdown_content": None,
-            "pipeline_id": pipeline_id,
-            "thread_id": thread_id,
-            "run_id": run_id,
-            "errors": [],
-            "audit_log": [{
-                "node": "human_triage",
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "decision": "pursue",
-                "grant_id": body.grant_id,
-                "override_guardrails": body.override_guardrails,
-                "override_reason": body.override_reason,
-            }],
-        }
-
-        # Write state as if human_triage just completed → graph resumes at company_brain
-        await graph.aupdate_state(config, triage_state, as_node="human_triage")
-
-        # First resume: runs company_brain → grant_reader → draft_guardrail → pauses at interrupt_before drafter
-        # (If guardrail fails, routes to pipeline_update → END instead)
-        await graph.ainvoke(None, config=config)
-
-        # Second resume: runs drafter (writes first section) → pauses at next interrupt_before drafter
-        # Only reaches here if guardrail passed
-        await graph.ainvoke(None, config=config)
-
-    background_tasks.add_task(_run_draft)
-    return {"status": "draft_started", "thread_id": thread_id, "pipeline_id": pipeline_id}
+    handle = await enqueue_start_draft_workflow(
+        grant_id=body.grant_id,
+        user_email=user_email,
+        thread_id=thread_id,
+        run_id=run_id,
+        override_guardrails=body.override_guardrails,
+        override_reason=body.override_reason,
+        starting_status=current_status,
+    )
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[DRAFT_START_WORKFLOW_NAME],
+        limit=1,
+    )
+    effective_thread_id = handle.get("thread_id") or thread_id
+    return {
+        "status": "draft_started" if not handle.get("deduplicated") else "draft_already_queued",
+        "workflow_status": handle.get("status") or "pending",
+        "thread_id": effective_thread_id,
+        "pipeline_id": None,
+        "workflow_id": handle.get("workflow_id"),
+    }
 
 
 # ── Replay / Re-test endpoint ─────────────────────────────────────────────────
@@ -3229,14 +2789,21 @@ async def run_review(
     if not draft:
         raise HTTPException(status_code=404, detail="No draft found for this grant")
 
-    async def _run():
-        try:
-            from backend.agents.dual_reviewer import run_dual_review
-            await run_dual_review(body.grant_id)
-        except Exception as exc:
-            logger.error("Dual review failed for %s: %s", body.grant_id, exc)
+    from backend.projects.grants_engine.workflow_runtime import (
+        REVIEW_WORKFLOW_NAME,
+        drain_grants_workflows,
+        enqueue_review_workflow,
+    )
 
-    background_tasks.add_task(_run)
+    handle = await enqueue_review_workflow(
+        grant_id=body.grant_id,
+        user_email=user_email,
+    )
+    background_tasks.add_task(
+        drain_grants_workflows,
+        workflow_names=[REVIEW_WORKFLOW_NAME],
+        limit=1,
+    )
 
     # Audit log
     try:
@@ -3252,9 +2819,43 @@ async def run_review(
         pass
 
     return {
-        "status": "review_started",
+        "status": "review_queued" if not handle.get("deduplicated") else "review_already_queued",
         "grant_id": body.grant_id,
         "draft_version": draft.get("version", 0),
+        "workflow_id": handle.get("workflow_id"),
+    }
+
+
+@app.get("/workflows/{workflow_id}")
+async def get_workflow_status(
+    workflow_id: str,
+    _: None = Depends(verify_internal),
+):
+    from backend.projects.grants_engine.workflow_runtime import get_workflow_run
+
+    run = await get_workflow_run(workflow_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    return run
+
+
+@app.post("/workflows/drain")
+async def drain_workflows_endpoint(
+    _: None = Depends(verify_internal),
+    workflow_name: Optional[str] = None,
+    limit: int = 10,
+):
+    from backend.projects.grants_engine.workflow_runtime import drain_grants_workflows
+
+    workflow_names = [workflow_name] if workflow_name else None
+    processed = await drain_grants_workflows(
+        workflow_names=workflow_names,
+        limit=max(1, min(limit, 100)),
+    )
+    return {
+        "status": "drained",
+        "processed": processed,
+        "workflow_name": workflow_name,
     }
 
 
@@ -3657,7 +3258,7 @@ async def pipeline_status():
 
 
 @app.get("/status/thread/{thread_id}")
-async def thread_status(thread_id: str):
+async def thread_status(thread_id: str, _: None = Depends(verify_internal)):
     """Check if a thread has a pending section interrupt."""
     from backend.db.mongo import graph_checkpoints
     doc = await graph_checkpoints().find_one(
@@ -3732,6 +3333,7 @@ async def notion_webhook_triage(
     Finds the matching LangGraph thread and resumes the human_triage checkpoint.
     """
     from backend.db.mongo import grants_scored, grants_pipeline
+    from backend.platform.services.status_service import change_grant_status
     from bson import ObjectId
 
     # Normalize Notion status → internal status
@@ -3743,7 +3345,7 @@ async def notion_webhook_triage(
     if not decision:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid status '{body.new_status}'. Expected Pursue, Watch, or Pass.",
+            detail=f"Invalid status '{body.new_status}'. Expected Pursue or Pass.",
         )
 
     # Verify grant exists
@@ -3754,14 +3356,13 @@ async def notion_webhook_triage(
     if not grant:
         raise HTTPException(status_code=404, detail="Grant not found in grants_scored")
 
-    # Update grant status in MongoDB
-    await grants_scored().update_one(
-        {"_id": ObjectId(body.mongo_id)},
-        {"$set": {
-            "status": decision,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "triage_source": "notion_webhook",
-        }},
+    # Update grant through the centralized status service so audit rules stay aligned.
+    await change_grant_status(
+        grant_id=body.mongo_id,
+        new_status=decision,
+        user_email="system:notion_webhook",
+        source="notion_webhook",
+        sync_notion=False,
     )
 
     # Find the LangGraph thread paused at human_triage for this grant
@@ -4032,83 +3633,16 @@ async def update_grant_status_api(
     user_email: str = Depends(get_user_email),
 ):
     """Move a grant to a new Kanban stage (called by the drag-and-drop UI)."""
-    from backend.db.mongo import audit_logs, grants_pipeline, grants_scored
-    from bson import ObjectId
+    from backend.platform.services.status_service import change_grant_status
 
-    if body.status not in _VALID_STATUSES:
-        raise HTTPException(status_code=400, detail=f"Invalid status: {body.status!r}")
-    try:
-        oid = ObjectId(body.grant_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid grant_id")
-
-    grant = await grants_scored().find_one({"_id": oid}, {"status": 1, "title": 1, "grant_name": 1})
-    if not grant:
-        raise HTTPException(status_code=404, detail="Grant not found")
-
-    current_status = (grant.get("status") or "").lower()
-    if not is_valid_transition(current_status, body.status):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Invalid pipeline transition: {current_status or 'unknown'} -> {body.status}. "
-                "Use the appropriate pipeline action instead of forcing the status."
-            ),
-        )
-
-    now = datetime.now(timezone.utc).isoformat()
-    update_doc = {"status": body.status, "updated_at": now}
-    unset_doc = {}
-    if body.status == "human_passed":
-        update_doc["human_override"] = True
-        update_doc["override_at"] = now
-    if body.status == "hold":
-        update_doc["hold_reason"] = (body.hold_reason or "").strip()
-        update_doc["hold_at"] = now
-    else:
-        unset_doc["hold_reason"] = ""
-        unset_doc["hold_at"] = ""
-
-    grant_update = {"$set": update_doc}
-    if unset_doc:
-        grant_update["$unset"] = unset_doc
-
-    await grants_scored().update_one({"_id": oid}, grant_update)
-
-    if body.status in pre_draft_cleanup_statuses():
-        await grants_pipeline().update_many(
-            {"grant_id": body.grant_id, "status": {"$in": ["drafting", "pending_interrupt"]}},
-            {"$set": {"status": "cancelled", "updated_at": now}},
-        )
-    else:
-        await grants_pipeline().update_many(
-            {"grant_id": body.grant_id, "status": {"$nin": ["cancelled"]}},
-            {"$set": {"status": body.status, "updated_at": now}},
-        )
-
-    try:
-        await audit_logs().insert_one({
-            "node": "pipeline_status",
-            "action": "status_changed",
-            "grant_id": body.grant_id,
-            "grant_name": grant.get("title") or grant.get("grant_name") or "",
-            "from_status": current_status,
-            "to_status": body.status,
-            "hold_reason": body.hold_reason.strip() if body.status == "hold" and body.hold_reason else None,
-            "user_email": user_email,
-            "created_at": now,
-        })
-    except Exception:
-        logger.debug("Audit log skipped for grant %s", body.grant_id, exc_info=True)
-
-    # Sync status change to Notion
-    try:
-        from backend.integrations.notion_sync import update_grant_status
-        await update_grant_status(body.grant_id, body.status)
-    except Exception:
-        logger.debug("Notion status sync skipped for grant %s", body.grant_id, exc_info=True)
-
-    return {"status": "updated", "grant_id": body.grant_id, "new_status": body.status}
+    return await change_grant_status(
+        grant_id=body.grant_id,
+        new_status=body.status,
+        user_email=user_email,
+        hold_reason=body.hold_reason,
+        source="api",
+        sync_notion=True,
+    )
 
 
 @app.get("/drafts/{thread_id}/download")

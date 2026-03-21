@@ -358,3 +358,31 @@ class TestGetUserEmail:
         from backend.main import get_user_email
         result = get_user_email("  gowtham@altcarbon.com  ")
         assert result == "gowtham@altcarbon.com"
+
+
+class TestGetAuthenticatedUserEmail:
+    """Tests the strict authenticated-user dependency."""
+
+    def test_missing_header_rejected(self):
+        from backend.main import get_authenticated_user_email
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            get_authenticated_user_email(None)
+        assert exc_info.value.status_code == 401
+
+    def test_non_email_header_rejected(self):
+        from backend.main import get_authenticated_user_email
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            get_authenticated_user_email("system")
+        assert exc_info.value.status_code == 401
+
+    def test_valid_email_allowed(self):
+        from backend.main import get_authenticated_user_email
+
+        assert (
+            get_authenticated_user_email("  gowtham@altcarbon.com  ")
+            == "gowtham@altcarbon.com"
+        )

@@ -1,23 +1,21 @@
 /**
- * GET  /api/drafter/chat-history?pipeline_id=X  — load persisted chat history
+ * GET  /api/drafter/chat-history?pipeline_id=X  — load authenticated user's chat history
  * PUT  /api/drafter/chat-history                — save/upsert chat history
  * DELETE /api/drafter/chat-history?pipeline_id=X&section_name=Y — clear one section
  */
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, proxyHeaders } from "@/lib/api";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(req: NextRequest) {
   try {
     const pipelineId = req.nextUrl.searchParams.get("pipeline_id");
-    const userEmail = req.nextUrl.searchParams.get("user_email");
     if (!pipelineId) {
       return NextResponse.json(
         { error: "pipeline_id is required" },
         { status: 400 }
       );
     }
-    let path = `/drafter/chat-history/${encodeURIComponent(pipelineId)}`;
-    if (userEmail) path += `?user_email=${encodeURIComponent(userEmail)}`;
+    const path = `/drafter/chat-history/${encodeURIComponent(pipelineId)}`;
     const data = await apiGet(path);
     return NextResponse.json(data);
   } catch (e) {
@@ -41,10 +39,7 @@ export async function PUT(req: NextRequest) {
     const url = `${(process.env.FASTAPI_URL ?? "").replace(/\/+$/, "")}/drafter/chat-history`;
     const res = await fetch(url, {
       method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        "x-internal-secret": process.env.INTERNAL_SECRET ?? "",
-      },
+      headers: await proxyHeaders(true),
       body: JSON.stringify(body),
       cache: "no-store",
     });
@@ -66,7 +61,6 @@ export async function DELETE(req: NextRequest) {
   try {
     const pipelineId = req.nextUrl.searchParams.get("pipeline_id");
     const sectionName = req.nextUrl.searchParams.get("section_name");
-    const userEmail = req.nextUrl.searchParams.get("user_email");
     if (!pipelineId || !sectionName) {
       return NextResponse.json(
         { error: "pipeline_id and section_name are required" },
@@ -74,13 +68,10 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
-    let url = `${(process.env.FASTAPI_URL ?? "").replace(/\/+$/, "")}/drafter/chat-history/${encodeURIComponent(pipelineId)}/${encodeURIComponent(sectionName)}`;
-    if (userEmail) url += `?user_email=${encodeURIComponent(userEmail)}`;
+    const url = `${(process.env.FASTAPI_URL ?? "").replace(/\/+$/, "")}/drafter/chat-history/${encodeURIComponent(pipelineId)}/${encodeURIComponent(sectionName)}`;
     const res = await fetch(url, {
       method: "DELETE",
-      headers: {
-        "x-internal-secret": process.env.INTERNAL_SECRET ?? "",
-      },
+      headers: await proxyHeaders(false),
       cache: "no-store",
     });
 

@@ -1,22 +1,20 @@
 /**
- * GET  /api/drafter/chat-sessions?pipeline_id=X&user_email=Y  — list past sessions
- * POST /api/drafter/chat-sessions?pipeline_id=X&snapshot_id=Y&user_email=Z  — restore a snapshot
+ * GET  /api/drafter/chat-sessions?pipeline_id=X  — list authenticated user's past sessions
+ * POST /api/drafter/chat-sessions?pipeline_id=X&snapshot_id=Y  — restore a snapshot
  */
-import { apiGet } from "@/lib/api";
+import { apiGet, proxyHeaders } from "@/lib/api";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(req: NextRequest) {
   try {
     const pipelineId = req.nextUrl.searchParams.get("pipeline_id");
-    const userEmail = req.nextUrl.searchParams.get("user_email");
     if (!pipelineId) {
       return NextResponse.json(
         { error: "pipeline_id is required" },
         { status: 400 }
       );
     }
-    let path = `/drafter/chat-sessions/${encodeURIComponent(pipelineId)}`;
-    if (userEmail) path += `?user_email=${encodeURIComponent(userEmail)}`;
+    const path = `/drafter/chat-sessions/${encodeURIComponent(pipelineId)}`;
     const data = await apiGet(path);
     return NextResponse.json(data);
   } catch (e) {
@@ -30,7 +28,6 @@ export async function POST(req: NextRequest) {
   try {
     const pipelineId = req.nextUrl.searchParams.get("pipeline_id");
     const snapshotId = req.nextUrl.searchParams.get("snapshot_id");
-    const userEmail = req.nextUrl.searchParams.get("user_email");
     if (!pipelineId || !snapshotId) {
       return NextResponse.json(
         { error: "pipeline_id and snapshot_id are required" },
@@ -38,13 +35,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let url = `${(process.env.FASTAPI_URL ?? "").replace(/\/+$/, "")}/drafter/chat-sessions/${encodeURIComponent(pipelineId)}/${encodeURIComponent(snapshotId)}/restore`;
-    if (userEmail) url += `?user_email=${encodeURIComponent(userEmail)}`;
+    const url = `${(process.env.FASTAPI_URL ?? "").replace(/\/+$/, "")}/drafter/chat-sessions/${encodeURIComponent(pipelineId)}/${encodeURIComponent(snapshotId)}/restore`;
     const res = await fetch(url, {
       method: "POST",
-      headers: {
-        "x-internal-secret": process.env.INTERNAL_SECRET ?? "",
-      },
+      headers: await proxyHeaders(false),
       cache: "no-store",
     });
 

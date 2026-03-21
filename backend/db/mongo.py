@@ -85,6 +85,9 @@ def draft_preferences():
 def chat_snapshots():
     return get_db()["chat_snapshots"]
 
+def workflow_runs():
+    return get_db()["workflow_runs"]
+
 
 async def ensure_indexes():
     """Create all MongoDB indexes. Call once at startup. Skips indexes that already exist."""
@@ -188,6 +191,12 @@ async def ensure_indexes():
     await _idx("chat_snapshots", [("pipeline_id", 1), ("user_email", 1), ("snapshot_at", -1)])
     await _idx("chat_snapshots", [("pipeline_id", 1), ("snapshot_at", -1)])
     await _idx("chat_snapshots", "snapshot_at", expireAfterSeconds=90 * 24 * 3600)  # 90-day TTL
+
+    # workflow_runs (durable queue / execution history)
+    await _idx("workflow_runs", "workflow_id", unique=True)
+    await _idx("workflow_runs", [("status", 1), ("created_at", 1)])
+    await _idx("workflow_runs", [("workflow_name", 1), ("status", 1), ("created_at", 1)])
+    await _idx("workflow_runs", [("lease_expires_at", 1)])
 
     # draft_preferences (preference learning)
     await _idx("draft_preferences", [("user_id", 1), ("created_at", -1)])
