@@ -1,4 +1,4 @@
-import contract from "../../../shared/pipeline_status_contract.json";
+import contract from "@/data/pipeline_status_contract.json";
 
 type ContractColumn = {
   id: string;

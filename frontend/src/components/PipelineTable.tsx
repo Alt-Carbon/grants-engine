@@ -93,7 +93,7 @@ export function PipelineTable({
     const existingGrant = allGrants.find((g) => g._id === grantId);
     const holdReason =
       newStatus === "hold"
-        ? requestHoldReason((existingGrant as { hold_reason?: string } | undefined)?.hold_reason)
+        ? requestHoldReason((existingGrant as { hold_reason?: string } | undefined)?.hold_reason) ?? undefined
         : undefined;
     if (newStatus === "hold" && !holdReason) return;
 
