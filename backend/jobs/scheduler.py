@@ -111,65 +111,76 @@ def get_scheduler_status() -> dict:
     }
 
 
-# ── Safe wrappers (catch errors, emit notifications) ─────────────────────────
+# ── Safe wrappers: enqueue durable workflows instead of calling jobs directly ─
 
 async def _safe_scout() -> None:
-    """Run scout pipeline with error handling + notification."""
-    from backend.jobs.scout_job import run_scout_pipeline
+    """Enqueue scout workflow via the durable queue."""
     try:
-        result = await run_scout_pipeline()
-        logger.info("Scheduled scout complete: %s", result.get("status"))
-        # Emit notification
-        try:
-            from backend.notifications.hub import notify
-            await notify(
-                event_type="scout_complete",
-                title="Scout run complete",
-                body=f"Status: {result.get('status', 'unknown')}",
-                action_url="/monitoring",
-                metadata=result,
-            )
-        except Exception:
-            logger.debug("Scout notification failed", exc_info=True)
+        from backend.projects.grants_engine.workflow_runtime import (
+            enqueue_scout_run,
+            drain_grants_workflows,
+            SCOUT_RUN_WORKFLOW_NAME,
+        )
+
+        handle = await enqueue_scout_run(user_email="system:scheduler")
+        logger.info("Scheduler enqueued scout: %s", handle.get("workflow_id"))
+        await drain_grants_workflows(
+            workflow_names=[SCOUT_RUN_WORKFLOW_NAME], limit=1,
+        )
     except Exception as e:
         logger.error("Scheduled scout failed: %s", e)
 
 
 async def _safe_knowledge_sync() -> None:
-    """Run knowledge sync with error handling."""
-    from backend.jobs.knowledge_job import run_knowledge_sync
+    """Enqueue knowledge sync workflow via the durable queue."""
     try:
-        result = await run_knowledge_sync()
-        logger.info("Scheduled knowledge sync complete: %s", result.get("status"))
-        try:
-            from backend.notifications.hub import notify
-            await notify(
-                event_type="knowledge_sync",
-                title="Knowledge sync complete",
-                body=f"Chunks: {result.get('chunks_upserted', 0)}",
-                action_url="/knowledge",
-                metadata=result,
-            )
-        except Exception:
-            logger.debug("Knowledge sync notification failed", exc_info=True)
+        from backend.projects.grants_engine.workflow_runtime import (
+            enqueue_knowledge_sync_run,
+            drain_grants_workflows,
+            KNOWLEDGE_SYNC_WORKFLOW_NAME,
+        )
+
+        handle = await enqueue_knowledge_sync_run(user_email="system:scheduler")
+        logger.info("Scheduler enqueued knowledge sync: %s", handle.get("workflow_id"))
+        await drain_grants_workflows(
+            workflow_names=[KNOWLEDGE_SYNC_WORKFLOW_NAME], limit=1,
+        )
     except Exception as e:
         logger.error("Scheduled knowledge sync failed: %s", e)
 
 
 async def _safe_profile_sync() -> None:
-    """Run profile rebuild with error handling."""
+    """Enqueue profile sync workflow via the durable queue."""
     try:
-        from backend.knowledge.sync_profile import sync_profile_from_notion
-        result = await sync_profile_from_notion()
-        logger.info("Scheduled profile sync complete: %s", result)
+        from backend.projects.grants_engine.workflow_runtime import (
+            enqueue_profile_sync_run,
+            drain_grants_workflows,
+            PROFILE_SYNC_WORKFLOW_NAME,
+        )
+
+        handle = await enqueue_profile_sync_run(user_email="system:scheduler")
+        logger.info("Scheduler enqueued profile sync: %s", handle.get("workflow_id"))
+        await drain_grants_workflows(
+            workflow_names=[PROFILE_SYNC_WORKFLOW_NAME], limit=1,
+        )
     except Exception as e:
         logger.error("Scheduled profile sync failed: %s", e)
 
 
 async def _safe_check_notion_changes() -> None:
-    """Poll Notion for page edits newer than last sync (webhook fallback)."""
+    """Enqueue Notion change detection workflow via the durable queue."""
     try:
-        await check_notion_changes()
+        from backend.projects.grants_engine.workflow_runtime import (
+            enqueue_notion_change_check_run,
+            drain_grants_workflows,
+            NOTION_CHANGE_CHECK_WORKFLOW_NAME,
+        )
+
+        handle = await enqueue_notion_change_check_run(user_email="system:scheduler")
+        logger.info("Scheduler enqueued Notion change check: %s", handle.get("workflow_id"))
+        await drain_grants_workflows(
+            workflow_names=[NOTION_CHANGE_CHECK_WORKFLOW_NAME], limit=1,
+        )
     except Exception as e:
         logger.error("Scheduled Notion change check failed: %s", e)
 

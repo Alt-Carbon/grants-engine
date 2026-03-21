@@ -2859,6 +2859,16 @@ async def run_review(
     }
 
 
+@app.get("/workflows/summary")
+async def get_workflow_summary(
+    _: None = Depends(verify_internal),
+    recent_limit: int = 20,
+):
+    from backend.platform.services.workflow_service import get_workflow_queue_summary
+
+    return await get_workflow_queue_summary(recent_limit=recent_limit)
+
+
 @app.get("/workflows/{workflow_id}")
 async def get_workflow_status(
     workflow_id: str,
@@ -2870,6 +2880,39 @@ async def get_workflow_status(
     if not run:
         raise HTTPException(status_code=404, detail="Workflow run not found")
     return run
+
+
+@app.post("/workflows/{workflow_id}/cancel")
+async def cancel_workflow(
+    workflow_id: str,
+    _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
+):
+    from backend.platform.services.workflow_service import cancel_workflow_run
+
+    return await cancel_workflow_run(workflow_id=workflow_id, user_email=user_email)
+
+
+@app.post("/workflows/{workflow_id}/retry")
+async def retry_workflow(
+    workflow_id: str,
+    _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
+):
+    from backend.platform.services.workflow_service import retry_workflow_run
+
+    return await retry_workflow_run(workflow_id=workflow_id, user_email=user_email)
+
+
+@app.post("/workflows/{workflow_id}/requeue")
+async def requeue_workflow(
+    workflow_id: str,
+    _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
+):
+    from backend.platform.services.workflow_service import requeue_workflow_run
+
+    return await requeue_workflow_run(workflow_id=workflow_id, user_email=user_email)
 
 
 @app.post("/workflows/drain")

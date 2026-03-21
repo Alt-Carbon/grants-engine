@@ -26,6 +26,8 @@ NOTION_BACKFILL_WORKFLOW_NAME = "grants_engine.notion_backfill.run"
 ANALYST_RUN_WORKFLOW_NAME = "grants_engine.analyst.run"
 ANALYST_RESCORE_WORKFLOW_NAME = "grants_engine.analyst.rescore"
 ANALYST_RESCORE_SINGLE_WORKFLOW_NAME = "grants_engine.analyst.rescore_single"
+PROFILE_SYNC_WORKFLOW_NAME = "grants_engine.profile_sync.run"
+NOTION_CHANGE_CHECK_WORKFLOW_NAME = "grants_engine.notion_change_check.run"
 ANALYST_WORKFLOW_NAMES = [
     ANALYST_RUN_WORKFLOW_NAME,
     ANALYST_RESCORE_WORKFLOW_NAME,
@@ -582,6 +584,20 @@ async def _run_analyst_rescore_single(payload: dict, context: AgentExecutionCont
     }
 
 
+async def _run_profile_sync(payload: dict, context: AgentExecutionContext) -> dict:
+    from backend.knowledge.sync_profile import sync_profile_from_notion
+
+    result = await sync_profile_from_notion()
+    return {"status": "ok", "result": str(result)}
+
+
+async def _run_notion_change_check(payload: dict, context: AgentExecutionContext) -> dict:
+    from backend.jobs.scheduler import check_notion_changes
+
+    result = await check_notion_changes()
+    return result
+
+
 def get_grants_orchestrator() -> MongoWorkflowOrchestrator:
     return MongoWorkflowOrchestrator(
         handlers={
@@ -597,6 +613,8 @@ def get_grants_orchestrator() -> MongoWorkflowOrchestrator:
             ANALYST_RUN_WORKFLOW_NAME: _run_analyst,
             ANALYST_RESCORE_WORKFLOW_NAME: _run_analyst_rescore,
             ANALYST_RESCORE_SINGLE_WORKFLOW_NAME: _run_analyst_rescore_single,
+            PROFILE_SYNC_WORKFLOW_NAME: _run_profile_sync,
+            NOTION_CHANGE_CHECK_WORKFLOW_NAME: _run_notion_change_check,
         }
     )
 
@@ -915,6 +933,22 @@ async def enqueue_analyst_rescore_single(*, grant_id: str, user_email: str) -> d
     return await _enqueue_workflow(
         workflow_name=ANALYST_RESCORE_SINGLE_WORKFLOW_NAME,
         payload={"grant_id": grant_id},
+        user_email=user_email,
+    )
+
+
+async def enqueue_profile_sync_run(*, user_email: str) -> dict:
+    return await _enqueue_workflow(
+        workflow_name=PROFILE_SYNC_WORKFLOW_NAME,
+        payload={},
+        user_email=user_email,
+    )
+
+
+async def enqueue_notion_change_check_run(*, user_email: str) -> dict:
+    return await _enqueue_workflow(
+        workflow_name=NOTION_CHANGE_CHECK_WORKFLOW_NAME,
+        payload={},
         user_email=user_email,
     )
 

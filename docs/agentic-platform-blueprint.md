@@ -88,3 +88,28 @@ between ad hoc `BackgroundTasks` and a future durable runtime like Temporal.
 
 This is not the final orchestration architecture, but it is a safer migration
 step than adding more uncaptured background tasks directly in route handlers.
+
+## Worker Model
+
+The repo now also has a dedicated worker entry point:
+
+- `backend/platform/worker.py` — reusable async worker loop
+- `backend/scripts/run_workflow_worker.py` — grants worker process launcher
+
+Routes can still trigger an immediate drain for compatibility, but the intended
+operational model is a separate worker process continuously polling the queue.
+
+## Scheduler Migration
+
+APScheduler cron wrappers in `backend/jobs/scheduler.py` now enqueue durable
+workflows instead of calling job functions directly. All four scheduled jobs
+(scout, knowledge sync, profile sync, Notion change detection) go through
+the same `enqueue → drain` path as route-triggered runs.
+
+New workflow types added for this:
+
+- `grants_engine.profile_sync.run`
+- `grants_engine.notion_change_check.run`
+
+This means every long-running backend job, whether triggered by a user action,
+a cron schedule, or an external webhook, now flows through `workflow_runs`.
