@@ -2603,9 +2603,10 @@ function ChatBubble({
                 {metadata.wordCount != null && (
                   <span
                     className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                      metadata.wordLimit &&
-                      metadata.wordCount > metadata.wordLimit
-                        ? "bg-amber-50 text-amber-700"
+                      metadata.wordLimit
+                        ? metadata.wordCount > metadata.wordLimit
+                          ? "bg-red-50 text-red-700"
+                          : "bg-green-50 text-green-700"
                         : "bg-gray-100 text-gray-600"
                     }`}
                   >

@@ -931,7 +931,14 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
   const [applySections, setApplySections] = useState<string[]>([]);
 
   // Track user edits to suggestion text: maps original key -> edited text
-  const [editedSuggestions, setEditedSuggestions] = useState<Map<string, string>>(new Map());
+  // Persisted per-grant in localStorage so edits survive refresh
+  const [editedSuggestions, setEditedSuggestions] = useState<Map<string, string>>(() => {
+    if (typeof window === "undefined") return new Map();
+    try {
+      const stored = localStorage.getItem(`reviewer_edits_${grants[0]?._id}`);
+      return stored ? new Map(JSON.parse(stored)) : new Map();
+    } catch { return new Map(); }
+  });
 
   // Post-apply diff view
   const [showDiffAfterApply, setShowDiffAfterApply] = useState(false);
@@ -1130,6 +1137,7 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
       setApplyResult({ version: data.new_version, sections: data.revised_sections });
       setAcceptedSuggestions(new Set());
       setEditedSuggestions(new Map());
+      try { localStorage.removeItem(`reviewer_edits_${selectedId}`); } catch { /* ignore */ }
       if (downloadAfterApply) {
         const revisedDraft = await fetchDraftContent(selectedId);
         if (!revisedDraft) {
@@ -1161,13 +1169,28 @@ export function ReviewersView({ grants }: { grants: Grant[] }) {
     })();
   }, [showDiffAfterApply, selectedId, applyResult]);
 
-  // Reset state when switching grants
+  // Persist edited suggestions to localStorage
+  useEffect(() => {
+    if (!selectedId || editedSuggestions.size === 0) return;
+    try {
+      localStorage.setItem(`reviewer_edits_${selectedId}`, JSON.stringify([...editedSuggestions]));
+    } catch { /* ignore */ }
+  }, [editedSuggestions, selectedId]);
+
+  // Reset state when switching grants — restore edits from localStorage
   useEffect(() => {
     setAcceptedSuggestions(new Set());
-    setEditedSuggestions(new Map());
     setApplyResult(null);
     setApplySections([]);
     setPostApplyDiff(null);
+    if (selectedId) {
+      try {
+        const stored = localStorage.getItem(`reviewer_edits_${selectedId}`);
+        setEditedSuggestions(stored ? new Map(JSON.parse(stored)) : new Map());
+      } catch { setEditedSuggestions(new Map()); }
+    } else {
+      setEditedSuggestions(new Map());
+    }
   }, [selectedId]);
 
   const selectedGrant = grants.find((g) => g._id === selectedId);

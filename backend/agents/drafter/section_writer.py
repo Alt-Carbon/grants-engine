@@ -63,31 +63,71 @@ STYLE EXAMPLES (match this voice and tone — these are {company_name}'s past ap
 
 {revision_block}
 
-MANDATORY WRITING RULES (violating these will trigger a rewrite):
-1. DECLARATIVE VOICE: Use "will" not "may/could/aim to". State what you will do, not what you hope to do.
-2. NO EMPTY ADJECTIVES: Never write "innovative", "cutting-edge", "state-of-the-art", "world-class", "groundbreaking", "revolutionary", "game-changing", "holistic", "synergistic", "paradigm-shifting", "next-generation". DESCRIBE the innovation instead of labeling it.
-3. QUANTIFY EVERY CLAIM: Every claim of scale, impact, or capability must include a number, unit, comparison, or citation. No "significant impact" — write "23% increase in soil organic carbon across 12 field plots".
-4. NO "NOT ONLY X BUT ALSO Y": State both points directly. Write "ERW consumes atmospheric CO2 and exports alkalinity to rivers" not "ERW not only captures carbon but also improves soil health".
-5. PROBLEM → GAP → STRATEGY: Structure as: what is known → what is missing → how this proposal fills it.
-6. PRECISE TERMINOLOGY: Name exact methods, species, locations, equipment. "MC-ICP-MS" not "advanced instruments".
-7. BOLD KEY CLAIMS: Bold the 3-5 most important sentences (gap statement, main deliverable, key differentiator). Do not bold entire paragraphs.
-8. EVIDENCE HIERARCHY: Published results (with citations) first, then pilot data, then proposed work.
-9. LOGICAL CONNECTORS: Use "Thus,", "Hence,", "However,", "Since". Avoid filler transitions like "Additionally,", "Furthermore,", "Moreover,".
-10. ONE CLAIM PER PARAGRAPH with supporting evidence. No paragraphs without a number, citation, or data reference.
-11. NEVER HEDGE when you have evidence. State data as fact. If you lack data, flag [EVIDENCE NEEDED].
-12. SCIENTIFIC PARAGRAPH STRUCTURE (especially for Technical Approach, Methodology, Background sections): Each paragraph must follow Finding → Evidence → Implication → Justification. Open with the key observation/fact. Support with data/citations. State what it means. Close with why it justifies the next step. Never start with the method before establishing why it is needed. Never end with a finding and no justification.
+MANDATORY WRITING RULES (violating ANY of these triggers a rewrite — check EVERY rule before finishing):
+
+1. DECLARATIVE VOICE: Use "will" not "may/could/aim to/seek to/hope to/intend to".
+   WRONG: "We aim to deploy basalt across 60,000 acres."
+   RIGHT: "We will deploy basalt across 60,000 acres by Q4 2026."
+   WRONG: "This could reduce sample processing time."
+   RIGHT: "This will reduce sample processing time from 14 days to 3 days."
+
+2. NO EMPTY ADJECTIVES — ZERO TOLERANCE: Never write "innovative", "cutting-edge", "state-of-the-art", "world-class", "groundbreaking", "revolutionary", "game-changing", "holistic", "synergistic", "paradigm-shifting", "next-generation", "novel", "transformative", "unique", "pioneering", "leading". DESCRIBE the innovation instead.
+   WRONG: "Our innovative MRV platform uses cutting-edge AI."
+   RIGHT: "Our MRV platform (FELUDA) processes 50,000+ soil samples annually using spectral analysis coupled with plot-level satellite imagery."
+
+3. QUANTIFY EVERY CLAIM: Every claim of scale, impact, or capability MUST include a number, unit, comparison, or citation. Scan each sentence — if it makes a claim without a number, add one or flag [EVIDENCE NEEDED].
+   WRONG: "We have significant experience in CDR."
+   RIGHT: "We have verified 221 tonnes of CO₂ removal across 35,000+ acres — Asia's largest ERW credit issuance."
+
+4. NO "NOT ONLY X BUT ALSO Y": State both points directly as parallel facts.
+   WRONG: "ERW not only captures carbon but also improves soil health."
+   RIGHT: "ERW consumes atmospheric CO₂ and exports alkalinity to rivers, while simultaneously increasing soil pH by 0.3-0.5 units."
+
+5. PROBLEM → GAP → STRATEGY STRUCTURE: Each section must follow: what is established → what is missing/limiting → how this proposal addresses it.
+
+6. PRECISE TERMINOLOGY: Name exact methods, instruments, species, locations, and equipment. Never use vague references.
+   WRONG: "We use advanced analytical instruments in our lab."
+   RIGHT: "D-CAL houses ICP-MS, ICP-OES, and LA-ICP-MS (Elemental Scientific NWR213) for multi-element soil analysis."
+
+7. BOLD KEY CLAIMS: Bold the 3-5 most important sentences per section (gap statement, main deliverable, key differentiator, quantified outcome). Do NOT bold entire paragraphs or more than 5 sentences.
+
+8. EVIDENCE HIERARCHY: Present evidence in this order: (1) published/verified results with citations, (2) pilot data from field operations, (3) proposed work. Never lead with proposed work when you have existing results.
+
+9. LOGICAL CONNECTORS: Use "Thus,", "Hence,", "However,", "Since,", "Because". NEVER use filler transitions: "Additionally,", "Furthermore,", "Moreover,", "In addition,", "It is worth noting,".
+
+10. ONE CLAIM PER PARAGRAPH: Each paragraph makes exactly one claim, supported by evidence. No paragraph should exist without a number, citation, or data reference. No paragraph should make multiple unrelated claims.
+
+11. NEVER HEDGE with evidence available: State data as fact. Remove: "we believe", "it is expected", "it is anticipated", "arguably", "potentially".
+    WRONG: "We believe our approach will potentially achieve significant results."
+    RIGHT: "Pilot deployments across 12 plots achieved 23% increase in soil organic carbon over 18 months."
+
+12. PARAGRAPH STRUCTURE — Finding → Evidence → Implication → Justification:
+    - Open with the key observation/fact (not the method)
+    - Support with specific data, citations, or pilot results
+    - State what it means for the project/field
+    - Close with why it justifies the next step or proposed work
+    WRONG: "We will use LA-ICP-MS to analyze samples. This is important because..."
+    RIGHT: "Current sample turnaround of 2-4 weeks limits deployment velocity to ~500 acres/month. LA-ICP-MS reduces per-sample analysis time by ~80%, enabling D-CAL to process 200+ samples/week. This throughput will support scaling to 60,000+ acres by enabling real-time MRV feedback loops."
+
+SECTION-SPECIFIC GUIDANCE:
+- Problem Statement / Background: Lead with the gap, not a literature review. First sentence should state what is NOT known or NOT working.
+- Solution / Technical Approach: Lead with what {company_name} is already doing (operational context), then describe the proposed extension.
+- Impact / Outcomes: Lead with the quantified outcome, then explain how you will measure it.
+- Team / Credentials: Lead with the most relevant achievement, not a biography.
+- Budget: Lead with total ask and value-for-money framing, then itemize.
 
 ADDITIONAL INSTRUCTIONS:
 - Write ONLY this section, nothing else
-- Stay within the word limit
+- Stay within the word limit — count carefully, do not exceed
 - Ground every claim in the company knowledge provided
 - Use the domain terminology naturally — don't force it, but prefer precise terms
 - Follow the tone and voice guidance consistently
-- If an outline was provided, ensure this section aligns with the overall narrative
+- If an outline was provided, ensure this section aligns with the overall narrative and transitions logically from the previous section
 - Match {company_name}'s voice from the style examples
 - For any required claim you cannot support with the provided knowledge, write exactly: [EVIDENCE NEEDED: <brief description of what's missing>]
 - Do NOT invent statistics, team names, funding amounts, or technical claims
-- Address the evaluation criteria directly
+- Address the evaluation criteria explicitly — each criterion should be traceable to specific sentences
+- Before finishing, re-read and check: (1) no banned adjectives, (2) every paragraph has a number, (3) no hedging language, (4) within word limit
 
 Write the section now:"""
 
@@ -104,13 +144,43 @@ EVALUATION CRITERIA FOR THIS GRANT:
 YOUR DRAFT:
 {content}
 
-Score yourself honestly on these dimensions:
-1. CRITERIA COVERAGE (1-5): Does every paragraph directly address at least one evaluation criterion? Are any criteria completely missing?
-2. EVIDENCE GROUNDING (1-5): Are all claims backed by evidence from the company knowledge? Or are there vague platitudes like "innovative approach" or "significant impact"? Every paragraph must have at least one number, citation, or data reference.
-3. WORD COUNT (pass/fail): Is it within the word limit of {word_limit}?
-4. SPECIFICITY (1-5): Would a skeptical reviewer find unsupported assertions? Are there concrete numbers, dates, and names? Check for banned adjectives: "innovative", "cutting-edge", "state-of-the-art", "world-class", "groundbreaking", "revolutionary", "game-changing", "holistic", "synergistic", "paradigm-shifting". If ANY banned word appears, score 1.
-5. FUNDER ALIGNMENT (1-5): Does this section use the funder's language and address what THIS specific funder values?
-6. VOICE CHECK (pass/fail): Does it use declarative "will" voice (not "aim to", "could", "may")? Are there any "not only X but also Y" constructions? Any filler transitions ("Additionally", "Furthermore", "Moreover")? Any hedging ("we believe", "it is expected")?
+Score yourself honestly on these dimensions using this rubric:
+
+1. CRITERIA COVERAGE (1-5):
+   1 = Multiple evaluation criteria completely missing
+   2 = Some criteria addressed but superficially
+   3 = Most criteria addressed, one major gap
+   4 = All criteria addressed, evidence for most
+   5 = Every criterion explicitly addressed with specific evidence
+
+2. EVIDENCE GROUNDING (1-5):
+   1 = Multiple vague claims ("significant impact", "innovative approach"), no numbers
+   2 = Some numbers but many unsupported assertions
+   3 = Most claims have evidence, 1-2 vague paragraphs remain
+   4 = Every paragraph has at least one number, citation, or data reference
+   5 = Dense evidence throughout, no paragraph without quantified support
+
+3. WORD COUNT (pass/fail): Is it within the word limit of {word_limit}? Count the words.
+
+4. SPECIFICITY (1-5):
+   1 = Banned adjectives present ("innovative", "cutting-edge", "state-of-the-art", "world-class", "groundbreaking", "revolutionary", "game-changing", "holistic", "synergistic", "paradigm-shifting", "novel", "transformative", "pioneering") — automatic score of 1 if ANY found
+   2 = Vague references ("advanced instruments", "significant experience")
+   3 = Mostly specific, some vague terms remain
+   4 = Named methods, equipment, locations throughout; no vague references
+   5 = Precisely named instruments (e.g. "ICP-MS"), exact locations (e.g. "Darjeeling"), specific metrics
+
+5. FUNDER ALIGNMENT (1-5):
+   1 = Generic — could be sent to any funder
+   2 = Funder mentioned but language/priorities not mirrored
+   3 = Some funder language used, addresses some priorities
+   4 = Consistently mirrors funder terminology, addresses their stated priorities
+   5 = Reads as if written specifically for this funder's evaluation rubric
+
+6. VOICE CHECK (pass/fail — check ALL of these):
+   - Declarative "will" voice used? (not "aim to", "could", "may", "seek to", "hope to")
+   - No "not only X but also Y" constructions?
+   - No filler transitions ("Additionally", "Furthermore", "Moreover", "In addition")?
+   - No hedging ("we believe", "it is expected", "potentially", "arguably")?
 
 Respond ONLY with valid JSON:
 {{
@@ -118,32 +188,48 @@ Respond ONLY with valid JSON:
   "word_count_ok": <bool>,
   "voice_check_ok": <bool>,
   "banned_words_found": ["<word1>", ...],
-  "weaknesses": ["<specific weakness 1>", "<weakness 2>"],
+  "weaknesses": ["<specific weakness — quote the problematic sentence>", ...],
   "needs_rewrite": <bool>,
   "rewritten": "<full rewritten section if needs_rewrite is true, else null>"
 }}
 
 Rules:
 - Set needs_rewrite=true if ANY score < 4 OR word_count_ok is false OR voice_check_ok is false OR banned_words_found is non-empty
-- If rewriting: remove ALL banned adjectives, fix hedging language, replace "not only X but also Y" with direct statements, ensure every paragraph has evidence
-- The rewrite must stay within the word limit
+- If rewriting:
+  1. Remove ALL banned adjectives — replace with specific descriptions
+  2. Fix ALL hedging language — replace with declarative statements
+  3. Replace "not only X but also Y" with direct parallel statements
+  4. Ensure every paragraph has at least one number/citation/data point
+  5. Check each paragraph follows: Claim → Evidence → Implication
+  6. Count words in your rewrite — it MUST be within the word limit
+- The rewrite must preserve all factual content and evidence from the original
 - If all scores >= 4 and all checks pass, set needs_rewrite=false and rewritten=null"""
 
 
-EVIDENCE_RESOLVE_MAX_ATTEMPTS = 3  # Max gaps to auto-resolve per section
+EVIDENCE_RESOLVE_MAX_ATTEMPTS = 5  # Max gaps to auto-resolve per section
 
 
-REVISION_PROMPT = """You previously wrote this section:
+REVISION_PROMPT = """You previously wrote this section and it needs revision.
 
+YOUR PREVIOUS DRAFT:
 {previous_content}
 
-The reviewer left this feedback:
+REVIEWER FEEDBACK:
 {critique}
 
-Revision instructions:
+SPECIFIC REVISION INSTRUCTIONS:
 {instructions}
 
-Rewrite the section addressing all feedback. Keep the same word limit and evaluation criteria in mind."""
+REVISION RULES:
+1. Address EVERY point in the revision instructions — do not skip any
+2. Preserve all factual content, evidence, and numbers from the original that were NOT flagged
+3. Maintain the same word limit — do not exceed it
+4. Keep the same paragraph structure (Finding → Evidence → Implication → Justification) unless told to restructure
+5. Ensure logical transitions between paragraphs after changes
+6. After rewriting, verify: no banned adjectives, no hedging, every paragraph has evidence, declarative voice throughout
+7. Do NOT add filler to reach the word limit — shorter and tighter is better than padded
+
+Rewrite the complete section now, incorporating all feedback:"""
 
 
 async def get_section_context(
@@ -152,7 +238,7 @@ async def get_section_context(
     grant_title: str,
     grant_themes: List[str],
     company_context: str = "",
-    max_chars: int = 6000,
+    max_chars: int = 10000,
 ) -> str:
     """Retrieve section-specific knowledge from Pinecone.
 
@@ -184,13 +270,13 @@ async def get_section_context(
             if grant_themes:
                 pc_filter["themes"] = {"$in": grant_themes}
 
-            results = search_similar(query, top_k=6, filter_dict=pc_filter or None)
+            results = search_similar(query, top_k=10, filter_dict=pc_filter or None)
 
             # Phase 2: Search for articulation doc chunks specifically
             if art_sections:
                 from backend.config.settings import get_settings as _gs
                 art_query = " ".join(art_sections) + f" {theme_key} {_gs().company_name}"
-                art_results = search_similar(art_query, top_k=4, filter_dict=pc_filter or None)
+                art_results = search_similar(art_query, top_k=6, filter_dict=pc_filter or None)
                 # Merge, dedup
                 seen_ids = {r.get("id", r.get("_id", "")) for r in results}
                 for r in art_results:
@@ -199,7 +285,17 @@ async def get_section_context(
                         results.append(r)
                         seen_ids.add(rid)
 
+            # Filter by relevance score (if available) — skip low-quality matches
+            scored_results = []
             for r in results:
+                score = r.get("score", r.get("_score", 1.0))
+                if score >= 0.65:  # Relevance threshold
+                    scored_results.append(r)
+            # Fall back to unfiltered if threshold is too aggressive
+            if not scored_results and results:
+                scored_results = results
+
+            for r in scored_results:
                 content = r.get("content") or r.get("text", "")
                 source = r.get("source_title", r.get("title", ""))
                 doc_type = r.get("doc_type", "misc")
@@ -328,7 +424,7 @@ async def _resolve_evidence_gaps(
 
             results = search_similar(
                 f"{gap_desc} {theme_key} {_get_settings().company_name}",
-                top_k=3,
+                top_k=5,
                 filter_dict=pc_filter or None,
             )
 
@@ -394,6 +490,10 @@ async def write_section(
     # Preference learning
     user_preferences: str = "",
     approved_examples: str = "",
+    # Reviewer feedback for redraft context
+    reviewer_feedback: str = "",
+    # Cross-section coherence
+    prior_sections_summary: str = "",
 ) -> Dict:
     """Write or rewrite a single section. Returns section dict with content + metadata.
 
@@ -494,8 +594,45 @@ async def write_section(
     if approved_examples:
         approved_examples_block = f"\n{approved_examples}\n"
 
+    # Reviewer feedback block (from previous review cycles)
+    reviewer_feedback_block = ""
+    if reviewer_feedback:
+        reviewer_feedback_block = f"\n{reviewer_feedback}\nAddress the reviewer feedback above in your rewrite.\n"
+
+    # Prior sections block (for cross-section coherence)
+    prior_sections_block = ""
+    if prior_sections_summary:
+        prior_sections_block = f"\nPREVIOUSLY APPROVED SECTIONS (reference these — do not repeat their content, build on it):\n{prior_sections_summary}\n"
+
+    # ── Pre-write evidence enrichment: fetch evidence for criteria before writing ──
+    # This reduces [EVIDENCE NEEDED] flags by ensuring relevant evidence is in context
+    pre_evidence_block = ""
+    if criteria_map_for_section and not revision_instructions:
+        try:
+            from backend.db.pinecone_store import is_pinecone_configured, search_similar
+            if is_pinecone_configured():
+                grant_themes = grant.get("themes_detected", [])
+                pc_filter = {"themes": {"$in": grant_themes}} if grant_themes else {}
+                # Search for evidence matching this section's criteria requirements
+                criteria_query = f"{section_name} {criteria_map_for_section[:300]} {grant.get('title', '')}"
+                pre_results = search_similar(criteria_query, top_k=4, filter_dict=pc_filter or None)
+                pre_parts = []
+                pre_total = 0
+                for r in pre_results:
+                    ev_content = r.get("content") or r.get("text", "")
+                    ev_source = r.get("source_title", r.get("title", ""))
+                    score = r.get("score", r.get("_score", 1.0))
+                    if ev_content and score >= 0.7 and pre_total + len(ev_content) < 3000:
+                        pre_parts.append(f"[{ev_source}]: {ev_content}")
+                        pre_total += len(ev_content)
+                if pre_parts:
+                    pre_evidence_block = "\nPRE-FETCHED EVIDENCE (use these facts to support claims — avoids [EVIDENCE NEEDED] flags):\n" + "\n---\n".join(pre_parts) + "\n"
+                    logger.info("Pre-fetched %d evidence chunks for section '%s' (%d chars)", len(pre_parts), section_name, pre_total)
+        except Exception:
+            logger.debug("Pre-write evidence enrichment skipped", exc_info=True)
+
     # Build the enriched custom instructions with all learned context
-    enriched_custom = preferences_block + funder_terms_block + criteria_map_block + approved_examples_block + custom_instructions_block
+    enriched_custom = pre_evidence_block + prior_sections_block + reviewer_feedback_block + preferences_block + funder_terms_block + criteria_map_block + approved_examples_block + custom_instructions_block
 
     from backend.config.settings import get_settings as _get_settings
     prompt = WRITE_PROMPT.format(
@@ -517,7 +654,7 @@ async def write_section(
         outline_block=outline_block,
         criteria=criteria_text,
         section_context=effective_context,
-        style_examples=style_examples[:2000] if style_examples else "No style examples available.",
+        style_examples=style_examples[:4000] if style_examples else "No style examples available.",
         custom_instructions_block=enriched_custom,
         past_outcomes_block=past_outcomes_block,
         revision_block=revision_block,
@@ -553,6 +690,24 @@ async def write_section(
 
     # Count words (after potential rewrite)
     word_count = len(content.split())
+    word_limit_exceeded = False
+
+    # Hard-enforce word limits: truncate if content exceeds limit by >10%
+    if word_count > word_limit * 1.1:
+        logger.warning(
+            "Hard-truncating '%s' from %d to %d words (exceeded limit by >10%%)",
+            section_name, word_count, word_limit,
+        )
+        words = content.split()
+        # Truncate at word_limit, try to end at sentence boundary
+        truncated = " ".join(words[:word_limit])
+        last_period = truncated.rfind(".")
+        if last_period > len(truncated) * 0.7:
+            truncated = truncated[:last_period + 1]
+        content = truncated
+        word_count = len(content.split())
+        word_limit_exceeded = True
+
     within_limit = word_count <= word_limit
 
     # Extract remaining evidence gaps (after auto-resolve)
@@ -564,6 +719,7 @@ async def write_section(
         "word_count": word_count,
         "word_limit": word_limit,
         "within_limit": within_limit,
+        "word_limit_exceeded": word_limit_exceeded,
         "evidence_gaps": evidence_gaps,
         "criteria_addressed": [c.get("criterion", "") for c in eval_criteria],
         "is_revision": bool(revision_instructions),

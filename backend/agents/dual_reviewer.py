@@ -685,6 +685,32 @@ async def run_dual_review(grant_id: str) -> Dict:
             [i.get("type") for i in coherence_issues[:5]],
         )
 
+    # Cross-reviewer contradiction detection
+    funder_verdict = funder_result.get("verdict", "")
+    scientific_verdict = scientific_result.get("verdict", "")
+    contradictions = None
+    submit_verdicts = {"strong_submit", "submit_with_revisions"}
+    reject_verdicts = {"major_revisions", "do_not_submit"}
+    if (funder_verdict in submit_verdicts and scientific_verdict in reject_verdicts) or \
+       (scientific_verdict in submit_verdicts and funder_verdict in reject_verdicts):
+        contradictions = {
+            "funder_verdict": funder_verdict,
+            "scientific_verdict": scientific_verdict,
+            "explanation": (
+                f"Funder reviewer says '{funder_verdict}' but scientific reviewer says '{scientific_verdict}'. "
+                f"These verdicts fundamentally disagree — averaged scores may hide this conflict."
+            ),
+        }
+        logger.warning(
+            "Contradiction detected for '%s': funder=%s vs scientific=%s",
+            grant_title, funder_verdict, scientific_verdict,
+        )
+        # Store contradiction alongside reviews
+        await draft_reviews().update_one(
+            {"grant_id": grant_id, "perspective": "funder"},
+            {"$set": {"contradictions": contradictions}},
+        )
+
     logger.info(
         "Full review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), coherence=%.1f",
         grant_title,
@@ -694,6 +720,22 @@ async def run_dual_review(grant_id: str) -> Dict:
         scientific_result.get("verdict", "?"),
         coherence_result.get("coherence_score", 0),
     )
+
+    # Update grant status to "reviewed"
+    try:
+        await grants_scored().update_one(
+            {"_id": ObjectId(grant_id)},
+            {"$set": {"status": "reviewed", "updated_at": now}},
+        )
+    except Exception as e:
+        logger.warning("run_dual_review: failed to update grant status: %s", e)
+
+    # Sync status to Notion
+    try:
+        from backend.integrations.notion_sync import update_grant_status
+        await update_grant_status(grant_id, "reviewed")
+    except Exception:
+        logger.debug("Notion sync skipped (review completion)", exc_info=True)
 
     # Update heartbeat
     try:
@@ -715,6 +757,7 @@ async def run_dual_review(grant_id: str) -> Dict:
         "funder": funder_result,
         "scientific": scientific_result,
         "coherence": coherence_result,
+        **({"contradictions": contradictions} if contradictions else {}),
     }
 
 
@@ -886,9 +929,34 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
         (funder_score + scientific_score + coherence_score) / 3, 1
     )
 
-    # Determine ready_for_export from the core reviewer verdicts
+    # Determine ready_for_export from reviewer verdicts + coherence gate
     verdicts = [funder_result.get("verdict", ""), scientific_result.get("verdict", "")]
-    ready = all(v in ("strong_submit", "submit_with_revisions") for v in verdicts)
+    ready = all(v in ("strong_submit", "submit_with_revisions") for v in verdicts) and coherence_score >= 5.0
+
+    # Cross-reviewer contradiction detection
+    funder_verdict = funder_result.get("verdict", "")
+    scientific_verdict = scientific_result.get("verdict", "")
+    contradictions = None
+    _submit_v = {"strong_submit", "submit_with_revisions"}
+    _reject_v = {"major_revisions", "do_not_submit"}
+    if (funder_verdict in _submit_v and scientific_verdict in _reject_v) or \
+       (scientific_verdict in _submit_v and funder_verdict in _reject_v):
+        contradictions = {
+            "funder_verdict": funder_verdict,
+            "scientific_verdict": scientific_verdict,
+            "explanation": (
+                f"Funder reviewer says '{funder_verdict}' but scientific reviewer says '{scientific_verdict}'. "
+                f"These verdicts fundamentally disagree — averaged scores may hide this conflict."
+            ),
+        }
+        logger.warning(
+            "Pipeline: contradiction detected for '%s': funder=%s vs scientific=%s",
+            grant_title, funder_verdict, scientific_verdict,
+        )
+        await draft_reviews().update_one(
+            {"grant_id": grant_id, "perspective": "funder"},
+            {"$set": {"contradictions": contradictions}},
+        )
 
     logger.info(
         "Pipeline full review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), "
@@ -924,6 +992,13 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     except Exception as e:
         logger.warning("dual_reviewer_node: failed to update grant status: %s", e)
 
+    # Sync status to Notion
+    try:
+        from backend.integrations.notion_sync import update_grant_status as _notion_status
+        await _notion_status(grant_id, "reviewed")
+    except Exception:
+        logger.debug("Notion sync skipped (pipeline review)", exc_info=True)
+
     # Build reviewer_output — backward-compatible shape + full review
     reviewer_output = {
         "overall_score": combined_score,
@@ -935,6 +1010,7 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
         "web_research_used": bool(any(research.values())),
         "outcome_lessons_used": bool(outcome_lessons),
         "golden_benchmarks_used": bool(golden_benchmarks),
+        **({"contradictions": contradictions} if contradictions else {}),
     }
 
     audit_entry = {

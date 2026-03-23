@@ -1913,9 +1913,7 @@ async def resume_section_review(
             config = {"configurable": {"thread_id": body.thread_id}}
             update: dict = {"section_review_decision": body.action}
             if body.edited_content:
-                # Strip source attribution lines before saving
-                import re as _re
-                clean = _re.sub(r"\n---\n\*{0,2}Sources\*{0,2}:?[^\n]*$", "", body.edited_content, flags=_re.IGNORECASE).rstrip()
+                clean = _strip_sources(body.edited_content)
                 update["section_edited_content"] = clean
             update["add_to_document"] = body.add_to_document
             if body.instructions:
@@ -2422,7 +2420,12 @@ async def drafter_chat_stream(
             theme_overrides = (drafter_cfg.get("theme_settings") or {}).get(primary_theme) or {}
             agent_tone = theme_overrides.get("tone") or agent_info.get("tone", "")
             agent_voice = theme_overrides.get("voice") or agent_info.get("voice", "")
-            agent_temp = grant_drafter_settings.get("temperature") or theme_overrides.get("temperature") or drafter_cfg.get("temperature") or agent_info.get("temperature", 0.4)
+            # Use `is not None` checks — 0 is a valid temperature
+            _gt = grant_drafter_settings.get("temperature")
+            _tt = theme_overrides.get("temperature")
+            _dt = drafter_cfg.get("temperature")
+            _at = agent_info.get("temperature", 0.4)
+            agent_temp = _gt if _gt is not None else (_tt if _tt is not None else (_dt if _dt is not None else _at))
             custom_instructions = grant_drafter_settings.get("custom_instructions") or drafter_cfg.get("custom_instructions") or ""
 
             # Writing style: per-grant > global > default
@@ -2497,7 +2500,9 @@ Write a well-structured response in markdown format:"""
 
             # ── Step 4: Send metadata ──
             import re
-            word_count = len(full_content.split())
+            # Strip source attribution for word counting (sources still visible in stream)
+            clean_content = _strip_sources(full_content)
+            word_count = len(clean_content.split())
             evidence_gaps = re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", full_content)
 
             yield _sse("metadata", {
@@ -2523,6 +2528,19 @@ Write a well-structured response in markdown format:"""
 def _sse(event: str, data: dict) -> str:
     """Format a Server-Sent Event."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _strip_sources(text: str) -> str:
+    """Remove source attribution block appended by the LLM."""
+    import re as _re
+    # Multi-line source block: ---\n**Sources**: ... (may span multiple lines)
+    text = _re.sub(
+        r"\n---\n\*{0,2}Sources?\*{0,2}:?.*",
+        "",
+        text,
+        flags=_re.IGNORECASE | _re.DOTALL,
+    ).rstrip()
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -2957,9 +2975,7 @@ async def finalize_draft(
         agent_msgs = [m for m in messages if m.get("role") == "agent"]
         if agent_msgs:
             content = agent_msgs[-1].get("content", "")
-            # Strip source attribution
-            import re as _re
-            content = _re.sub(r"\n---\n\*{0,2}Sources\*{0,2}:?[^\n]*$", "", content, flags=_re.IGNORECASE).rstrip()
+            content = _strip_sources(content)
             sections[sec_name] = {"content": content, "word_count": len(content.split())}
 
     if not sections:
@@ -2985,6 +3001,19 @@ async def finalize_draft(
         {"$set": {"status": "draft_complete", "updated_at": datetime.now(timezone.utc).isoformat()}},
     )
 
+    # Also update grants_pipeline so pipeline board stays in sync
+    await grants_pipeline().update_many(
+        {"grant_id": grant_id, "status": "drafting"},
+        {"$set": {"status": "draft_complete", "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+
+    # Sync status to Notion
+    try:
+        from backend.integrations.notion_sync import update_grant_status
+        await update_grant_status(grant_id, "draft_complete")
+    except Exception:
+        logger.debug("Notion sync skipped (finalize)", exc_info=True)
+
     # Audit
     try:
         await audit_logs().insert_one({
@@ -3009,6 +3038,21 @@ async def finalize_draft(
                 await run_dual_review(grant_id)
             except Exception as exc:
                 logger.error("Auto-review failed for %s: %s", grant_id, exc)
+                # Update status back to draft_complete (not reviewed) so it doesn't stay stuck
+                try:
+                    await grants_scored().update_one(
+                        {"_id": ObjectId(grant_id)},
+                        {"$set": {"status": "draft_complete"}},
+                    )
+                    await audit_logs().insert_one({
+                        "node": "reviewer",
+                        "action": "auto_review_failed",
+                        "grant_id": grant_id,
+                        "error": str(exc)[:500],
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception:
+                    pass
 
         background_tasks.add_task(_run_review)
 
@@ -3086,17 +3130,26 @@ async def start_draft(
                 },
             )
 
-    # ── Guard: prevent concurrent drafts for the same grant ──────────────────
-    existing_draft = await grants_pipeline().find_one({
-        "grant_id": body.grant_id,
-        "status": {"$in": ["drafting", "pending_interrupt"]},
-    })
-    if existing_draft:
+    # ── Guard: prevent concurrent drafts for the same grant (atomic) ─────────
+    # Use atomic findOneAndUpdate on grants_scored as a lock: only proceed if
+    # the grant is NOT already in "drafting" status.
+    from pymongo import ReturnDocument
+    lock_result = await grants_scored().find_one_and_update(
+        {"_id": ObjectId(body.grant_id), "status": {"$ne": "drafting"}},
+        {"$set": {"status": "drafting", "updated_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=ReturnDocument.BEFORE,
+    )
+    if lock_result is None:
+        # Either grant doesn't exist (already checked) or status is "drafting"
+        existing_draft = await grants_pipeline().find_one({
+            "grant_id": body.grant_id,
+            "status": {"$in": ["drafting", "pending_interrupt"]},
+        })
         raise HTTPException(
             status_code=409,
             detail={
                 "error": "draft_already_in_progress",
-                "reason": f"A draft is already in progress (thread: {existing_draft.get('thread_id', 'unknown')})",
+                "reason": f"A draft is already in progress (thread: {(existing_draft or {}).get('thread_id', 'unknown')})",
                 "grant_id": body.grant_id,
             },
         )
@@ -3160,11 +3213,7 @@ async def start_draft(
             "started_by": user_email,
         })
         pipeline_id = str(result.inserted_id)
-        # Keep grants_scored status in sync so dashboard/pipeline views reflect drafting
-        await grants_scored().update_one(
-            {"_id": ObjectId(body.grant_id)},
-            {"$set": {"status": "drafting"}},
-        )
+        # grants_scored status already set to "drafting" by the atomic lock above
         # Audit log
         await audit_logs().insert_one({
             "node": "drafter",
