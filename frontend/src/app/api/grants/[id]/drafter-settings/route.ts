@@ -93,7 +93,7 @@ export async function POST(
     const db = await getDb();
 
     // Validate writing_style if provided (trained on reference grants)
-    const VALID_STYLES = ["professional", "scientific", "startup-founder"];
+    const VALID_STYLES = ["professional", "scientific"];
     if (writing_style !== undefined && !VALID_STYLES.includes(writing_style)) {
       return NextResponse.json(
         { error: `Invalid writing_style. Must be one of: ${VALID_STYLES.join(", ")}` },

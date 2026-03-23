@@ -74,24 +74,12 @@ const WRITING_STYLES = [
     label: "Scientific / Academic",
     icon: FlaskConical,
     description:
-      "Academic grant style — rigorous, precise, evidence-driven. Finding → Evidence → Implication → Justification structure. Trained on SERB, ANRF, Cambridge proposals.",
+      "Academic grant style — rigorous, precise, evidence-driven. Finding → Evidence → Implication → Justification paragraph structure. Trained on SERB, ANRF, Cambridge proposals.",
     borderColor: "border-purple-600",
     bgColor: "bg-purple-50",
     ringColor: "ring-purple-200",
     textColor: "text-purple-900",
     iconColor: "text-purple-600",
-  },
-  {
-    value: "startup-founder",
-    label: "Startup Founder",
-    icon: Rocket,
-    description:
-      "Operational honesty — lead with deployment scale, frame problems as bottlenecks, quantify the unlock, land on ecosystem impact. Strategy team approved structure for corporate grants.",
-    borderColor: "border-amber-600",
-    bgColor: "bg-amber-50",
-    ringColor: "ring-amber-200",
-    textColor: "text-amber-900",
-    iconColor: "text-amber-600",
   },
 ];
 

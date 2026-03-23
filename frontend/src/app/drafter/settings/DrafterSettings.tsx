@@ -35,7 +35,7 @@ interface ThemeSettings {
 
 interface DrafterConfig {
   agent: string;
-  writing_style: "professional" | "scientific" | "startup-founder";
+  writing_style: "professional" | "scientific";
   custom_instructions: string;
   temperature: number;
   theme_settings: Record<string, ThemeSettings>;
@@ -508,24 +508,6 @@ export function DrafterSettings({ initialConfig }: { initialConfig: AgentConfig 
                 </div>
                 <p className="text-xs text-gray-500 leading-relaxed">
                   Academic — rigorous, evidence-driven. Finding → Evidence → Implication.
-                </p>
-              </button>
-              <button
-                onClick={() => updateField("writing_style", "startup-founder")}
-                className={`flex flex-col gap-2 rounded-xl border-2 p-4 text-left transition-all ${
-                  config.writing_style === "startup-founder"
-                    ? "border-amber-600 bg-amber-50 ring-1 ring-amber-200"
-                    : "border-gray-200 hover:border-gray-300"
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <Rocket className={`h-5 w-5 ${config.writing_style === "startup-founder" ? "text-amber-600" : "text-gray-400"}`} />
-                  <span className={`text-sm font-bold ${config.writing_style === "startup-founder" ? "text-amber-900" : "text-gray-700"}`}>
-                    Startup Founder
-                  </span>
-                </div>
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  Operational honesty — deployment first, bottleneck, unlock, ecosystem impact.
                 </p>
               </button>
             </div>

@@ -2472,16 +2472,20 @@ async def drafter_chat_stream(
             # Writing style: per-grant > global > default
             writing_style = grant_drafter_settings.get("writing_style") or drafter_cfg.get("writing_style") or "professional"
             style_descriptions = {
-                "professional": "Professional & Corporate — clear, formal, confident. Strong assertions, structured arguments.",
-                "scientific": "Scientific & Academic — rigorous, precise, evidence-driven. Finding → Evidence → Implication → Justification.",
-                "startup-founder": (
-                    "Startup-Founder voice — direct, operationally honest, conversational confidence. "
-                    "MANDATORY STRUCTURE: 1) Deployment context first (what Alt Carbon is already doing at scale), "
-                    "2) Problem as operational bottleneck (quantified pain, e.g. '2-4 weeks turnaround'), "
-                    "3) Intervention as unlock (quantified gains, e.g. '~80% reduction'), "
-                    "4) Operational outcome (D-CAL, MRV-as-a-service, processing capacity), "
-                    "5) Ecosystem impact (regional hub, Global South). "
-                    "Do NOT start with generic descriptions. Start with live operations. Respect word limits strictly."
+                "professional": (
+                    "Professional & Corporate — clear, formal, confident. "
+                    "Lead with credibility (operational scale, buyers, partnerships). "
+                    "Every claim backed by specific numbers. Declarative voice: 'will deploy' not 'aim to'. "
+                    "Paragraph pattern: Claim → Evidence → Implication. "
+                    "Close with value proposition vs alternatives."
+                ),
+                "scientific": (
+                    "Scientific & Academic — rigorous, precise, evidence-driven. "
+                    "Every paragraph follows Finding → Evidence → Implication → Justification. "
+                    "Open with established facts, support with data/citations (with units), "
+                    "state what it means, close with why it justifies the next step. "
+                    "Use precise terminology (ICP-MS not 'advanced instruments'). "
+                    "Evidence hierarchy: published results first, then pilot data, then proposed work."
                 ),
             }
             style_instruction = style_descriptions.get(writing_style, style_descriptions["professional"])

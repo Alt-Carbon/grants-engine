@@ -530,9 +530,55 @@ async def write_section(
 
     # Writing style description
     style_desc = {
-        "professional": "Professional & Corporate — clear, formal, confident. Use strong assertions, structured arguments, and business-oriented language.",
-        "scientific": "Scientific & Academic — rigorous, precise, evidence-driven. Every paragraph follows Finding → Evidence → Implication → Justification. Open with the established fact, support with data/citations, state what it means, close with why it justifies the proposed work. Use technical terminology, cite methodologies, and maintain scholarly tone.",
-        "startup-founder": "Startup-Founder voice for corporate/buyer grants — direct, operationally honest, conversational confidence. Use 'we' not 'I'. Use em-dashes for emphasis. Admit uncertainty where honest ('results are not guaranteed'). No literature reviews, no academic formalities. Tight sentences, every word earns its place. Credibility comes from field operations and buyer validation (Google, Stripe, Shopify), not impact factors.\n\nSTRUCTURE (strategy team mandated — follow this flow exactly):\n1. DEPLOYMENT CONTEXT FIRST — lead with what Alt Carbon is already doing and at what scale (e.g. 'deployed on 35,000+ acres, scaling to 60,000+')\n2. PROBLEM AS OPERATIONAL BOTTLENECK — frame the gap as a concrete rate-limiting factor with quantified pain (e.g. '2-4 weeks turnaround for N=50-100 samples'), not an abstract research question\n3. INTERVENTION AS UNLOCK — describe the proposed work as removing that bottleneck, with quantified speed/cost gains (e.g. '~80% reduction in sample preparation time')\n4. OPERATIONAL OUTCOME — how validated results operationalize infrastructure (e.g. D-CAL, sister labs, MRV-as-a-service, processing capacity targets)\n5. ECOSYSTEM IMPACT — land on how this serves the broader CDR ecosystem (regional hub, reduced duplicated capex, blueprints for Global South developers)\n\nDo NOT start with generic descriptions of ERW chemistry or CDR pathways. Start with Alt Carbon's live operations. Do NOT exceed word limits — respect them strictly.",
+        "professional": (
+            "Professional & Corporate — clear, formal, confident.\n\n"
+            "VOICE: Authoritative and measured. Use 'we will' statements. Write as an established organisation "
+            "addressing a sophisticated funder. No hyperbole, no superlatives — let the evidence speak.\n\n"
+            "STRUCTURE:\n"
+            "1. LEAD WITH CREDIBILITY — open with the strongest verifiable fact (operational scale, buyer names, "
+            "verified tonnage, revenue, or institutional partnerships)\n"
+            "2. FRAME THE OPPORTUNITY — state what the funding will unlock, quantified (new capacity, expanded reach, "
+            "accelerated timeline)\n"
+            "3. EVIDENCE-BACKED CLAIMS — every assertion must cite a specific number, date, buyer, partner, or "
+            "measurement. No 'significant impact' — write '221 tonnes verified CO₂ removal across 35,000+ acres'\n"
+            "4. CLOSE WITH VALUE PROPOSITION — why this is the best use of the funder's money compared to alternatives\n\n"
+            "PARAGRAPH PATTERN: Claim → Evidence → Implication. Each paragraph makes one point, supported by data, "
+            "and closes with why it matters to the funder.\n\n"
+            "TONE RULES:\n"
+            "- Formal but not stiff — accessible to non-specialist reviewers\n"
+            "- Declarative voice throughout: 'will deploy' not 'aim to deploy'\n"
+            "- Name specific partners, buyers, locations, instruments — never use vague references\n"
+            "- Budget items must link to specific activities described in the technical sections\n"
+            "- Use the funder's own language and terminology where possible"
+        ),
+        "scientific": (
+            "Scientific & Academic — rigorous, precise, evidence-driven.\n\n"
+            "VOICE: Write as a principal investigator addressing a peer-review panel. Maintain scholarly rigour "
+            "while remaining accessible to interdisciplinary reviewers. Precision over persuasion.\n\n"
+            "MANDATORY PARAGRAPH STRUCTURE (every paragraph must follow this):\n"
+            "1. FINDING — open with the established fact, observation, or known result\n"
+            "2. EVIDENCE — support with data, citations, or pilot measurements (with units and sample sizes)\n"
+            "3. IMPLICATION — state what this means for the field or the proposed work\n"
+            "4. JUSTIFICATION — close with why it necessitates or supports the next step\n\n"
+            "Never start a paragraph with the method before establishing why it is needed. "
+            "Never end with a finding and no justification.\n\n"
+            "STRUCTURE:\n"
+            "1. ESTABLISH THE KNOWLEDGE GAP — what is known, what is missing, why it matters (with citations)\n"
+            "2. PROPOSED APPROACH — methods, instruments (named: ICP-MS, LA-ICP-MS, XRD), protocols, sample sizes, "
+            "and statistical approaches\n"
+            "3. PRELIMINARY DATA — any pilot results, field measurements, or existing datasets that de-risk the work\n"
+            "4. EXPECTED OUTCOMES — quantified deliverables with measurable success criteria\n"
+            "5. BROADER IMPACT — how results advance the field beyond this specific project\n\n"
+            "TONE RULES:\n"
+            "- Use precise terminology: 'MC-ICP-MS' not 'advanced instruments', 'basalt dissolution kinetics' "
+            "not 'rock weathering processes'\n"
+            "- Cite methodologies and prior work where relevant (author, year format)\n"
+            "- State uncertainties honestly — 'dissolution rates range from X to Y under tropical conditions' "
+            "rather than hiding variability\n"
+            "- Evidence hierarchy: published results first, then pilot data, then proposed work\n"
+            "- No marketing language — describe the innovation, don't label it\n"
+            "- Logical connectors: 'Thus,', 'Hence,', 'However,', 'Since' — never 'Additionally,', 'Furthermore,'"
+        ),
     }.get(writing_style, writing_style)
 
     # Funder language mirroring
