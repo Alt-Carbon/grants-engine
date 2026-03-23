@@ -2401,16 +2401,57 @@ async def drafter_chat_stream(
                 context_parts.append(f"[WEB SEARCH — latest information from the internet]\n{web_results[:6000]}")
             company_context = "\n\n".join(context_parts)
 
-            # Build chat history
+            # Build chat history — current section + cross-section context
             history_block = ""
             if body.chat_history:
                 history_lines = []
-                for msg in body.chat_history[-6:]:
+                for msg in body.chat_history[-8:]:  # last 8 messages for current section
                     role = msg.get("role", "user").upper()
-                    content = msg.get("content", "")[:500]
+                    content = msg.get("content", "")[:600]
                     history_lines.append(f"[{role}]: {content}")
                 if history_lines:
-                    history_block = "CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n\n"
+                    history_block = "CURRENT SECTION CONVERSATION:\n" + "\n".join(history_lines) + "\n\n"
+
+            # Cross-section context: load conversations from other sections
+            # so the drafter knows what the user asked for across the full draft
+            cross_section_block = ""
+            try:
+                from backend.db.mongo import drafter_chat_history as _dch, grants_pipeline as _gp
+                pipeline = await _gp().find_one(
+                    {"grant_id": body.grant_id, "status": {"$in": ["drafting", "pending_interrupt"]}},
+                    sort=[("started_at", -1)],
+                )
+                if pipeline:
+                    chat_doc = await _dch().find_one({"pipeline_id": str(pipeline["_id"])})
+                    if chat_doc:
+                        other_sections = []
+                        for sec_name, msgs in (chat_doc.get("sections") or {}).items():
+                            if sec_name == body.section_name or not isinstance(msgs, list):
+                                continue
+                            # Summarize: user instructions + final word count
+                            user_asks = []
+                            final_wc = 0
+                            for m in msgs:
+                                if m.get("role") == "user":
+                                    uc = (m.get("content") or "").strip()
+                                    if uc and len(uc) > 10:
+                                        user_asks.append(uc[:150])
+                                elif m.get("role") == "agent":
+                                    final_wc = len((m.get("content") or "").split())
+                            if user_asks or final_wc:
+                                summary = f"[{sec_name}] ({final_wc} words)"
+                                if user_asks:
+                                    summary += " — User asked: " + "; ".join(user_asks[-2:])
+                                other_sections.append(summary)
+                        if other_sections:
+                            cross_section_block = (
+                                "PRIOR SECTIONS (what the user asked for in other sections — maintain consistency):\n"
+                                + "\n".join(other_sections) + "\n\n"
+                            )
+            except Exception:
+                pass  # Non-critical — don't break the chat if this fails
+
+            history_block = cross_section_block + history_block
 
             # Load drafter config: per-grant overrides global
             drafter_cfg = await agent_config_col().find_one({"agent": "drafter"}) or {}
@@ -2980,19 +3021,32 @@ async def finalize_draft(
             content = _strip_sources(content)
             sections[sec_name] = {"content": content, "word_count": len(content.split())}
 
-            # Extract drafting context: revision count, user instructions, metadata
+            # Extract full drafting context: ALL user instructions and revision history
             revision_count = len(agent_msgs) - 1  # first is initial draft, rest are revisions
             user_instructions = []
             for um in user_msgs:
                 uc = (um.get("content") or "").strip()
                 if uc and len(uc) > 10:  # Skip trivial messages like "ok" or "approve"
-                    user_instructions.append(uc[:200])
+                    user_instructions.append(uc[:300])
+
+            # Build conversation summary — compact but complete
+            conversation_summary = []
+            for msg in messages:
+                role = msg.get("role", "")
+                mc = (msg.get("content") or "").strip()
+                if role == "user" and mc and len(mc) > 10:
+                    conversation_summary.append(f"USER: {mc[:250]}")
+                elif role == "agent" and mc:
+                    # Just note that agent responded, don't repeat the full content
+                    wc = len(mc.split())
+                    conversation_summary.append(f"AGENT: [wrote {wc} words]")
 
             # Extract writing metadata from the last agent message
             last_meta = agent_msgs[-1].get("metadata") or {}
             drafting_context[sec_name] = {
                 "revision_count": revision_count,
-                "user_instructions": user_instructions[-3:],  # Last 3 instructions
+                "user_instructions": user_instructions,  # ALL instructions, not just last 3
+                "conversation_summary": conversation_summary,  # Full conversation flow
                 "writing_style": last_meta.get("agentTheme") or "",
                 "agent_temperature": last_meta.get("agentTemperature"),
                 "word_limit": last_meta.get("wordLimit"),

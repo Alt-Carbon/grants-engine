@@ -624,9 +624,47 @@ async def run_dual_review(grant_id: str) -> Dict:
             + "\n".join(section_structure_parts)
         )
 
-    # Build drafting context block from the draft doc's metadata
+    # Build drafting context block — full conversation history per section
     drafting_ctx = draft_doc.get("drafting_context") or {}
     drafting_context_block = ""
+
+    # If draft doc doesn't have drafting_context, try loading from chat history directly
+    if not drafting_ctx.get("per_section"):
+        try:
+            from backend.db.mongo import drafter_chat_history, grants_pipeline
+            # Find the pipeline record to get chat history
+            pipeline = await grants_pipeline().find_one({"grant_id": grant_id}, sort=[("started_at", -1)])
+            if pipeline:
+                chat_doc = await drafter_chat_history().find_one({"pipeline_id": str(pipeline["_id"])})
+                if chat_doc:
+                    per_sec = {}
+                    for sec_name, messages in (chat_doc.get("sections") or {}).items():
+                        if not isinstance(messages, list):
+                            continue
+                        agent_msgs = [m for m in messages if m.get("role") == "agent"]
+                        user_msgs = [m for m in messages if m.get("role") == "user"]
+                        conversation_summary = []
+                        user_instructions = []
+                        for msg in messages:
+                            role = msg.get("role", "")
+                            mc = (msg.get("content") or "").strip()
+                            if role == "user" and mc and len(mc) > 10:
+                                conversation_summary.append(f"USER: {mc[:250]}")
+                                user_instructions.append(mc[:300])
+                            elif role == "agent" and mc:
+                                wc = len(mc.split())
+                                conversation_summary.append(f"AGENT: [wrote {wc} words]")
+                        per_sec[sec_name] = {
+                            "revision_count": max(0, len(agent_msgs) - 1),
+                            "user_instructions": user_instructions,
+                            "conversation_summary": conversation_summary,
+                        }
+                    if per_sec:
+                        drafting_ctx = {"per_section": per_sec}
+                        logger.info("Reviewer: loaded drafting context from chat history (%d sections)", len(per_sec))
+        except Exception:
+            logger.debug("Reviewer: chat history loading skipped", exc_info=True)
+
     if drafting_ctx:
         dc_parts = []
         ws = drafting_ctx.get("writing_style")
@@ -639,14 +677,20 @@ async def run_dual_review(grant_id: str) -> Dict:
         for sec_name, sec_ctx in per_sec.items():
             revisions = sec_ctx.get("revision_count", 0)
             instructions = sec_ctx.get("user_instructions", [])
-            parts = [f"{sec_name}: {revisions} revision(s)"]
+            conv_summary = sec_ctx.get("conversation_summary", [])
+
+            # Build a compact but complete conversation trail
+            sec_parts = [f"**{sec_name}**: {revisions} revision(s)"]
             if instructions:
-                parts.append(f"user asked: {'; '.join(instructions[:2])}")
-            dc_parts.append(" | ".join(parts))
+                # Include ALL user instructions so reviewer understands full intent
+                for i, inst in enumerate(instructions):
+                    sec_parts.append(f"  [{i+1}] User: {inst[:200]}")
+            dc_parts.append("\n".join(sec_parts))
+
         if dc_parts:
             drafting_context_block = (
-                "DRAFTING CONTEXT (how this draft was produced — understand the author's intent):\n"
-                + "\n".join(f"- {p}" for p in dc_parts)
+                "DRAFTING CONTEXT (full conversation history — understand what the author asked for and iterated on):\n"
+                + "\n".join(dc_parts)
             )
             section_structure_block = section_structure_block + "\n\n" + drafting_context_block if section_structure_block else drafting_context_block
 
