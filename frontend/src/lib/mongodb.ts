@@ -10,9 +10,13 @@ declare global {
 
 let client: MongoClient | null = null;
 
-function getClient(): MongoClient {
-  if (client) return client;
+const MONGO_OPTIONS = {
+  maxPoolSize: 10,
+  serverSelectionTimeoutMS: 10_000,
+  socketTimeoutMS: 45_000,
+};
 
+function getClient(): MongoClient {
   const uri = process.env.MONGODB_URI;
   if (!uri) {
     throw new Error("MONGODB_URI environment variable is not set");
@@ -20,11 +24,13 @@ function getClient(): MongoClient {
 
   if (process.env.NODE_ENV === "development") {
     if (!global._mongoClient) {
-      global._mongoClient = new MongoClient(uri.trim());
+      global._mongoClient = new MongoClient(uri.trim(), MONGO_OPTIONS);
     }
     client = global._mongoClient;
   } else {
-    client = new MongoClient(uri.trim());
+    if (!client) {
+      client = new MongoClient(uri.trim(), MONGO_OPTIONS);
+    }
   }
 
   return client;
@@ -32,6 +38,15 @@ function getClient(): MongoClient {
 
 export async function getDb(): Promise<Db> {
   const c = getClient();
-  await c.connect();
+  try {
+    await c.connect();
+  } catch {
+    // Stale connection — reset and retry once
+    client = null;
+    global._mongoClient = undefined;
+    const fresh = getClient();
+    await fresh.connect();
+    return fresh.db(DB_NAME);
+  }
   return c.db(DB_NAME);
 }

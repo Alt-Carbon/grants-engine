@@ -419,7 +419,7 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
       : undefined;
     const holdReason =
       newStatus === "hold"
-        ? requestHoldReason((currentGrant as { hold_reason?: string } | undefined)?.hold_reason)
+        ? requestHoldReason((currentGrant as { hold_reason?: string } | undefined)?.hold_reason) ?? undefined
         : undefined;
 
     if (newStatus === "hold" && !holdReason) {
@@ -506,7 +506,7 @@ export function PipelineBoard({ initialGrants }: PipelineBoardProps) {
       const moved = srcList[srcIndex];
       const holdReason =
         dstId === "hold"
-          ? requestHoldReason((moved as { hold_reason?: string } | undefined)?.hold_reason)
+          ? requestHoldReason((moved as { hold_reason?: string } | undefined)?.hold_reason) ?? undefined
           : undefined;
 
       if (dstId === "hold" && !holdReason) {
