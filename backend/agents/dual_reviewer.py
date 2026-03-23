@@ -157,6 +157,8 @@ GRANT: {grant_title}
 FUNDER: {funder}
 {extra_context}
 
+{section_structure_block}
+
 EVALUATION CRITERIA (from the funder):
 {criteria}
 
@@ -178,6 +180,13 @@ COMPLETE DRAFT APPLICATION:
 
 {golden_benchmarks_block}
 
+REVIEW RULES:
+1. Review each section ONLY within its stated scope — do not penalize a section for not covering topics assigned to other sections
+2. Check word counts against limits — flag sections that exceed their word limit
+3. Evaluate whether each section addresses the evaluation criteria relevant to its scope
+4. Suggestions must be actionable within the section's word limit — don't suggest adding 200 words to a section that's already at its limit
+5. Score each section relative to what it was ASKED to cover, not what you wish it covered
+
 Review this application thoroughly. Be specific and constructive. {perspective_guidance}
 Use the original grant document, web research context, past outcome lessons, and benchmark examples (if provided) to verify claims, calibrate scores, and identify gaps.
 
@@ -189,7 +198,10 @@ Respond ONLY with valid JSON:
       "score": <int 1-10>,
       "strengths": ["<specific strength>"],
       "issues": ["<specific issue>"],
-      "suggestions": ["<actionable fix>"]
+      "suggestions": ["<actionable fix within word limit>"],
+      "word_count": <int>,
+      "word_limit": <int or null>,
+      "within_scope": <bool — does this section stay within its stated scope?>
     }}
   }},
   "top_issues": ["<most critical issue 1>", "<issue 2>", "<issue 3>"],
@@ -328,6 +340,7 @@ async def _run_single_review(
     grant_raw_doc: str = "",
     outcome_lessons: str = "",
     golden_benchmarks: str = "",
+    section_structure_block: str = "",
 ) -> Dict:
     """Run a single review perspective with configurable settings.
 
@@ -410,6 +423,7 @@ async def _run_single_review(
         grant_title=grant.get("title") or grant.get("grant_name") or "Untitled",
         funder=grant.get("funder") or "Unknown",
         extra_context=extra_context,
+        section_structure_block=section_structure_block,
         criteria=criteria,
         custom_criteria_block=custom_criteria_block,
         grant_document_block=grant_document_block,
@@ -550,15 +564,64 @@ async def run_dual_review(grant_id: str) -> Dict:
     if not draft_doc:
         raise ValueError(f"No draft found for grant {grant_id}")
 
-    # Assemble draft text
+    # Assemble draft text with section metadata (word limits, word counts)
     sections = draft_doc.get("sections", {})
-    draft_text = "\n\n".join(
-        f"## {name}\n{sec.get('content', '')}"
-        for name, sec in sections.items()
-    )
+
+    # Load application_sections from grant for scope/description context
+    deep = grant.get("deep_analysis") or {}
+    app_sections = deep.get("application_sections") or []
+    # Build lookup: section name → {description, word limit}
+    section_spec = {}
+    for asec in app_sections:
+        sname = asec.get("section") or asec.get("name", "")
+        section_spec[sname.lower()] = {
+            "description": asec.get("what_to_cover") or asec.get("description", ""),
+            "limit": asec.get("limit") or asec.get("word_limit", ""),
+        }
+
+    # Build structured draft text with constraints
+    draft_parts = []
+    section_structure_parts = []
+    for name, sec in sections.items():
+        content = sec.get("content", "")
+        wc = sec.get("word_count") or len(content.split())
+        wl = sec.get("word_limit", "")
+        # Try to find matching spec
+        spec = section_spec.get(name.lower(), {})
+        desc = spec.get("description", "")
+        if not wl:
+            wl = spec.get("limit", "")
+
+        header = f"## {name}"
+        if wl:
+            header += f" [{wc} / {wl} words]"
+        else:
+            header += f" [{wc} words]"
+        draft_parts.append(f"{header}\n{content}")
+
+        # Build section structure summary for reviewer context
+        struct_line = f"- **{name}**: {wc} words"
+        if wl:
+            struct_line += f" (limit: {wl})"
+            if isinstance(wl, (int, float)) or (isinstance(wl, str) and wl.isdigit()):
+                if wc > int(wl):
+                    struct_line += " — OVER LIMIT"
+        if desc:
+            struct_line += f" — Scope: {desc[:150]}"
+        section_structure_parts.append(struct_line)
+
+    draft_text = "\n\n".join(draft_parts)
 
     if not draft_text.strip():
         raise ValueError("Draft has no content")
+
+    # Section structure block injected into reviewer prompt
+    section_structure_block = ""
+    if section_structure_parts:
+        section_structure_block = (
+            "APPLICATION STRUCTURE (review each section ONLY within its stated scope and word limit):\n"
+            + "\n".join(section_structure_parts)
+        )
 
     # Load original grant context — use deep_analysis (always available on grants_scored)
     # The raw page HTML lives in the LangGraph checkpointer but is expensive to extract.
@@ -641,10 +704,12 @@ async def run_dual_review(grant_id: str) -> Dict:
     funder_result, scientific_result, coherence_result = await asyncio.gather(
         _run_single_review(grant, draft_text, "funder", funder_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
-                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
+                           section_structure_block=section_structure_block),
         _run_single_review(grant, draft_text, "scientific", scientific_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
-                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
+                           section_structure_block=section_structure_block),
         _run_coherence_review(grant, draft_text),
     )
 
@@ -788,12 +853,56 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     # Load grant from MongoDB for full metadata
     grant = await grants_scored().find_one({"_id": ObjectId(grant_id)}) or {}
 
-    # Assemble draft text from graph state (approved_sections)
+    # Assemble draft text from graph state (approved_sections) with section metadata
     approved_sections = state.get("approved_sections") or {}
-    draft_text = "\n\n".join(
-        f"## {name}\n{sec.get('content', '')}"
-        for name, sec in approved_sections.items()
-    )
+
+    # Load application_sections from grant for scope/description context
+    _deep_for_sections = grant.get("deep_analysis") or {}
+    _app_sections = _deep_for_sections.get("application_sections") or []
+    _section_spec = {}
+    for _asec in _app_sections:
+        _sname = _asec.get("section") or _asec.get("name", "")
+        _section_spec[_sname.lower()] = {
+            "description": _asec.get("what_to_cover") or _asec.get("description", ""),
+            "limit": _asec.get("limit") or _asec.get("word_limit", ""),
+        }
+
+    draft_parts = []
+    section_structure_parts = []
+    for name, sec in approved_sections.items():
+        content = sec.get("content", "")
+        wc = sec.get("word_count") or len(content.split())
+        wl = sec.get("word_limit", "")
+        spec = _section_spec.get(name.lower(), {})
+        desc = spec.get("description", "")
+        if not wl:
+            wl = spec.get("limit", "")
+
+        header = f"## {name}"
+        if wl:
+            header += f" [{wc} / {wl} words]"
+        else:
+            header += f" [{wc} words]"
+        draft_parts.append(f"{header}\n{content}")
+
+        struct_line = f"- **{name}**: {wc} words"
+        if wl:
+            struct_line += f" (limit: {wl})"
+            if isinstance(wl, (int, float)) or (isinstance(wl, str) and wl.isdigit()):
+                if wc > int(wl):
+                    struct_line += " — OVER LIMIT"
+        if desc:
+            struct_line += f" — Scope: {desc[:150]}"
+        section_structure_parts.append(struct_line)
+
+    draft_text = "\n\n".join(draft_parts)
+
+    section_structure_block = ""
+    if section_structure_parts:
+        section_structure_block = (
+            "APPLICATION STRUCTURE (review each section ONLY within its stated scope and word limit):\n"
+            + "\n".join(section_structure_parts)
+        )
 
     if not draft_text.strip():
         logger.error("dual_reviewer_node: draft is empty")
@@ -878,10 +987,12 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     funder_result, scientific_result, coherence_result = await asyncio.gather(
         _run_single_review(grant, draft_text, "funder", funder_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
-                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
+                           section_structure_block=section_structure_block),
         _run_single_review(grant, draft_text, "scientific", scientific_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
-                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
+                           section_structure_block=section_structure_block),
         _run_coherence_review(grant, draft_text),
     )
 
