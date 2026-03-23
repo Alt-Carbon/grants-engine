@@ -624,6 +624,32 @@ async def run_dual_review(grant_id: str) -> Dict:
             + "\n".join(section_structure_parts)
         )
 
+    # Build drafting context block from the draft doc's metadata
+    drafting_ctx = draft_doc.get("drafting_context") or {}
+    drafting_context_block = ""
+    if drafting_ctx:
+        dc_parts = []
+        ws = drafting_ctx.get("writing_style")
+        if ws:
+            dc_parts.append(f"Writing style: {ws}")
+        ci = drafting_ctx.get("custom_instructions")
+        if ci:
+            dc_parts.append(f"Custom instructions given to drafter: {ci[:300]}")
+        per_sec = drafting_ctx.get("per_section") or {}
+        for sec_name, sec_ctx in per_sec.items():
+            revisions = sec_ctx.get("revision_count", 0)
+            instructions = sec_ctx.get("user_instructions", [])
+            parts = [f"{sec_name}: {revisions} revision(s)"]
+            if instructions:
+                parts.append(f"user asked: {'; '.join(instructions[:2])}")
+            dc_parts.append(" | ".join(parts))
+        if dc_parts:
+            drafting_context_block = (
+                "DRAFTING CONTEXT (how this draft was produced — understand the author's intent):\n"
+                + "\n".join(f"- {p}" for p in dc_parts)
+            )
+            section_structure_block = section_structure_block + "\n\n" + drafting_context_block if section_structure_block else drafting_context_block
+
     # Load original grant context — use deep_analysis (always available on grants_scored)
     # The raw page HTML lives in the LangGraph checkpointer but is expensive to extract.
     # deep_analysis contains the structured extraction the analyst already performed.

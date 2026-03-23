@@ -2970,16 +2970,41 @@ async def finalize_draft(
 
     chat_sections = chat_doc.get("sections", {})
     sections: dict = {}
+    drafting_context: dict = {}  # Per-section drafting metadata for the reviewer
     for sec_name, messages in chat_sections.items():
         # Find the last agent message — that's the approved content
         agent_msgs = [m for m in messages if m.get("role") == "agent"]
+        user_msgs = [m for m in messages if m.get("role") == "user"]
         if agent_msgs:
             content = agent_msgs[-1].get("content", "")
             content = _strip_sources(content)
             sections[sec_name] = {"content": content, "word_count": len(content.split())}
 
+            # Extract drafting context: revision count, user instructions, metadata
+            revision_count = len(agent_msgs) - 1  # first is initial draft, rest are revisions
+            user_instructions = []
+            for um in user_msgs:
+                uc = (um.get("content") or "").strip()
+                if uc and len(uc) > 10:  # Skip trivial messages like "ok" or "approve"
+                    user_instructions.append(uc[:200])
+
+            # Extract writing metadata from the last agent message
+            last_meta = agent_msgs[-1].get("metadata") or {}
+            drafting_context[sec_name] = {
+                "revision_count": revision_count,
+                "user_instructions": user_instructions[-3:],  # Last 3 instructions
+                "writing_style": last_meta.get("agentTheme") or "",
+                "agent_temperature": last_meta.get("agentTemperature"),
+                "word_limit": last_meta.get("wordLimit"),
+            }
+
     if not sections:
         raise HTTPException(status_code=422, detail="No drafted sections found in chat history")
+
+    # Load drafter settings for this grant (writing style, custom instructions)
+    grant_drafter_settings = grant.get("drafter_settings") or {}
+    drafter_writing_style = grant_drafter_settings.get("writing_style") or ""
+    drafter_custom_instructions = grant_drafter_settings.get("custom_instructions") or ""
 
     # Find latest version
     latest = await grant_drafts().find_one({"grant_id": grant_id}, sort=[("version", -1)])
@@ -2992,6 +3017,12 @@ async def finalize_draft(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source": "chat_drafter",
         "finalized_by": user_email,
+        "drafting_context": {
+            "per_section": drafting_context,
+            "writing_style": drafter_writing_style,
+            "custom_instructions": drafter_custom_instructions[:500],
+            "total_sections": len(sections),
+        },
     }
     await grant_drafts().insert_one(draft_doc)
 
