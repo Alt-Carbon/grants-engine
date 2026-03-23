@@ -170,8 +170,17 @@ Based on analysis of successful grant applications, use these section structures
 6. **Field Implementation Plan** — Phased deployment with scale-up
 7. **Deliverables** — Field-scale outputs, not just papers
 
-### Corporate/Buyer Grant (Adyen 1% Fund, Frontier, Stripe Climate, Shopify)
+### Corporate/Buyer Grant (Adyen 1% Fund, Frontier, Stripe Climate, Shopify, Liveability Challenge)
 This is a Q&A format with strict word limits per question. The voice is startup-founder: direct, honest, operationally grounded. No academic formalities.
+
+**MANDATORY STRUCTURE for Project Objectives / Solution Overview sections (strategy team approved):**
+1. **Deployment context first** — lead with what Alt Carbon is already doing and at what scale (e.g. "deployed on 35,000+ acres, scaling to 60,000+")
+2. **Problem as operational bottleneck** — frame the gap as a concrete rate-limiting factor with quantified pain (e.g. "2-4 weeks turnaround"), not an abstract research question
+3. **Intervention as unlock** — describe the proposed work as removing that bottleneck, with quantified gains (e.g. "~80% reduction in sample prep time")
+4. **Operational outcome** — how validated results operationalize infrastructure (D-CAL, sister labs, MRV-as-a-service, processing capacity)
+5. **Ecosystem impact** — how this serves the broader CDR ecosystem (regional hub, reduced duplicated capex, blueprints for Global South)
+
+Do NOT start with generic ERW chemistry descriptions. Start with Alt Carbon's live operations. Respect word limits strictly.
 
 **Structure follows the funder's questions exactly.** Typical questions:
 1. **Project Summary** (concise) — State the bottleneck you're solving in one sentence, then describe the intervention with quantified targets. E.g., "Standard acid digestion stretches turnaround to 2-4 weeks. We propose Laser Ablation to achieve ~80% reduction in sample prep time."
