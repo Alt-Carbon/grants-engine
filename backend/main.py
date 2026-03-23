@@ -456,6 +456,7 @@ class SectionReviewRequest(BaseModel):
     instructions: Optional[str] = Field(default=None, max_length=5000)
     critique: Optional[str] = Field(default=None, max_length=5000)
     edited_content: Optional[str] = Field(default=None, max_length=50000)
+    add_to_document: bool = True
 
     @field_validator("action")
     @classmethod
@@ -1912,7 +1913,11 @@ async def resume_section_review(
             config = {"configurable": {"thread_id": body.thread_id}}
             update: dict = {"section_review_decision": body.action}
             if body.edited_content:
-                update["section_edited_content"] = body.edited_content
+                # Strip source attribution lines before saving
+                import re as _re
+                clean = _re.sub(r"\n---\n\*{0,2}Sources\*{0,2}:?[^\n]*$", "", body.edited_content, flags=_re.IGNORECASE).rstrip()
+                update["section_edited_content"] = clean
+            update["add_to_document"] = body.add_to_document
             if body.instructions:
                 update["section_revision_instructions"] = {body.section_name: body.instructions}
             if body.critique:
@@ -2153,6 +2158,7 @@ At the end of your response, add a "---" divider followed by a small "Sources" s
 - "Knowledge Base" — if you used facts from the [KNOWLEDGE CHUNKS] section
 - "Notion (Live)" — if you used facts from the [LIVE NOTION] section
 - "Grant Analysis" — if you used facts from the GRANT DETAILS section
+- "Web Search" — if you used facts from the [WEB SEARCH] section (cite the source URL when possible)
 Only list sources you actually referenced. Format as a compact comma-separated line, e.g.: **Sources:** Company Profile, Grant Analysis"""
 
     prompt = f"""{history_block}USER MESSAGE:
@@ -2334,8 +2340,40 @@ async def drafter_chat_stream(
                 except Exception:
                     return ""
 
-            static_profile, chunks_text, notion_context = await aio.gather(
-                _load_profile(), _load_chunks(), _load_notion()
+            async def _web_search():
+                """Search the web for latest information relevant to the user's question."""
+                try:
+                    from backend.config.settings import get_settings
+                    s = get_settings()
+                    if not s.exa_api_key:
+                        return ""
+                    from exa_py import Exa
+                    exa = Exa(api_key=s.exa_api_key)
+                    # Build a focused search query from the user message + grant context
+                    search_q = f"{body.section_name}: {body.message[:120]}" if body.section_name else body.message[:150]
+                    if grant_title and grant_title != "Unknown Grant":
+                        search_q = f"{grant_title} — {search_q}"
+                    result = await aio.to_thread(
+                        exa.search_and_contents,
+                        query=search_q,
+                        num_results=3,
+                        text={"max_characters": 2000},
+                        use_autoprompt=True,
+                    )
+                    snippets = []
+                    for r in result.results:
+                        title = getattr(r, "title", "") or ""
+                        url = getattr(r, "url", "") or ""
+                        text = (getattr(r, "text", "") or "")[:1500]
+                        if text:
+                            snippets.append(f"[{title}]({url})\n{text}")
+                    return "\n---\n".join(snippets[:3])
+                except Exception as e:
+                    logger.debug("Drafter web search skipped: %s", e)
+                    return ""
+
+            static_profile, chunks_text, notion_context, web_results = await aio.gather(
+                _load_profile(), _load_chunks(), _load_notion(), _web_search()
             )
 
             # Report sources loaded
@@ -2348,6 +2386,8 @@ async def drafter_chat_stream(
                 sources_used.append("notion_live")
             if grant_deep:
                 sources_used.append("grant_deep_analysis")
+            if web_results:
+                sources_used.append("web_search")
 
             yield _sse("status", {"step": "Context ready", "detail": f"{len(sources_used)} sources loaded"})
 
@@ -2359,6 +2399,8 @@ async def drafter_chat_stream(
                 context_parts.append(f"[KNOWLEDGE CHUNKS]\n{chunks_text}")
             if notion_context:
                 context_parts.append(f"[LIVE NOTION]\n{notion_context[:12000]}")
+            if web_results:
+                context_parts.append(f"[WEB SEARCH — latest information from the internet]\n{web_results[:6000]}")
             company_context = "\n\n".join(context_parts)
 
             # Build chat history
@@ -2372,16 +2414,38 @@ async def drafter_chat_stream(
                 if history_lines:
                     history_block = "CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n\n"
 
-            # Load drafter config overrides
+            # Load drafter config: per-grant overrides global
             drafter_cfg = await agent_config_col().find_one({"agent": "drafter"}) or {}
+            grant_drafter_settings = grant.get("drafter_settings") or {}
+
+            # Merge: per-grant > global > theme > defaults
             theme_overrides = (drafter_cfg.get("theme_settings") or {}).get(primary_theme) or {}
             agent_tone = theme_overrides.get("tone") or agent_info.get("tone", "")
             agent_voice = theme_overrides.get("voice") or agent_info.get("voice", "")
-            agent_temp = theme_overrides.get("temperature") or agent_info.get("temperature", 0.4)
-            custom_instructions = drafter_cfg.get("custom_instructions") or ""
+            agent_temp = grant_drafter_settings.get("temperature") or theme_overrides.get("temperature") or drafter_cfg.get("temperature") or agent_info.get("temperature", 0.4)
+            custom_instructions = grant_drafter_settings.get("custom_instructions") or drafter_cfg.get("custom_instructions") or ""
+
+            # Writing style: per-grant > global > default
+            writing_style = grant_drafter_settings.get("writing_style") or drafter_cfg.get("writing_style") or "professional"
+            style_descriptions = {
+                "professional": "Professional & Corporate — clear, formal, confident. Strong assertions, structured arguments.",
+                "scientific": "Scientific & Academic — rigorous, precise, evidence-driven. Finding → Evidence → Implication → Justification.",
+                "startup-founder": (
+                    "Startup-Founder voice — direct, operationally honest, conversational confidence. "
+                    "MANDATORY STRUCTURE: 1) Deployment context first (what Alt Carbon is already doing at scale), "
+                    "2) Problem as operational bottleneck (quantified pain, e.g. '2-4 weeks turnaround'), "
+                    "3) Intervention as unlock (quantified gains, e.g. '~80% reduction'), "
+                    "4) Operational outcome (D-CAL, MRV-as-a-service, processing capacity), "
+                    "5) Ecosystem impact (regional hub, Global South). "
+                    "Do NOT start with generic descriptions. Start with live operations. Respect word limits strictly."
+                ),
+            }
+            style_instruction = style_descriptions.get(writing_style, style_descriptions["professional"])
 
             system_prompt = f"""You are {agent_name}, a grant writing assistant for AltCarbon, a climate technology company.
 You help draft responses to grant application questions and requirements.
+
+WRITING STYLE: {style_instruction}
 
 TONE: {agent_tone}
 VOICE: {agent_voice}
@@ -2412,6 +2476,7 @@ At the end of your response, add a "---" divider followed by a small "Sources" s
 - "Knowledge Base" — if you used facts from the [KNOWLEDGE CHUNKS] section
 - "Notion (Live)" — if you used facts from the [LIVE NOTION] section
 - "Grant Analysis" — if you used facts from the GRANT DETAILS section
+- "Web Search" — if you used facts from the [WEB SEARCH] section (cite the source URL when possible)
 Only list sources you actually referenced. Format as a compact comma-separated line, e.g.: **Sources:** Company Profile, Grant Analysis"""
 
             user_prompt = f"""{history_block}USER MESSAGE:
@@ -2859,6 +2924,103 @@ async def restore_chat_snapshot(
     return {"status": "restored", "pipeline_id": pipeline_id, "snapshot_id": snapshot_id}
 
 
+@app.post("/drafter/finalize")
+async def finalize_draft(
+    body: dict,
+    background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
+):
+    """Save chat-drafted sections as a grant_draft document, mark draft_complete, trigger review."""
+    from backend.db.mongo import grant_drafts, grants_scored, drafter_chat_history, audit_logs
+    from bson import ObjectId
+
+    grant_id = body.get("grant_id")
+    pipeline_id = body.get("pipeline_id")
+    if not grant_id or not pipeline_id:
+        raise HTTPException(status_code=400, detail="grant_id and pipeline_id required")
+
+    grant = await grants_scored().find_one({"_id": ObjectId(grant_id)})
+    if not grant:
+        raise HTTPException(status_code=404, detail="Grant not found")
+
+    # Load chat history to extract approved sections
+    query: dict = {"pipeline_id": pipeline_id}
+    chat_doc = await drafter_chat_history().find_one(query)
+    if not chat_doc:
+        raise HTTPException(status_code=404, detail="No chat history found for this pipeline")
+
+    chat_sections = chat_doc.get("sections", {})
+    sections: dict = {}
+    for sec_name, messages in chat_sections.items():
+        # Find the last agent message — that's the approved content
+        agent_msgs = [m for m in messages if m.get("role") == "agent"]
+        if agent_msgs:
+            content = agent_msgs[-1].get("content", "")
+            # Strip source attribution
+            import re as _re
+            content = _re.sub(r"\n---\n\*{0,2}Sources\*{0,2}:?[^\n]*$", "", content, flags=_re.IGNORECASE).rstrip()
+            sections[sec_name] = {"content": content, "word_count": len(content.split())}
+
+    if not sections:
+        raise HTTPException(status_code=422, detail="No drafted sections found in chat history")
+
+    # Find latest version
+    latest = await grant_drafts().find_one({"grant_id": grant_id}, sort=[("version", -1)])
+    new_version = (latest.get("version", 0) + 1) if latest else 1
+
+    draft_doc = {
+        "grant_id": grant_id,
+        "version": new_version,
+        "sections": sections,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source": "chat_drafter",
+        "finalized_by": user_email,
+    }
+    await grant_drafts().insert_one(draft_doc)
+
+    # Update grant status to draft_complete
+    await grants_scored().update_one(
+        {"_id": ObjectId(grant_id)},
+        {"$set": {"status": "draft_complete", "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+
+    # Audit
+    try:
+        await audit_logs().insert_one({
+            "node": "drafter",
+            "action": "draft_finalized",
+            "grant_id": grant_id,
+            "grant_name": grant.get("title") or grant.get("grant_name") or "",
+            "user_email": user_email,
+            "version": new_version,
+            "section_count": len(sections),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        pass
+
+    # Auto-trigger review in background
+    auto_review = body.get("auto_review", True)
+    if auto_review:
+        async def _run_review():
+            try:
+                from backend.agents.dual_reviewer import run_dual_review
+                await run_dual_review(grant_id)
+            except Exception as exc:
+                logger.error("Auto-review failed for %s: %s", grant_id, exc)
+
+        background_tasks.add_task(_run_review)
+
+    return {
+        "status": "finalized",
+        "grant_id": grant_id,
+        "version": new_version,
+        "sections": list(sections.keys()),
+        "review_triggered": auto_review,
+    }
+
+
 async def _predraft_validate(grant: dict) -> dict | None:
     """Layer 1 deterministic pre-draft checks. Returns error dict or None if OK."""
     from backend.agents.analyst import parse_deadline
@@ -2912,16 +3074,17 @@ async def start_draft(
             },
         )
     if current_status not in draft_startable_statuses() and current_status != "guardrail_rejected":
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "invalid_draft_start_status",
-                "reason": (
-                    f"Grant status is '{current_status}' — only pursue-stage grants can start drafting."
-                ),
-                "grant_id": body.grant_id,
-            },
-        )
+        if not body.override_guardrails:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_draft_start_status",
+                    "reason": (
+                        f"Grant status is '{current_status}' — only pursue-stage grants can start drafting."
+                    ),
+                    "grant_id": body.grant_id,
+                },
+            )
 
     # ── Guard: prevent concurrent drafts for the same grant ──────────────────
     existing_draft = await grants_pipeline().find_one({

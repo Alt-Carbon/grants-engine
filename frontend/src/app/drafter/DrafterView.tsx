@@ -537,6 +537,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const [inputValue, setInputValue] = useState("");
   const [sendingKeys, setSendingKeys] = useState<Set<string>>(new Set());
   const [approving, setApproving] = useState(false);
+  const [addToDoc, setAddToDoc] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingTileId, setEditingTileId] = useState<string | null>(null);
   const [editingLabel, setEditingLabel] = useState("");
@@ -1231,6 +1232,12 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     await streamChat(activeKey, activeTile, selectedPipeline, userMsg.content, chatHistory);
   }, [activeKey, activeTile, selectedPipeline, inputValue, selectedId, chatHistories, streamChat]);
 
+  // -- Strip source attribution from drafter output -------------------------
+  function stripSources(content: string): string {
+    // Remove trailing "---\nSources: ..." or "---\n**Sources:** ..." block
+    return content.replace(/\n---\n\*{0,2}Sources\*{0,2}:?[^\n]*$/i, "").trimEnd();
+  }
+
   // -- Approve section -------------------------------------------------------
   const approveSection = useCallback(async () => {
     if (!activeKey || !activeTile || !selectedPipeline) return;
@@ -1239,7 +1246,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
 
     const agentMsgs = activeMessages.filter((m) => m.role === "agent");
     const latestContent = agentMsgs.length
-      ? agentMsgs[agentMsgs.length - 1].content
+      ? stripSources(agentMsgs[agentMsgs.length - 1].content)
       : "";
 
     try {
@@ -1251,6 +1258,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           section_name: activeTile.label,
           action: "approve",
           edited_content: latestContent,
+          add_to_document: addToDoc,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -1263,7 +1271,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           ...(prev[activeKey] ?? []),
           {
             role: "system" as const,
-            content: `**${activeTile.label}** has been approved.`,
+            content: `**${activeTile.label}** has been approved.${addToDoc ? " Added to document." : ""}`,
             timestamp: now(),
             metadata: { status: "Approved" },
           },
@@ -1275,7 +1283,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     } finally {
       setApproving(false);
     }
-  }, [activeKey, activeTile, selectedPipeline, activeMessages, triggerSave]);
+  }, [activeKey, activeTile, selectedPipeline, activeMessages, addToDoc, triggerSave]);
 
   // -- Export ----------------------------------------------------------------
   const exportDraft = useCallback(() => {
@@ -1291,7 +1299,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       const msgs = chatHistories[key] ?? [];
       const agentMsgs = msgs.filter((m) => m.role === "agent");
       const content = agentMsgs.length
-        ? agentMsgs[agentMsgs.length - 1].content
+        ? stripSources(agentMsgs[agentMsgs.length - 1].content)
         : "";
       if (content) lines.push(`## ${tile.label}`, "", content, "");
     }
@@ -1303,6 +1311,49 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     a.click();
     URL.revokeObjectURL(url);
   }, [selectedPipeline, tiles, chatHistories, selectedId]);
+
+  // -- Delete section --------------------------------------------------------
+  const deleteSection = useCallback(async (tileId: string) => {
+    const tile = tiles.find((t) => t.id === tileId);
+    if (!tile || !selectedPipeline) return;
+    if (!confirm(`Delete section "${tile.label}"? This cannot be undone.`)) return;
+
+    const key = buildKey(selectedId, tile.id);
+
+    // Remove tile from tiles list
+    setTilesMap((prev) => ({
+      ...prev,
+      [selectedId]: (prev[selectedId] ?? []).filter((t) => t.id !== tileId),
+    }));
+
+    // Remove chat history
+    setChatHistories((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+
+    // Remove from approved
+    setApprovedSections((prev) => {
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+
+    // Clear active tile if it was the deleted one
+    if (activeTileId === tileId) {
+      const remaining = tiles.filter((t) => t.id !== tileId);
+      setActiveTileId(remaining.length ? remaining[0].id : null);
+    }
+
+    // Delete from backend
+    try {
+      await clearSectionHistory(selectedId, tile.label, userEmail);
+    } catch {
+      // best-effort
+    }
+    triggerSave();
+  }, [tiles, selectedId, selectedPipeline, activeTileId, userEmail, triggerSave]);
 
   // -- Clear section chat ----------------------------------------------------
   const clearChat = useCallback(async () => {
@@ -1325,6 +1376,38 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       setClearingSection(false);
     }
   }, [activeKey, activeTile, selectedPipeline, selectedId, triggerSave]);
+
+  // -- Send to Reviewer (finalize draft) ------------------------------------
+  const [finalizing, setFinalizing] = useState(false);
+  const finalizeDraft = useCallback(async () => {
+    if (!selectedPipeline || finalizing) return;
+    const grantId = selectedPipeline.grant_id;
+    if (!grantId) {
+      setError("No grant linked to this pipeline entry");
+      return;
+    }
+    setFinalizing(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/drafter/finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          grant_id: grantId,
+          pipeline_id: selectedId,
+          auto_review: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || data?.error || "Finalize failed");
+      // Navigate to reviewers page
+      window.location.href = "/reviewers";
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to finalize draft");
+    } finally {
+      setFinalizing(false);
+    }
+  }, [selectedPipeline, selectedId, finalizing]);
 
   // -- Download Intelligence Brief ------------------------------------------
   const downloadIntelBrief = useCallback(async (format: "md" | "pdf" = "md") => {
@@ -1790,6 +1873,16 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                           >
                             <Pencil className="h-3 w-3" />
                           </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteSection(tile.id);
+                            }}
+                            className="hidden shrink-0 rounded p-0.5 text-gray-300 hover:text-red-500 group-hover:block"
+                            title="Delete section"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
                         </div>
                         <div className="mt-1 flex items-center gap-1.5">
                           <span
@@ -1873,17 +1966,33 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
             </Button>
           </div>
 
-          {/* Export Draft — only when all sections approved */}
+          {/* Export Draft + Send to Reviewer — only when all sections approved */}
           {allApproved && tiles.length > 0 && (
-            <Button
-              variant="default"
-              size="sm"
-              className="w-full bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700"
-              onClick={exportDraft}
-            >
-              <Download className="h-4 w-4" />
-              Export Draft
-            </Button>
+            <div className="flex flex-col gap-2">
+              <Button
+                variant="default"
+                size="sm"
+                className="w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700"
+                onClick={finalizeDraft}
+                disabled={finalizing}
+              >
+                {finalizing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+                {finalizing ? "Sending..." : "Send to Reviewer"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={exportDraft}
+              >
+                <Download className="h-4 w-4" />
+                Export Draft
+              </Button>
+            </div>
           )}
         </div>
       </div>
@@ -2164,20 +2273,31 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                       </div>
                     </div>
                     {activeMessages.some((m) => m.role === "agent") && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={approveSection}
-                        disabled={approving}
-                        className="h-7 gap-1.5 rounded-lg border-green-200 text-green-700 hover:bg-green-50 hover:text-green-800"
-                      >
-                        {approving ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <CheckCircle className="h-3 w-3" />
-                        )}
-                        Approve Section
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <label className="flex items-center gap-1.5 cursor-pointer text-xs text-gray-500 select-none">
+                          <input
+                            type="checkbox"
+                            checked={addToDoc}
+                            onChange={(e) => setAddToDoc(e.target.checked)}
+                            className="h-3.5 w-3.5 rounded border-gray-300 text-green-600 focus:ring-green-500"
+                          />
+                          Add to document
+                        </label>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={approveSection}
+                          disabled={approving}
+                          className="h-7 gap-1.5 rounded-lg border-green-200 text-green-700 hover:bg-green-50 hover:text-green-800"
+                        >
+                          {approving ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <CheckCircle className="h-3 w-3" />
+                          )}
+                          Approve Section
+                        </Button>
+                      </div>
                     )}
                   </div>
                 </div>
