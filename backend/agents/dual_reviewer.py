@@ -182,9 +182,9 @@ COMPLETE DRAFT APPLICATION:
 
 REVIEW RULES:
 1. Review each section ONLY within its stated scope — do not penalize a section for not covering topics assigned to other sections
-2. Check word counts against limits — flag sections that exceed their word limit
+2. If a word limit is shown for a section, flag violations. If NO word limit is shown, do not invent one or penalize length
 3. Evaluate whether each section addresses the evaluation criteria relevant to its scope
-4. Suggestions must be actionable within the section's word limit — don't suggest adding 200 words to a section that's already at its limit
+4. Suggestions must be actionable within the section's constraints — if a word limit exists, don't suggest adding content that would exceed it
 5. Score each section relative to what it was ASKED to cover, not what you wish it covered
 
 Review this application thoroughly. Be specific and constructive. {perspective_guidance}
@@ -580,32 +580,33 @@ async def run_dual_review(grant_id: str) -> Dict:
         }
 
     # Build structured draft text with constraints
+    # Only show word limits that the grant itself specifies (from application_sections)
     draft_parts = []
     section_structure_parts = []
     for name, sec in sections.items():
         content = sec.get("content", "")
         wc = sec.get("word_count") or len(content.split())
-        wl = sec.get("word_limit", "")
-        # Try to find matching spec
         spec = section_spec.get(name.lower(), {})
         desc = spec.get("description", "")
-        if not wl:
-            wl = spec.get("limit", "")
+        # Only use word limit from the grant's application_sections — not our internal defaults
+        grant_wl = spec.get("limit", "")
 
         header = f"## {name}"
-        if wl:
-            header += f" [{wc} / {wl} words]"
+        if grant_wl:
+            header += f" [{wc} / {grant_wl} words]"
         else:
             header += f" [{wc} words]"
         draft_parts.append(f"{header}\n{content}")
 
         # Build section structure summary for reviewer context
         struct_line = f"- **{name}**: {wc} words"
-        if wl:
-            struct_line += f" (limit: {wl})"
-            if isinstance(wl, (int, float)) or (isinstance(wl, str) and wl.isdigit()):
-                if wc > int(wl):
+        if grant_wl:
+            struct_line += f" (limit: {grant_wl})"
+            try:
+                if wc > int(str(grant_wl).split()[0]):
                     struct_line += " — OVER LIMIT"
+            except (ValueError, IndexError):
+                pass
         if desc:
             struct_line += f" — Scope: {desc[:150]}"
         section_structure_parts.append(struct_line)
@@ -872,25 +873,26 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     for name, sec in approved_sections.items():
         content = sec.get("content", "")
         wc = sec.get("word_count") or len(content.split())
-        wl = sec.get("word_limit", "")
         spec = _section_spec.get(name.lower(), {})
         desc = spec.get("description", "")
-        if not wl:
-            wl = spec.get("limit", "")
+        # Only use word limit from the grant's application_sections — not our internal defaults
+        grant_wl = spec.get("limit", "")
 
         header = f"## {name}"
-        if wl:
-            header += f" [{wc} / {wl} words]"
+        if grant_wl:
+            header += f" [{wc} / {grant_wl} words]"
         else:
             header += f" [{wc} words]"
         draft_parts.append(f"{header}\n{content}")
 
         struct_line = f"- **{name}**: {wc} words"
-        if wl:
-            struct_line += f" (limit: {wl})"
-            if isinstance(wl, (int, float)) or (isinstance(wl, str) and wl.isdigit()):
-                if wc > int(wl):
+        if grant_wl:
+            struct_line += f" (limit: {grant_wl})"
+            try:
+                if wc > int(str(grant_wl).split()[0]):
                     struct_line += " — OVER LIMIT"
+            except (ValueError, IndexError):
+                pass
         if desc:
             struct_line += f" — Scope: {desc[:150]}"
         section_structure_parts.append(struct_line)
