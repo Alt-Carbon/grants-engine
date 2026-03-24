@@ -509,6 +509,267 @@ Create a prioritized action plan. Return JSON:
         return {}
 
 
+# ── Win Probability Prediction ────────────────────────────────────────────────
+
+WIN_PREDICTION_PROMPT = """You are a grant outcome prediction model. Based on all available signals, estimate the probability that this application will be funded.
+
+GRANT: {grant_title}
+FUNDER: {funder}
+FUNDING: {funding}
+
+REVIEW SCORES:
+- Funder perspective: {funder_score}/10 ({funder_verdict})
+- Scientific perspective: {scientific_score}/10 ({scientific_verdict})
+- Coherence: {coherence_score}/10
+- Red team pile: {red_team_pile}
+- Red team competitive position: {red_team_position}
+
+CLAIM VERIFICATION:
+{claim_summary}
+
+FUNDER DNA:
+{funder_dna}
+
+PAST OUTCOMES (if any):
+{past_outcomes}
+
+COMPETITIVE LANDSCAPE:
+{competitive_context}
+
+APPLICATION FORMAT: {format_type}
+SECTIONS: {num_sections} sections, avg {avg_words} words each
+
+Analyze systematically:
+1. Score-based signal: What do the review scores suggest?
+2. Funder fit signal: How well does this match the funder's pattern?
+3. Competitive signal: How does this compare to typical winners?
+4. Red flags: Any dealbreakers?
+5. Calibration: Are there past outcomes to calibrate against?
+
+Respond with JSON:
+{{
+  "win_probability": <float 0.0 to 1.0>,
+  "confidence": "<low|medium|high — how confident are you in this estimate>",
+  "confidence_reasoning": "<why this confidence level>",
+  "key_factors": {{
+    "working_for": ["<factor increasing probability>"],
+    "working_against": ["<factor decreasing probability>"],
+    "uncertain": ["<factor that could go either way>"]
+  }},
+  "comparable_outcome": "<what happened to similar applications in the past, if known>",
+  "to_reach_60_percent": ["<specific action that would increase win probability>"],
+  "to_reach_80_percent": ["<specific action that would increase win probability further>"],
+  "reasoning": "<2-3 sentences explaining the prediction logic>"
+}}"""
+
+
+async def _predict_win_probability(
+    grant: Dict,
+    review_results: Dict,
+    red_team_result: Dict,
+    funder_dna: str = "",
+    claim_verification: str = "",
+    format_info: str = "",
+) -> Dict:
+    """Predict win probability based on all review signals."""
+    try:
+        # Load past outcomes for calibration
+        from backend.db.mongo import grant_outcomes
+        funder = grant.get("funder") or ""
+        themes = grant.get("themes_detected") or []
+
+        past = []
+        if funder:
+            past_docs = await grant_outcomes().find(
+                {"funder": {"$regex": funder, "$options": "i"}}
+            ).sort("created_at", -1).to_list(length=10)
+            for p in past_docs:
+                past.append(
+                    f"  [{p.get('outcome', '?').upper()}] {p.get('grant_title', '?')[:60]} "
+                    f"— funder_score: {p.get('reviewer_scores', {}).get('funder', '?')}, "
+                    f"scientific_score: {p.get('reviewer_scores', {}).get('scientific', '?')}"
+                )
+
+        funder_result = review_results.get("funder", {})
+        scientific_result = review_results.get("scientific", {})
+        coherence_result = review_results.get("coherence", {})
+
+        funding = grant.get("max_funding_usd") or grant.get("amount") or "Unknown"
+        if isinstance(funding, (int, float)):
+            funding = f"${funding:,.0f}"
+
+        prompt = WIN_PREDICTION_PROMPT.format(
+            grant_title=grant.get("title") or grant.get("grant_name") or "?",
+            funder=funder,
+            funding=funding,
+            funder_score=funder_result.get("overall_score", 0),
+            funder_verdict=funder_result.get("verdict", "?"),
+            scientific_score=scientific_result.get("overall_score", 0),
+            scientific_verdict=scientific_result.get("verdict", "?"),
+            coherence_score=coherence_result.get("coherence_score", 0),
+            red_team_pile=red_team_result.get("pile", "unknown"),
+            red_team_position=red_team_result.get("competitive_position", "unknown"),
+            claim_summary=claim_verification[:1000] if claim_verification else "No claims verified",
+            funder_dna=funder_dna[:1000] if funder_dna else "No funder profile available",
+            past_outcomes="\n".join(past[:5]) if past else "No past outcomes recorded for this funder",
+            competitive_context=red_team_result.get("stand_out_factor", "Unknown"),
+            format_type=format_info or "Standard narrative",
+            num_sections=len(review_results.get("funder", {}).get("section_reviews", {})),
+            avg_words="short-form" if "form" in format_info.lower() else "narrative",
+        )
+
+        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=800, temperature=0.2)
+        result = _parse_json_response(raw)
+        result.setdefault("win_probability", 0.5)
+        result.setdefault("confidence", "low")
+        logger.info(
+            "Win probability for '%s': %.0f%% (%s confidence)",
+            grant.get("grant_name", "?")[:40],
+            result["win_probability"] * 100,
+            result["confidence"],
+        )
+        return result
+    except Exception as e:
+        logger.debug("Win probability prediction failed: %s", e)
+        return {}
+
+
+# ── Reviewer Chat — interactive follow-up with the reviewer ──────────────────
+
+REVIEWER_CHAT_PROMPT = """You are continuing a grant review conversation. The user wants to discuss the review findings.
+
+You previously reviewed this application:
+GRANT: {grant_title}
+FUNDER: {funder}
+
+YOUR REVIEW RESULTS:
+{review_summary}
+
+{red_team_summary}
+
+{revision_plan_summary}
+
+{win_probability_summary}
+
+DRAFT APPLICATION:
+{draft_text}
+
+The user is asking about the review. Be direct, specific, and constructive.
+When they ask "why", give the exact reasoning from your review.
+When they ask "how to fix", give concrete text they can use.
+When they ask "what would a 9/10 look like", write an example.
+
+USER: {message}
+
+Respond in markdown. Be specific — reference section names, quote the draft text, cite your review findings."""
+
+
+async def reviewer_chat(
+    grant_id: str,
+    message: str,
+    perspective: str = "funder",
+    chat_history: Optional[List[Dict]] = None,
+) -> str:
+    """Interactive chat with the reviewer about their review findings.
+
+    Loads the full review context and answers follow-up questions.
+    """
+    from backend.db.mongo import grant_drafts, grants_scored, draft_reviews
+
+    from bson import ObjectId
+
+    grant = await grants_scored().find_one({"_id": ObjectId(grant_id)})
+    if not grant:
+        return "Grant not found."
+
+    # Load all review perspectives
+    reviews = {}
+    async for doc in draft_reviews().find({"grant_id": grant_id}):
+        reviews[doc.get("perspective", "unknown")] = doc
+
+    # Load draft
+    draft_doc = await grant_drafts().find_one({"grant_id": grant_id}, sort=[("version", -1)])
+    draft_text = ""
+    if draft_doc:
+        for name, sec in draft_doc.get("sections", {}).items():
+            draft_text += f"\n## {name}\n{sec.get('content', '')}\n"
+
+    # Build review summary
+    review_parts = []
+    for p in ["funder", "scientific", "coherence"]:
+        r = reviews.get(p, {})
+        if p == "coherence":
+            review_parts.append(f"**Coherence**: {r.get('coherence_score', '?')}/10 — {r.get('overall_assessment', '')[:200]}")
+            for issue in r.get("issues", [])[:5]:
+                desc = issue.get("description", "") if isinstance(issue, dict) else str(issue)
+                review_parts.append(f"  - {desc[:150]}")
+        else:
+            review_parts.append(f"**{p.title()}**: {r.get('overall_score', '?')}/10 ({r.get('verdict', '?')})")
+            review_parts.append(f"  Summary: {r.get('summary', '')[:200]}")
+            for sec_name, sec_r in r.get("section_reviews", {}).items():
+                review_parts.append(f"  {sec_name}: {sec_r.get('score', '?')}/10")
+                for issue in sec_r.get("issues", [])[:2]:
+                    review_parts.append(f"    - {issue[:150]}")
+
+    # Red team
+    rt = reviews.get("red_team", {})
+    red_team_summary = ""
+    if rt:
+        red_team_summary = (
+            f"RED TEAM RESULT:\n"
+            f"  Pile: {rt.get('pile', '?')}\n"
+            f"  First impression: {rt.get('first_impression', '')}\n"
+            f"  Stand-out: {rt.get('stand_out_factor', 'None')}\n"
+            f"  Competitive position: {rt.get('competitive_position', '?')}"
+        )
+
+    # Revision plan
+    rp = reviews.get("revision_plan", {})
+    revision_plan_summary = ""
+    if rp:
+        top_actions = rp.get("top_3_actions", [])
+        predicted = rp.get("predicted_score_after_fixes", {})
+        revision_plan_summary = (
+            f"REVISION PLAN:\n"
+            f"  Top actions: {'; '.join(top_actions[:3])}\n"
+            f"  Predicted scores after fixes: funder={predicted.get('funder', '?')}, "
+            f"scientific={predicted.get('scientific', '?')}"
+        )
+
+    # Win probability
+    wp = reviews.get("win_probability", {})
+    win_prob_summary = ""
+    if wp:
+        win_prob_summary = (
+            f"WIN PROBABILITY: {wp.get('win_probability', 0)*100:.0f}% ({wp.get('confidence', '?')} confidence)\n"
+            f"  Reasoning: {wp.get('reasoning', '')[:200]}"
+        )
+
+    # Build history
+    history_block = ""
+    if chat_history:
+        lines = []
+        for msg in chat_history[-6:]:
+            role = msg.get("role", "user").upper()
+            content = msg.get("content", "")[:400]
+            lines.append(f"[{role}]: {content}")
+        history_block = "PREVIOUS CONVERSATION:\n" + "\n".join(lines) + "\n\n"
+
+    prompt = REVIEWER_CHAT_PROMPT.format(
+        grant_title=grant.get("title") or grant.get("grant_name") or "?",
+        funder=grant.get("funder") or "?",
+        review_summary="\n".join(review_parts),
+        red_team_summary=red_team_summary,
+        revision_plan_summary=revision_plan_summary,
+        win_probability_summary=win_prob_summary,
+        draft_text=draft_text[:8000],
+        message=f"{history_block}{message}",
+    )
+
+    response = await chat(prompt, model=ANALYST_HEAVY, max_tokens=2000, temperature=0.3)
+    return response.strip()
+
+
 # ── Default reviewer profiles ─────────────────────────────────────────────────
 
 REVIEWER_PROFILES: Dict[str, Dict] = {
@@ -1418,9 +1679,27 @@ async def run_dual_review(grant_id: str) -> Dict:
             upsert=True,
         )
 
+    # Step 4: Win probability prediction (needs all other results)
+    win_prediction = await _predict_win_probability(
+        grant, review_results, red_team_result or {},
+        funder_dna=funder_dna,
+        claim_verification=claim_verification,
+        format_info=format_note_for_red_team,
+    )
+
+    if win_prediction:
+        await draft_reviews().replace_one(
+            {"grant_id": grant_id, "perspective": "win_probability"},
+            {
+                "grant_id": grant_id, "draft_id": draft_id, "draft_version": draft_version,
+                "perspective": "win_probability", **win_prediction, "created_at": now,
+            },
+            upsert=True,
+        )
+
     logger.info(
         "Full review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), coherence=%.1f, "
-        "red_team=%s, priorities=%d actions, variants=%d sections",
+        "red_team=%s, priorities=%d actions, variants=%d sections, win_prob=%.0f%%",
         grant_title,
         funder_result.get("overall_score", 0),
         funder_result.get("verdict", "?"),
@@ -1430,6 +1709,7 @@ async def run_dual_review(grant_id: str) -> Dict:
         red_team_result.get("pile", "?") if red_team_result else "skipped",
         len(revision_priorities.get("top_3_actions", [])) if revision_priorities else 0,
         len(section_variants),
+        win_prediction.get("win_probability", 0) * 100 if win_prediction else 0,
     )
 
     # Update grant status to "reviewed"
@@ -1472,6 +1752,7 @@ async def run_dual_review(grant_id: str) -> Dict:
         **({"red_team": red_team_result} if red_team_result else {}),
         **({"revision_plan": revision_priorities} if revision_priorities else {}),
         **({"section_variants": section_variants} if section_variants else {}),
+        **({"win_probability": win_prediction} if win_prediction else {}),
     }
 
 
