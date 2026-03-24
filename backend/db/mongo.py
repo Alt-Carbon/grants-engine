@@ -79,6 +79,9 @@ def drafter_chat_history():
 def notion_page_cache():
     return get_db()["notion_page_cache"]
 
+def company_facts():
+    return get_db()["company_facts"]
+
 def draft_preferences():
     return get_db()["draft_preferences"]
 
