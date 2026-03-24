@@ -2,9 +2,16 @@
 
 Replaces Vercel cron (not available on Railway). APScheduler is already
 in requirements.txt. Jobs are idempotent, so restarts are safe.
+
+Schedule:
+  - Scout: Monday 8 AM IST (2:30 AM UTC) — 15-min timeout, auto-triggers Analyst
+  - Knowledge sync: daily 3 AM UTC
+  - Profile rebuild: weekly Sunday 4 AM UTC
+  - Notion change detection: every 30 min
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -16,16 +23,15 @@ logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
 
+# Timeout for Scout runs (seconds) — prevents runaway jobs
+SCOUT_TIMEOUT_SECONDS = 15 * 60  # 15 minutes
+
 
 def setup_scheduler() -> None:
     """Register all recurring jobs. Called during FastAPI lifespan startup.
 
     Uses CronTrigger for predictable schedules instead of IntervalTrigger
-    (which resets on every deploy). This means:
-    - Scout runs at 2 AM UTC on Mon/Thu (twice per week)
-    - Knowledge sync runs at 3 AM UTC daily
-    - Profile rebuild runs at 4 AM UTC on Sundays
-    - Notion polling runs every 30 minutes
+    (which resets on every deploy).
     """
     import os
 
@@ -35,11 +41,12 @@ def setup_scheduler() -> None:
         return
 
     # Scout: Monday 8 AM IST (= 2:30 AM UTC) — weekly
+    # Has 15-min timeout. Auto-triggers Analyst after completion.
     scheduler.add_job(
-        _safe_scout,
+        _safe_scout_with_analyst,
         trigger=CronTrigger(day_of_week="mon", hour=2, minute=30),
         id="scout_cron",
-        name="Scout Discovery (Mon 8AM IST / 2:30AM UTC)",
+        name="Scout + Analyst (Mon 8AM IST / 2:30AM UTC)",
         replace_existing=True,
         misfire_grace_time=3600,
     )
@@ -95,7 +102,7 @@ def teardown_scheduler() -> None:
 
 
 def get_scheduler_status() -> dict:
-    """Return all jobs and their next run times."""
+    """Return all jobs, next run times, and last run stats."""
     jobs = []
     for job in scheduler.get_jobs():
         jobs.append({
@@ -107,32 +114,155 @@ def get_scheduler_status() -> dict:
     return {
         "running": scheduler.running,
         "jobs": jobs,
+        "scout_timeout_seconds": SCOUT_TIMEOUT_SECONDS,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 
 
+async def get_last_runs() -> dict:
+    """Fetch last run stats from audit_logs for monitoring dashboard."""
+    try:
+        from backend.db.mongo import audit_logs
+        runs = {}
+        for event_type in ["cron_scout_analyst", "knowledge_sync", "profile_sync"]:
+            doc = await audit_logs().find_one(
+                {"event_type": event_type},
+                sort=[("timestamp", -1)],
+            )
+            if doc:
+                runs[event_type] = {
+                    "timestamp": doc.get("timestamp"),
+                    "duration_seconds": doc.get("duration_seconds"),
+                    "status": doc.get("scout", {}).get("status") if event_type == "cron_scout_analyst" else doc.get("status"),
+                }
+        return runs
+    except Exception:
+        return {}
+
+
 # ── Safe wrappers (catch errors, emit notifications) ─────────────────────────
 
-async def _safe_scout() -> None:
-    """Run scout pipeline with error handling + notification."""
+async def _safe_scout_with_analyst() -> None:
+    """Run Scout with 15-min timeout, then auto-trigger Analyst on results.
+
+    Pipeline:
+      1. Scout discovers grants (15-min timeout)
+      2. Analyst scores all new unscored grants
+      3. Notifications emitted for both stages
+      4. Run stats logged to audit_logs for monitoring
+    """
     from backend.jobs.scout_job import run_scout_pipeline
+
+    start = datetime.now(timezone.utc)
+    scout_result = {}
+    analyst_result = {}
+
+    # ── Step 1: Scout with timeout ──
     try:
-        result = await run_scout_pipeline()
-        logger.info("Scheduled scout complete: %s", result.get("status"))
-        # Emit notification
+        scout_result = await asyncio.wait_for(
+            run_scout_pipeline(),
+            timeout=SCOUT_TIMEOUT_SECONDS,
+        )
+        scout_status = scout_result.get("status", "unknown")
+        logger.info("Scout complete in %.0fs: %s", (datetime.now(timezone.utc) - start).total_seconds(), scout_status)
+    except asyncio.TimeoutError:
+        scout_result = {"status": "timeout", "timeout_seconds": SCOUT_TIMEOUT_SECONDS}
+        logger.warning("Scout timed out after %d seconds — stopping gracefully", SCOUT_TIMEOUT_SECONDS)
+    except Exception as e:
+        scout_result = {"status": "error", "error": str(e)}
+        logger.error("Scout failed: %s", e)
+
+    # Notify scout completion
+    try:
+        from backend.notifications.hub import notify
+        scout_status = scout_result.get("status", "unknown")
+        scout_emoji = {"timeout": "⏰", "error": "❌"}.get(scout_status, "✅")
+        await notify(
+            event_type="scout_complete",
+            title=f"{scout_emoji} Scout run {scout_status}",
+            body=f"Duration: {(datetime.now(timezone.utc) - start).total_seconds():.0f}s" + (
+                f" — timed out after {SCOUT_TIMEOUT_SECONDS}s" if scout_status == "timeout" else ""
+            ),
+            action_url="/monitoring",
+            metadata=scout_result,
+        )
+    except Exception:
+        logger.debug("Scout notification failed", exc_info=True)
+
+    # ── Step 2: Auto-trigger Analyst on unscored grants ──
+    analyst_start = datetime.now(timezone.utc)
+    try:
+        from backend.db.mongo import get_db
+        db = get_db()
+
+        # Find raw grants not yet in grants_scored
+        scored_hashes = set()
+        async for doc in db["grants_scored"].find({}, {"url_hash": 1}):
+            scored_hashes.add(doc.get("url_hash", ""))
+
+        unscored = []
+        async for doc in db["grants_raw"].find({"processed": {"$ne": True}}):
+            h = doc.get("url_hash", "")
+            if h and h not in scored_hashes:
+                doc["_id"] = str(doc["_id"])
+                unscored.append(doc)
+
+        if unscored:
+            logger.info("Analyst auto-triggered: %d unscored grants to process", len(unscored))
+            from backend.agents.analyst import AnalystAgent
+            agent = AnalystAgent()
+            scored = await agent.run(unscored)
+            analyst_result = {
+                "status": "complete",
+                "input_count": len(unscored),
+                "scored_count": len(scored),
+                "duration_s": (datetime.now(timezone.utc) - analyst_start).total_seconds(),
+            }
+            logger.info("Analyst complete: scored %d/%d grants in %.0fs",
+                         len(scored), len(unscored), analyst_result["duration_s"])
+        else:
+            analyst_result = {"status": "skipped", "reason": "no unscored grants"}
+            logger.info("Analyst skipped: no unscored grants")
+
+        # Notify analyst completion
         try:
             from backend.notifications.hub import notify
             await notify(
-                event_type="scout_complete",
-                title="Scout run complete",
-                body=f"Status: {result.get('status', 'unknown')}",
-                action_url="/monitoring",
-                metadata=result,
+                event_type="analyst_complete",
+                title=f"Analyst: scored {analyst_result.get('scored_count', 0)} grants",
+                body=f"Duration: {analyst_result.get('duration_s', 0):.0f}s",
+                action_url="/pipeline",
+                metadata=analyst_result,
             )
         except Exception:
-            logger.debug("Scout notification failed", exc_info=True)
+            logger.debug("Analyst notification failed", exc_info=True)
     except Exception as e:
-        logger.error("Scheduled scout failed: %s", e)
+        analyst_result = {"status": "error", "error": str(e)}
+        logger.error("Analyst auto-trigger failed: %s", e)
+
+    # ── Step 3: Log run to audit_logs for monitoring ──
+    total_duration = (datetime.now(timezone.utc) - start).total_seconds()
+    try:
+        from backend.db.mongo import audit_logs
+        await audit_logs().insert_one({
+            "event_type": "cron_scout_analyst",
+            "node": "scheduler",
+            "action": "scout_analyst_pipeline",
+            "timestamp": start.isoformat(),
+            "duration_seconds": total_duration,
+            "scout": scout_result,
+            "analyst": analyst_result,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        logger.debug("Audit log write failed", exc_info=True)
+
+    logger.info(
+        "Scout+Analyst pipeline complete: total %.0fs, scout=%s, analyst=%s",
+        total_duration,
+        scout_result.get("status", "?"),
+        analyst_result.get("status", "?"),
+    )
 
 
 async def _safe_knowledge_sync() -> None:
