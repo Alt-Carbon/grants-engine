@@ -1564,15 +1564,9 @@ def _build_scored_doc(
     # Status mapping:
     #   auto_pass → skipped (failed hard rules or low score)
     #   hold      → needs manual review (e.g. unknown currency, missing data)
-    #   pursue    → high-priority triage queue
-    #   watch     → lower-priority watch list (monitor, don't act yet)
-    status_map = {
-        "auto_pass": "auto_pass",
-        "hold": "hold",
-        "pursue": "triage",
-        "watch": "watch",
-    }
-    status = status_map.get(action, "triage")
+    #   pursue    → shortlisted (high priority)
+    #   watch     → shortlisted (lower priority, same queue as pursue)
+    status = "auto_pass" if action == "auto_pass" else "hold" if action == "hold" else "triage"
 
     grant_name = grant.get("grant_name") or grant.get("title") or ""
 
