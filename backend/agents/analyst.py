@@ -1424,19 +1424,80 @@ async def _score_grant(
 
     # ── Mandatory fields gate for shortlisted grants ──────────────────────
     # Pursue/watch grants MUST have a concrete deadline and funding amount.
-    # If missing after deep research, attempt a focused extraction from content.
+    # If missing after deep research, attempt enrichment from the grant page.
     # If still missing, demote to hold for manual review.
     if action in ("pursue", "watch") and not scoring_error:
         has_deadline = _has_concrete_deadline(grant, deep_analysis)
         has_funding = _has_concrete_funding(grant, deep_analysis)
 
         if not has_deadline or not has_funding:
-            # Focused extraction attempt from raw content
+            # Step 1: Focused extraction from raw content already in DB
             patch = await _extract_missing_mandatory(grant, has_deadline, has_funding)
             if patch:
                 grant.update(patch)
                 has_deadline = has_deadline or bool(patch.get("deadline"))
                 has_funding = has_funding or bool(patch.get("max_funding_usd"))
+
+        if not has_deadline or not has_funding:
+            # Step 2: Fetch the grant page live and extract missing fields
+            try:
+                grant_url = grant.get("url") or grant.get("source_url") or ""
+                if grant_url:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                        r = await client.get(grant_url, headers={"User-Agent": "Mozilla/5.0"})
+                        if r.status_code == 200:
+                            import re as _re
+                            page_text = _re.sub(r'<[^>]+>', ' ', r.text[:30000])
+                            page_text = _re.sub(r'\s+', ' ', page_text).strip()
+
+                            from backend.utils.llm import chat as _llm_chat
+                            enrich_prompt = (
+                                f"Extract from this grant page:\n{page_text[:6000]}\n\n"
+                                f"Return JSON: {{\"deadline\": \"YYYY-MM-DD or null\", "
+                                f"\"funding_amount\": \"text or null\", \"max_funding_usd\": number_or_null, "
+                                f"\"application_status\": \"open|closed|rolling|cohort_running|unknown\", "
+                                f"\"eligibility\": \"1-2 sentences or null\", "
+                                f"\"description\": \"2-3 sentences or null\"}}"
+                            )
+                            raw_enrich = await _llm_chat(enrich_prompt, model="claude-haiku-4-5-20251001", max_tokens=300, temperature=0)
+                            clean = raw_enrich.strip()
+                            if clean.startswith("```"):
+                                clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0]
+                            enriched = json.loads(clean.strip())
+
+                            # Apply enriched fields
+                            if enriched.get("deadline") and not has_deadline:
+                                grant["deadline"] = enriched["deadline"]
+                                has_deadline = True
+                            if enriched.get("max_funding_usd") and not has_funding:
+                                grant["max_funding_usd"] = enriched["max_funding_usd"]
+                                grant["amount"] = enriched.get("funding_amount", "")
+                                has_funding = True
+                            if enriched.get("eligibility"):
+                                grant["eligibility"] = enriched["eligibility"]
+                            if enriched.get("description"):
+                                grant["description"] = enriched["description"]
+
+                            # Detect closed/cohort applications
+                            app_status = enriched.get("application_status", "unknown")
+                            if app_status in ("closed", "cohort_running"):
+                                logger.info(
+                                    "Grant application %s: %s",
+                                    app_status,
+                                    (grant.get("grant_name") or "")[:60],
+                                )
+                                action = "auto_pass"
+                                scoring["red_flags"] = list(scoring.get("red_flags", []))
+                                scoring["red_flags"].append(
+                                    f"Application {app_status} — "
+                                    + ("cohort already selected and running" if app_status == "cohort_running" else "applications no longer accepted")
+                                )
+
+                            logger.info("Enriched grant from page: deadline=%s, funding=%s, status=%s",
+                                       enriched.get("deadline"), enriched.get("max_funding_usd"), app_status)
+            except Exception as e:
+                logger.debug("Grant page enrichment failed: %s", e)
 
         missing = []
         if not has_deadline:
@@ -1444,7 +1505,7 @@ async def _score_grant(
         if not has_funding:
             missing.append("funding amount / ticket size")
 
-        if missing:
+        if missing and action != "auto_pass":
             logger.info(
                 "Demoting %s → hold (missing %s): %s",
                 action, " & ".join(missing),
@@ -1501,10 +1562,17 @@ def _build_scored_doc(
 ) -> Dict:
     """Build the full document written to grants_scored."""
     # Status mapping:
-    #   auto_pass → skipped entirely (failed hard rules)
-    #   hold      → needs manual review (e.g. unknown currency)
-    #   pursue/watch → goes to human triage queue
-    status = action if action in ("auto_pass", "hold") else "triage"
+    #   auto_pass → skipped (failed hard rules or low score)
+    #   hold      → needs manual review (e.g. unknown currency, missing data)
+    #   pursue    → high-priority triage queue
+    #   watch     → lower-priority watch list (monitor, don't act yet)
+    status_map = {
+        "auto_pass": "auto_pass",
+        "hold": "hold",
+        "pursue": "triage",
+        "watch": "watch",
+    }
+    status = status_map.get(action, "triage")
 
     grant_name = grant.get("grant_name") or grant.get("title") or ""
 
