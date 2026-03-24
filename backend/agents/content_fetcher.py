@@ -158,7 +158,7 @@ async def _set_cached(source_id: str, title: str, text: str, source: str, conten
 # ── Content fetchers per type ────────────────────────────────────────────────
 
 # Max recursion depth for nested blocks (toggles, callouts, child pages)
-_MAX_BLOCK_DEPTH = 3
+_MAX_BLOCK_DEPTH = 5
 
 
 async def _extract_blocks_recursive(
@@ -170,6 +170,7 @@ async def _extract_blocks_recursive(
     """Recursively extract text from Notion blocks, including children.
 
     Handles toggle blocks, callouts, child pages, columns, synced blocks, etc.
+    Fully recurses into child_page blocks to extract their content.
     """
     if depth > _MAX_BLOCK_DEPTH:
         return []
@@ -208,6 +209,12 @@ async def _extract_blocks_recursive(
                 page_title = content.get("title", "")
                 if page_title:
                     lines.append(f"\n## {page_title}\n")
+                # Recurse into the child page to get its full content
+                child_lines = await _extract_blocks_recursive(
+                    client, bid, headers, depth + 1
+                )
+                lines.extend(child_lines)
+                continue  # skip the generic recursion below
             elif btype == "child_database":
                 db_title = content.get("title", "")
                 if db_title:
@@ -223,6 +230,31 @@ async def _extract_blocks_recursive(
                     lines.append(f"[Image: {caption}]")
                 elif img_url:
                     lines.append(f"[Image: {img_url[:100]}]")
+            elif btype == "file":
+                caption = "".join(rt.get("plain_text", "") for rt in content.get("caption", []))
+                file_type = content.get("type", "")
+                file_url = ""
+                if file_type == "file":
+                    file_url = content.get("file", {}).get("url", "")
+                elif file_type == "external":
+                    file_url = content.get("external", {}).get("url", "")
+                fname = file_url.split("/")[-1].split("?")[0] if file_url else "file"
+                lines.append(f"[File: {caption or fname}]")
+            elif btype == "pdf":
+                caption = "".join(rt.get("plain_text", "") for rt in content.get("caption", []))
+                lines.append(f"[PDF: {caption or 'document'}]")
+            elif btype == "video":
+                video_type = content.get("type", "")
+                video_url = ""
+                if video_type == "external":
+                    video_url = content.get("external", {}).get("url", "")
+                elif video_type == "file":
+                    video_url = content.get("file", {}).get("url", "")
+                lines.append(f"[Video: {video_url[:100]}]" if video_url else "[Video]")
+            elif btype == "embed":
+                embed_url = content.get("url", "")
+                if embed_url:
+                    lines.append(f"[Embed: {embed_url[:100]}]")
             elif btype == "bookmark":
                 bm_url = content.get("url", "")
                 caption = "".join(rt.get("plain_text", "") for rt in content.get("caption", []))
@@ -273,8 +305,8 @@ async def _extract_blocks_recursive(
             if text.strip():
                 lines.append(text.strip())
 
-            # Recurse into children (toggles, callouts, columns, synced blocks, child pages)
-            if has_children and btype != "child_database":
+            # Recurse into children (toggles, callouts, columns, synced blocks)
+            if has_children and btype not in ("child_database", "child_page"):
                 child_lines = await _extract_blocks_recursive(
                     client, bid, headers, depth + 1
                 )
@@ -949,19 +981,31 @@ async def fetch_toc_row(
     else:
         logger.debug("ToC: unsupported content type '%s' for '%s'", content_type, display_name)
 
+    # ── Fetch row page body (ToC database entry page) ────────────────────
+    # Each ToC row is itself a Notion page — its body may contain toggles,
+    # child pages, files, tables, etc. that the linked URL doesn't cover.
+    row_id = row.get("id", "")
+    row_body_text = None
+    if row_id:
+        try:
+            row_body_text = await fetch_notion_page(
+                row_id.replace("-", ""), title=f"{display_name} (row body)"
+            )
+        except Exception as e:
+            logger.debug("ToC: row body fetch failed for '%s': %s", display_name, e)
+
     # ── Fetch extra URL (secondary source) ───────────────────────────────
     extra_text = None
     if extra_drive_id and extra_drive_id != drive_id:
         extra_text = await fetch_google_doc(extra_drive_id, title=f"{display_name} (extra)", **creds)
 
     # ── Combine results ──────────────────────────────────────────────────
-    if not text and not extra_text:
+    parts = [p for p in [text, row_body_text, extra_text] if p]
+    if not parts:
         logger.debug("ToC: no content for '%s' (%s)", display_name, content_type)
         return None
 
-    combined = text or ""
-    if extra_text:
-        combined = f"{combined}\n\n---\n\n{extra_text}" if combined else extra_text
+    combined = "\n\n---\n\n".join(parts)
 
     # ── Cache the result ─────────────────────────────────────────────────
     if source_id:
