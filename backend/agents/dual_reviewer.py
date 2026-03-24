@@ -186,6 +186,9 @@ REVIEW RULES:
 3. Evaluate whether each section addresses the evaluation criteria relevant to its scope
 4. Suggestions must be actionable within the section's constraints — if a word limit exists, don't suggest adding content that would exceed it
 5. Score each section relative to what it was ASKED to cover, not what you wish it covered
+6. For EVERY issue and suggestion, explain your REASONING: WHY this matters to the funder, WHY this weakens the application, and WHAT EVIDENCE from the web research or grant criteria supports your assessment
+7. Use web research findings to ground your feedback — cite specific insights about the funder's priorities, past winners, or domain context when making suggestions
+8. If the application format is form-based (short answers), evaluate density and impact of each answer, not length
 
 Review this application thoroughly. Be specific and constructive. {perspective_guidance}
 Use the original grant document, web research context, past outcome lessons, and benchmark examples (if provided) to verify claims, calibrate scores, and identify gaps.
@@ -196,19 +199,19 @@ Respond ONLY with valid JSON:
   "section_reviews": {{
     "<section_name>": {{
       "score": <int 1-10>,
-      "strengths": ["<specific strength>"],
-      "issues": ["<specific issue>"],
-      "suggestions": ["<actionable fix within word limit>"],
+      "strengths": ["<specific strength with reasoning>"],
+      "issues": ["<specific issue — REASON: why this matters to the funder>"],
+      "suggestions": ["<actionable fix — BECAUSE: reasoning based on funder criteria or research>"],
       "word_count": <int>,
       "word_limit": <int or null>,
       "within_scope": <bool — does this section stay within its stated scope?>
     }}
   }},
-  "top_issues": ["<most critical issue 1>", "<issue 2>", "<issue 3>"],
+  "top_issues": ["<most critical issue with reasoning>", "<issue 2>", "<issue 3>"],
   "strengths": ["<key strength 1>", "<strength 2>", "<strength 3>"],
   "verdict": "<one of: strong_submit | submit_with_revisions | major_revisions | reconsider>",
-  "summary": "<2-3 sentence assessment>",
-  "research_insights": ["<key finding from web research that informed scoring, if any>"]
+  "summary": "<2-3 sentence assessment explaining the reasoning behind the verdict>",
+  "research_insights": ["<key finding from web research that informed scoring — cite source>"]
 }}"""
 
 PERSPECTIVE_GUIDANCE = {
@@ -237,60 +240,85 @@ async def _web_research_for_review(
     """Use Tavily to research context that helps reviewers score more accurately.
 
     Searches for:
+    - Grant application format, word limits, requirements
     - Funder's recent priorities and past funded projects
     - Competing approaches / state of the art in the grant's domain
-    - Verification of key technical claims in the draft
+    - Past winners and what made them successful
 
-    Returns {"funder_context": [...], "scientific_context": [...], "claim_checks": [...]}.
+    Returns {"funder_context": [...], "scientific_context": [...], "claim_checks": [...],
+             "grant_format": [...]}.
     All values are short text snippets. Non-fatal: returns empty dicts on failure.
     """
     from backend.config.settings import get_settings
 
     s = get_settings()
     tavily_key = s.tavily_api_key
+    empty = {"funder_context": [], "scientific_context": [], "claim_checks": [], "grant_format": []}
     if not tavily_key:
         logger.info("Reviewer research skipped: no TAVILY_API_KEY configured")
-        return {"funder_context": [], "scientific_context": [], "claim_checks": []}
+        return empty
 
     try:
         from tavily import TavilyClient
     except ImportError:
         logger.warning("tavily-python not installed — reviewer research skipped")
-        return {"funder_context": [], "scientific_context": [], "claim_checks": []}
+        return empty
 
     client = TavilyClient(api_key=tavily_key)
     funder = grant.get("funder") or ""
     title = grant.get("title") or grant.get("grant_name") or ""
     themes = ", ".join(grant.get("themes_detected", []))
+    grant_url = grant.get("url") or grant.get("application_url") or ""
+    year = datetime.now().year
 
+    # Build targeted queries — more specific than generic searches
     queries = {
-        "funder_context": f"{funder} grant funding priorities recent awards {datetime.now().year}",
-        "scientific_context": f"{themes or title} state of the art methodology best practices",
-        "claim_checks": f"{funder} {title} evaluation criteria past winners",
+        "grant_format": (
+            f'"{title}" application form requirements word limit format {year}'
+            if title else f"{funder} grant application format requirements"
+        ),
+        "funder_context": (
+            f'"{funder}" grant winners funded projects {year} what they look for'
+            if funder else f"{title} past winners evaluation"
+        ),
+        "scientific_context": (
+            f"{themes} latest research advances methodology {year}"
+            if themes else f"{title} state of the art scientific approaches"
+        ),
+        "claim_checks": (
+            f'"{title}" past winners successful applications tips advice'
+            if title else f"{funder} grant successful proposal characteristics"
+        ),
     }
 
-    async def _search(query: str) -> List[str]:
+    async def _search(query: str, depth: str = "basic") -> List[str]:
         try:
             result = await asyncio.to_thread(
                 client.search,
                 query=query,
-                search_depth="basic",
+                search_depth=depth,
                 max_results=5,
             )
             snippets = []
             for r in result.get("results", []):
-                snippet = r.get("content", "")[:300]
+                snippet = r.get("content", "")[:400]
                 source = r.get("url", "")
+                title_r = r.get("title", "")
                 if snippet:
-                    snippets.append(f"{snippet} [source: {source}]")
+                    snippets.append(f"[{title_r}] {snippet} [source: {source}]")
             return snippets
         except Exception as e:
             logger.warning("Reviewer research query failed: %s — %s", query[:60], e)
             return []
 
-    results = {}
-    tasks = {key: _search(q) for key, q in queries.items()}
+    # Use advanced search for grant format (most important), basic for rest
+    tasks = {}
+    for key, q in queries.items():
+        depth = "advanced" if key == "grant_format" else "basic"
+        tasks[key] = _search(q, depth)
+
     gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    results = {}
     for key, res in zip(tasks.keys(), gathered):
         results[key] = res if isinstance(res, list) else []
 
@@ -302,17 +330,21 @@ async def _web_research_for_review(
 def _format_research_block(research: Dict[str, List[str]]) -> str:
     """Format research findings into a prompt block for the reviewer."""
     parts = []
-    if research.get("funder_context"):
-        parts.append("FUNDER INTELLIGENCE (from web research):")
-        for s in research["funder_context"][:3]:
+    if research.get("grant_format"):
+        parts.append("GRANT APPLICATION FORMAT (from web research — use to calibrate expectations):")
+        for s in research["grant_format"][:4]:
             parts.append(f"  - {s}")
-    if research.get("scientific_context"):
-        parts.append("DOMAIN CONTEXT (from web research):")
-        for s in research["scientific_context"][:3]:
+    if research.get("funder_context"):
+        parts.append("FUNDER INTELLIGENCE (what they fund and look for):")
+        for s in research["funder_context"][:4]:
             parts.append(f"  - {s}")
     if research.get("claim_checks"):
-        parts.append("COMPETITIVE LANDSCAPE (from web research):")
+        parts.append("PAST WINNERS & SUCCESS PATTERNS:")
         for s in research["claim_checks"][:3]:
+            parts.append(f"  - {s}")
+    if research.get("scientific_context"):
+        parts.append("DOMAIN CONTEXT (latest research & approaches):")
+        for s in research["scientific_context"][:3]:
             parts.append(f"  - {s}")
     if not parts:
         return ""
@@ -357,11 +389,16 @@ async def _run_single_review(
     eval_criteria = deep.get("evaluation_criteria") or grant.get("evaluation_criteria") or []
     criteria = ""
     if eval_criteria:
-        criteria = "\n".join(
-            f"- {c.get('criterion', '')}: {c.get('what_they_look_for', c.get('description', ''))} "
-            f"({c.get('weight', 'unweighted')})"
-            for c in eval_criteria
-        )
+        criteria_lines = []
+        for c in eval_criteria:
+            if isinstance(c, dict):
+                criteria_lines.append(
+                    f"- {c.get('criterion', '')}: {c.get('what_they_look_for', c.get('description', ''))} "
+                    f"({c.get('weight', 'unweighted')})"
+                )
+            else:
+                criteria_lines.append(f"- {c}")
+        criteria = "\n".join(criteria_lines)
     else:
         criteria = "No explicit criteria provided — evaluate based on standard grant review practices."
 
@@ -476,6 +513,10 @@ COHERENCE_PROMPT = """You are reviewing a COMPLETE grant application for cross-s
 GRANT: {grant_title}
 FUNDER: {funder}
 
+{section_structure_block}
+
+{research_block}
+
 COMPLETE DRAFT:
 {draft}
 
@@ -488,26 +529,35 @@ Review the application as a WHOLE (not section-by-section). Check for:
 5. UNNECESSARY REPETITION: Are the same points made in multiple sections without adding new value?
 6. MISSING THREADS: Are there important elements introduced in one section but never followed up? (e.g., partnerships mentioned in team section but absent from project plan)
 
+REASONING REQUIREMENT:
+For every issue you flag, explain WHY it matters to the funder and what a reviewer would think when reading this. Use web research findings to support your assessment where relevant.
+
+If this is a form-based application with short answers, evaluate coherence WITHIN the form format — short answers can still tell a coherent story.
+
 Respond ONLY with valid JSON:
 {{
   "coherence_score": <float 1-10>,
   "narrative_consistent": <bool>,
   "issues": [
-    {{"type": "<contradiction|budget_mismatch|unsupported_claim|repetition|missing_thread>", "sections_involved": ["<sec1>", "<sec2>"], "description": "<specific issue>", "fix": "<suggested fix>"}}
+    {{"type": "<contradiction|budget_mismatch|unsupported_claim|repetition|missing_thread>", "sections_involved": ["<sec1>", "<sec2>"], "description": "<specific issue — REASON: why the funder would flag this>", "fix": "<suggested fix>"}}
   ],
-  "overall_assessment": "<2-3 sentence assessment of application coherence>"
+  "overall_assessment": "<2-3 sentence assessment explaining reasoning behind the coherence score>"
 }}"""
 
 
 async def _run_coherence_review(
     grant: Dict,
     draft_text: str,
+    section_structure_block: str = "",
+    research_block: str = "",
 ) -> Dict:
     """Run holistic coherence review across all sections."""
     prompt = COHERENCE_PROMPT.format(
         grant_title=grant.get("title") or grant.get("grant_name") or "Untitled",
         funder=grant.get("funder") or "Unknown",
         draft=draft_text[:15000],
+        section_structure_block=section_structure_block,
+        research_block=research_block,
     )
 
     try:
@@ -803,7 +853,9 @@ async def run_dual_review(grant_id: str) -> Dict:
                            research=research, grant_raw_doc=grant_raw_doc,
                            outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
                            section_structure_block=section_structure_block),
-        _run_coherence_review(grant, draft_text),
+        _run_coherence_review(grant, draft_text,
+                              section_structure_block=section_structure_block,
+                              research_block=_format_research_block(research)),
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -1095,7 +1147,9 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
                            research=research, grant_raw_doc=grant_raw_doc,
                            outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
                            section_structure_block=section_structure_block),
-        _run_coherence_review(grant, draft_text),
+        _run_coherence_review(grant, draft_text,
+                              section_structure_block=section_structure_block,
+                              research_block=_format_research_block(research)),
     )
 
     now = datetime.now(timezone.utc).isoformat()
