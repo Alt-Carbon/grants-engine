@@ -193,9 +193,12 @@ def _build_grant_context(grant: dict) -> str:
     if ec:
         ec_lines = []
         for item in ec:
-            status = item.get("altcarbon_status", "?")
-            icon = {"met": "✅", "likely_met": "🟡", "verify": "❓", "not_met": "❌"}.get(status, "•")
-            ec_lines.append(f"  {icon} {item.get('criterion', '')} — {status} — {item.get('note', '')}")
+            if isinstance(item, dict):
+                status = item.get("altcarbon_status", "?")
+                icon = {"met": "✅", "likely_met": "🟡", "verify": "❓", "not_met": "❌"}.get(status, "•")
+                ec_lines.append(f"  {icon} {item.get('criterion', '')} — {status} — {item.get('note', '')}")
+            else:
+                ec_lines.append(f"  • {item}")
         parts.append("ELIGIBILITY CHECKLIST (AltCarbon fit):\n" + "\n".join(ec_lines))
 
     # Evaluation criteria
@@ -203,8 +206,11 @@ def _build_grant_context(grant: dict) -> str:
     if evc:
         evc_lines = []
         for item in evc:
-            w = f" ({item['weight']})" if item.get("weight") else ""
-            evc_lines.append(f"  • {item.get('criterion', '')}{w}: {item.get('what_they_look_for', '')}")
+            if isinstance(item, dict):
+                w = f" ({item['weight']})" if item.get("weight") else ""
+                evc_lines.append(f"  • {item.get('criterion', '')}{w}: {item.get('what_they_look_for', '')}")
+            else:
+                evc_lines.append(f"  • {item}")
         parts.append("EVALUATION CRITERIA (what reviewers look for):\n" + "\n".join(evc_lines))
 
     # Application sections
@@ -212,28 +218,34 @@ def _build_grant_context(grant: dict) -> str:
     if asec:
         asec_lines = []
         for item in asec:
-            lim = f" [{item['limit']}]" if item.get("limit") else ""
-            asec_lines.append(f"  • {item.get('section', '')}{lim}: {item.get('what_to_cover', '')}")
+            if isinstance(item, dict):
+                lim = f" [{item['limit']}]" if item.get("limit") else ""
+                asec_lines.append(f"  • {item.get('section', '')}{lim}: {item.get('what_to_cover', '')}")
+            else:
+                asec_lines.append(f"  • {item}")
         parts.append("APPLICATION SECTIONS (expected structure):\n" + "\n".join(asec_lines))
 
     # Funding terms
     ft = da.get("funding_terms") or {}
     if ft:
-        ft_lines = []
-        if ft.get("disbursement_schedule"):
-            ft_lines.append(f"  Disbursement: {ft['disbursement_schedule']}")
-        if ft.get("reporting_requirements"):
-            ft_lines.append(f"  Reporting: {ft['reporting_requirements']}")
-        if ft.get("ip_ownership"):
-            ft_lines.append(f"  IP ownership: {ft['ip_ownership']}")
-        for cost in ft.get("permitted_costs") or []:
-            ft_lines.append(f"  ✓ Permitted: {cost}")
-        for cost in ft.get("excluded_costs") or []:
-            ft_lines.append(f"  ✗ Excluded: {cost}")
-        if ft.get("audit_requirement"):
-            ft_lines.append(f"  Audit: {ft['audit_requirement']}")
-        if ft_lines:
-            parts.append("FUNDING TERMS:\n" + "\n".join(ft_lines))
+        if isinstance(ft, str):
+            parts.append(f"FUNDING TERMS:\n  {ft}")
+        elif isinstance(ft, dict):
+            ft_lines = []
+            if ft.get("disbursement_schedule"):
+                ft_lines.append(f"  Disbursement: {ft['disbursement_schedule']}")
+            if ft.get("reporting_requirements"):
+                ft_lines.append(f"  Reporting: {ft['reporting_requirements']}")
+            if ft.get("ip_ownership"):
+                ft_lines.append(f"  IP ownership: {ft['ip_ownership']}")
+            for cost in ft.get("permitted_costs") or []:
+                ft_lines.append(f"  ✓ Permitted: {cost}")
+            for cost in ft.get("excluded_costs") or []:
+                ft_lines.append(f"  ✗ Excluded: {cost}")
+            if ft.get("audit_requirement"):
+                ft_lines.append(f"  Audit: {ft['audit_requirement']}")
+            if ft_lines:
+                parts.append("FUNDING TERMS:\n" + "\n".join(ft_lines))
 
     # Deep analysis red flags (may differ from top-level)
     da_rf = da.get("red_flags") or []
