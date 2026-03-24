@@ -1970,15 +1970,28 @@ Respond ONLY with valid JSON."""
 
 
 async def _extract_and_store_facts(message: str, grant_id: str = ""):
-    """Extract company facts from user message and store in MongoDB."""
+    """Extract company facts from user message and store in MongoDB.
+
+    Two modes:
+      1. Explicit: message starts with /remember — always stores (high confidence forced)
+      2. Auto: scans every message for company facts (only stores high confidence)
+    """
     try:
         from backend.utils.llm import chat as llm_chat
         from backend.db.mongo import company_facts
         from datetime import datetime, timezone
         import json
 
+        # Check for explicit /remember command
+        is_explicit = message.strip().lower().startswith("/remember")
+        actual_message = message.strip()
+        if is_explicit:
+            actual_message = message.strip()[len("/remember"):].strip()
+            if not actual_message:
+                return
+
         raw = await llm_chat(
-            FACT_EXTRACTION_PROMPT.format(message=message),
+            FACT_EXTRACTION_PROMPT.format(message=actual_message),
             model="claude-haiku-4-5-20251001",
             max_tokens=300,
             temperature=0,
@@ -1987,30 +2000,34 @@ async def _extract_and_store_facts(message: str, grant_id: str = ""):
         # Strip markdown code fences if present
         clean = raw.strip()
         if clean.startswith("```"):
-            clean = clean.split("\n", 1)[-1]  # remove ```json line
-            clean = clean.rsplit("```", 1)[0]  # remove closing ```
+            clean = clean.split("\n", 1)[-1]
+            clean = clean.rsplit("```", 1)[0]
         data = json.loads(clean.strip())
         facts = data.get("facts", [])
         if not facts:
             return
 
         col = company_facts()
+        stored = 0
         for f in facts:
-            if f.get("confidence") != "high":
+            # Explicit /remember → store everything; auto → only high confidence
+            if not is_explicit and f.get("confidence") != "high":
                 continue
             await col.update_one(
                 {"fact": f["fact"]},
                 {"$set": {
                     "category": f.get("category", "other"),
                     "fact": f["fact"],
-                    "source_message": message[:500],
+                    "source_message": actual_message[:500],
                     "source_grant_id": grant_id,
+                    "explicit": is_explicit,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }},
                 upsert=True,
             )
-        if facts:
-            logger.info("Company facts extracted: %d from drafter chat", len([f for f in facts if f.get("confidence") == "high"]))
+            stored += 1
+        if stored:
+            logger.info("Company facts stored: %d (%s)", stored, "explicit /remember" if is_explicit else "auto-detected")
     except Exception as e:
         logger.debug("Fact extraction failed: %s", e)
 
@@ -2042,7 +2059,36 @@ async def drafter_chat(
     Takes the user's message (grant question, revision instructions, etc.)
     along with grant context, and returns an LLM-generated response.
     This bypasses LangGraph for a synchronous chat experience.
+
+    Special commands:
+      /remember <fact>  — stores a company fact for use across all grants
+      /facts            — lists all stored company facts
+      /forget <fact>    — removes a stored fact
     """
+    # ── Handle special commands ──────────────────────────────────────────
+    msg = body.message.strip()
+
+    if msg.lower().startswith("/remember"):
+        fact_text = msg[len("/remember"):].strip()
+        if not fact_text:
+            return {"revised_content": "Usage: `/remember <company fact>`\n\nExample: `/remember Our team has 52 members`", "section_name": body.section_name, "word_count": 0, "evidence_gaps": [], "agent_name": "system", "agent_theme": "", "sources_used": [], "agent_temperature": 0, "model": "system"}
+        await _extract_and_store_facts(msg, body.grant_id)
+        all_facts = await _load_company_facts()
+        return {"revised_content": f"**Remembered.** I'll use this across all future grants.\n\n**Current company facts:**\n{all_facts or '(none)'}", "section_name": body.section_name, "word_count": 0, "evidence_gaps": [], "agent_name": "system", "agent_theme": "", "sources_used": ["company_facts"], "agent_temperature": 0, "model": "system"}
+
+    if msg.lower() == "/facts":
+        all_facts = await _load_company_facts()
+        return {"revised_content": f"**Stored company facts:**\n{all_facts or '(none yet)'}\n\nUse `/remember <fact>` to add, `/forget <fact>` to remove.", "section_name": body.section_name, "word_count": 0, "evidence_gaps": [], "agent_name": "system", "agent_theme": "", "sources_used": ["company_facts"], "agent_temperature": 0, "model": "system"}
+
+    if msg.lower().startswith("/forget"):
+        forget_text = msg[len("/forget"):].strip()
+        if not forget_text:
+            return {"revised_content": "Usage: `/forget <fact to remove>`", "section_name": body.section_name, "word_count": 0, "evidence_gaps": [], "agent_name": "system", "agent_theme": "", "sources_used": [], "agent_temperature": 0, "model": "system"}
+        from backend.db.mongo import company_facts as cf_col
+        result = await cf_col().delete_many({"fact": {"$regex": forget_text, "$options": "i"}})
+        remaining = await _load_company_facts()
+        return {"revised_content": f"**Removed {result.deleted_count} fact(s).**\n\n**Remaining facts:**\n{remaining or '(none)'}", "section_name": body.section_name, "word_count": 0, "evidence_gaps": [], "agent_name": "system", "agent_theme": "", "sources_used": ["company_facts"], "agent_temperature": 0, "model": "system"}
+
     from backend.db.mongo import grants_scored
     from backend.utils.llm import chat as llm_chat, DRAFTER_DEFAULT, resolve_drafter_model
     from bson import ObjectId
@@ -2281,7 +2327,7 @@ Write a well-structured response in markdown format:"""
         word_count = len(content.split())
         evidence_gaps = re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", content)
 
-        # Extract company facts from user message in the background
+        # Extract company facts — explicit /remember command or auto-detect
         background_tasks.add_task(_extract_and_store_facts, body.message, body.grant_id)
 
         return {
