@@ -1440,62 +1440,85 @@ async def _score_grant(
 
         if not has_deadline or not has_funding:
             # Step 2: Fetch the grant page live and extract missing fields
+            # Primary: Exa (clean text extraction), Fallback: HTTP + HTML strip
             try:
                 grant_url = grant.get("url") or grant.get("source_url") or ""
                 if grant_url:
-                    import httpx
-                    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                        r = await client.get(grant_url, headers={"User-Agent": "Mozilla/5.0"})
-                        if r.status_code == 200:
-                            import re as _re
-                            page_text = _re.sub(r'<[^>]+>', ' ', r.text[:30000])
-                            page_text = _re.sub(r'\s+', ' ', page_text).strip()
+                    page_text = ""
 
-                            from backend.utils.llm import chat as _llm_chat
-                            enrich_prompt = (
-                                f"Extract from this grant page:\n{page_text[:6000]}\n\n"
-                                f"Return JSON: {{\"deadline\": \"YYYY-MM-DD or null\", "
-                                f"\"funding_amount\": \"text or null\", \"max_funding_usd\": number_or_null, "
-                                f"\"application_status\": \"open|closed|rolling|cohort_running|unknown\", "
-                                f"\"eligibility\": \"1-2 sentences or null\", "
-                                f"\"description\": \"2-3 sentences or null\"}}"
+                    # Try Exa first — returns clean extracted text
+                    from backend.config.settings import get_settings as _gs
+                    _exa_key = _gs().exa_api_key
+                    if _exa_key:
+                        try:
+                            from exa_py import Exa
+                            exa = Exa(api_key=_exa_key)
+                            exa_result = await asyncio.to_thread(
+                                exa.get_contents, grant_url, text={"max_characters": 30000}
                             )
-                            raw_enrich = await _llm_chat(enrich_prompt, model="claude-haiku-4-5-20251001", max_tokens=300, temperature=0)
-                            clean = raw_enrich.strip()
-                            if clean.startswith("```"):
-                                clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0]
-                            enriched = json.loads(clean.strip())
+                            if exa_result.results:
+                                page_text = (getattr(exa_result.results[0], "text", "") or "").strip()
+                                if page_text:
+                                    logger.debug("Enrichment: Exa fetched %d chars for %s", len(page_text), grant_url[:60])
+                        except Exception as _exa_err:
+                            logger.debug("Exa enrichment failed for %s: %s", grant_url[:60], _exa_err)
 
-                            # Apply enriched fields
-                            if enriched.get("deadline") and not has_deadline:
-                                grant["deadline"] = enriched["deadline"]
-                                has_deadline = True
-                            if enriched.get("max_funding_usd") and not has_funding:
-                                grant["max_funding_usd"] = enriched["max_funding_usd"]
-                                grant["amount"] = enriched.get("funding_amount", "")
-                                has_funding = True
-                            if enriched.get("eligibility"):
-                                grant["eligibility"] = enriched["eligibility"]
-                            if enriched.get("description"):
-                                grant["description"] = enriched["description"]
+                    # Fallback: plain HTTP
+                    if not page_text:
+                        import httpx
+                        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
+                            r = await _http.get(grant_url, headers={"User-Agent": "Mozilla/5.0"})
+                            if r.status_code == 200:
+                                import re as _re
+                                page_text = _re.sub(r'<[^>]+>', ' ', r.text[:30000])
+                                page_text = _re.sub(r'\s+', ' ', page_text).strip()
 
-                            # Detect closed/cohort applications
-                            app_status = enriched.get("application_status", "unknown")
-                            if app_status in ("closed", "cohort_running"):
-                                logger.info(
-                                    "Grant application %s: %s",
-                                    app_status,
-                                    (grant.get("grant_name") or "")[:60],
-                                )
-                                action = "auto_pass"
-                                scoring["red_flags"] = list(scoring.get("red_flags", []))
-                                scoring["red_flags"].append(
-                                    f"Application {app_status} — "
-                                    + ("cohort already selected and running" if app_status == "cohort_running" else "applications no longer accepted")
-                                )
+                    if page_text and len(page_text) > 100:
+                        from backend.utils.llm import chat as _llm_chat
+                        enrich_prompt = (
+                            f"Extract from this grant page:\n{page_text[:6000]}\n\n"
+                            f"Return JSON: {{\"deadline\": \"YYYY-MM-DD or null\", "
+                            f"\"funding_amount\": \"text or null\", \"max_funding_usd\": number_or_null, "
+                            f"\"application_status\": \"open|closed|rolling|cohort_running|unknown\", "
+                            f"\"eligibility\": \"1-2 sentences or null\", "
+                            f"\"description\": \"2-3 sentences or null\"}}"
+                        )
+                        raw_enrich = await _llm_chat(enrich_prompt, model="claude-haiku-4-5-20251001", max_tokens=300, temperature=0)
+                        clean = raw_enrich.strip()
+                        if clean.startswith("```"):
+                            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0]
+                        enriched = json.loads(clean.strip())
 
-                            logger.info("Enriched grant from page: deadline=%s, funding=%s, status=%s",
-                                       enriched.get("deadline"), enriched.get("max_funding_usd"), app_status)
+                        # Apply enriched fields
+                        if enriched.get("deadline") and not has_deadline:
+                            grant["deadline"] = enriched["deadline"]
+                            has_deadline = True
+                        if enriched.get("max_funding_usd") and not has_funding:
+                            grant["max_funding_usd"] = enriched["max_funding_usd"]
+                            grant["amount"] = enriched.get("funding_amount", "")
+                            has_funding = True
+                        if enriched.get("eligibility"):
+                            grant["eligibility"] = enriched["eligibility"]
+                        if enriched.get("description"):
+                            grant["description"] = enriched["description"]
+
+                        # Detect closed/cohort applications
+                        app_status = enriched.get("application_status", "unknown")
+                        if app_status in ("closed", "cohort_running"):
+                            logger.info(
+                                "Grant application %s: %s",
+                                app_status,
+                                (grant.get("grant_name") or "")[:60],
+                            )
+                            action = "auto_pass"
+                            scoring["red_flags"] = list(scoring.get("red_flags", []))
+                            scoring["red_flags"].append(
+                                f"Application {app_status} — "
+                                + ("cohort already selected and running" if app_status == "cohort_running" else "applications no longer accepted")
+                            )
+
+                        logger.info("Enriched grant from page: deadline=%s, funding=%s, status=%s",
+                                    enriched.get("deadline"), enriched.get("max_funding_usd"), app_status)
             except Exception as e:
                 logger.debug("Grant page enrichment failed: %s", e)
 
