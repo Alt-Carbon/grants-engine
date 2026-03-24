@@ -1259,18 +1259,20 @@ Review the application as a WHOLE (not section-by-section). Check for:
 6. MISSING THREADS: Are there important elements introduced in one section but never followed up? (e.g., partnerships mentioned in team section but absent from project plan)
 
 REASONING REQUIREMENT:
-For every issue you flag, explain WHY it matters to the funder and what a reviewer would think when reading this. Use web research findings to support your assessment where relevant.
+For every issue you flag, briefly explain WHY it matters to the funder.
 
-If this is a form-based application with short answers, evaluate coherence WITHIN the form format — short answers can still tell a coherent story.
+If this is a form-based application with short answers, evaluate coherence WITHIN the form format.
+
+CRITICAL OUTPUT CONSTRAINT: Keep response under 4000 characters. Max 6 issues. Each description max 2 sentences.
 
 Respond ONLY with valid JSON:
 {{
   "coherence_score": <float 1-10>,
   "narrative_consistent": <bool>,
   "issues": [
-    {{"type": "<contradiction|budget_mismatch|unsupported_claim|repetition|missing_thread>", "sections_involved": ["<sec1>", "<sec2>"], "description": "<specific issue — REASON: why the funder would flag this>", "fix": "<suggested fix>"}}
+    {{"type": "<contradiction|budget_mismatch|unsupported_claim|repetition|missing_thread>", "sections_involved": ["<sec1>", "<sec2>"], "description": "<2 sentence issue + reason>", "fix": "<1 sentence fix>"}}
   ],
-  "overall_assessment": "<2-3 sentence assessment explaining reasoning behind the coherence score>"
+  "overall_assessment": "<2-3 sentence assessment>"
 }}"""
 
 
@@ -1290,16 +1292,29 @@ async def _run_coherence_review(
     )
 
     try:
-        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=3000, temperature=0.2)
+        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=6000, temperature=0.2)
         result = _parse_json_response(raw)
     except json.JSONDecodeError as e:
-        logger.error("Coherence review JSON parse failed: %s", e)
-        result = {
-            "coherence_score": 0,
-            "narrative_consistent": True,
-            "issues": [{"type": "error", "sections_involved": [], "description": f"Parse error: {e}", "fix": "Retry review"}],
-            "overall_assessment": "Coherence review could not be completed.",
-        }
+        logger.warning("Coherence review JSON parse failed, retrying condensed: %s", str(e)[:100])
+        try:
+            retry_prompt = (
+                f"Review this grant draft for coherence. Be VERY concise — max 4 issues, 1 sentence each.\n\n"
+                f"GRANT: {grant.get('title') or grant.get('grant_name') or '?'}\n"
+                f"DRAFT:\n{draft_text[:6000]}\n\n"
+                f"JSON: {{\"coherence_score\": <1-10>, \"narrative_consistent\": <bool>, "
+                f"\"issues\": [{{\"type\": \"...\", \"sections_involved\": [...], \"description\": \"...\", \"fix\": \"...\"}}], "
+                f"\"overall_assessment\": \"...\"}}"
+            )
+            raw2 = await chat(retry_prompt, model=ANALYST_HEAVY, max_tokens=3000, temperature=0.2)
+            result = _parse_json_response(raw2)
+        except Exception as e2:
+            logger.error("Coherence retry also failed: %s", e2)
+            result = {
+                "coherence_score": 0,
+                "narrative_consistent": True,
+                "issues": [{"type": "error", "sections_involved": [], "description": f"Parse error: {e}", "fix": "Retry review"}],
+                "overall_assessment": "Coherence review could not be completed.",
+            }
     except Exception as e:
         logger.error("Coherence review LLM call failed: %s", e)
         result = {
