@@ -4506,10 +4506,11 @@ async def admin_notion_backfill(
 @app.post("/grants/manual")
 async def add_manual_grant(
     body: ManualGrantRequest,
+    background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
 ):
-    """Save a manually entered grant URL — fetches content via Jina, detects themes,
-    saves to grants_raw as an unprocessed entry ready for the analyst."""
+    """Save a manually entered grant URL — fetches content, extracts fields via LLM,
+    saves to grants_raw, and auto-triggers analyst scoring in background."""
     import hashlib
     import re
     from urllib.parse import urlparse
@@ -4601,31 +4602,124 @@ async def add_manual_grant(
         except Exception:
             funder = "Unknown"
 
+    # LLM extraction — pull structured fields from raw content
+    extracted = {}
+    try:
+        from backend.utils.llm import chat as llm_chat
+
+        extract_prompt = f"""Extract grant details from this page content. Return JSON only.
+
+URL: {url}
+Content (first 8000 chars):
+{raw_content[:8000]}
+
+Return:
+{{
+  "grant_name": "<full grant name>",
+  "funder": "<organization offering the grant>",
+  "deadline": "<YYYY-MM-DD or null>",
+  "funding_amount": "<e.g. $500K - $3M or null>",
+  "max_funding_usd": <number or null>,
+  "currency": "<USD/EUR/INR/etc>",
+  "eligibility": "<who can apply — 1-2 sentences>",
+  "geography": "<eligible countries/regions>",
+  "grant_type": "<e.g. Challenge Grant, Research Grant, Accelerator>",
+  "description": "<2-3 sentence summary of what the grant funds>",
+  "application_url": "<direct link to apply, or null>",
+  "focus_areas": ["<area 1>", "<area 2>"]
+}}"""
+
+        raw_llm = await llm_chat(extract_prompt, model="claude-haiku-4-5-20251001", max_tokens=500, temperature=0)
+        clean = raw_llm.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0]
+        import json as _json
+        extracted = _json.loads(clean.strip())
+        logger.info("Manual grant: LLM extracted %d fields for %s", len(extracted), url[:60])
+    except Exception as e:
+        logger.warning("Manual grant: LLM extraction failed for %s: %s", url[:60], e)
+
+    # Merge extracted fields with overrides (user overrides win)
+    final_title = (body.title_override or "").strip() or extracted.get("grant_name") or title
+    final_funder = (body.funder_override or "").strip() or extracted.get("funder") or funder
+    final_deadline = extracted.get("deadline")
+    final_amount = extracted.get("funding_amount")
+    final_max_usd = extracted.get("max_funding_usd")
+    final_currency = extracted.get("currency", "USD")
+    final_eligibility = extracted.get("eligibility", "")
+    final_geography = extracted.get("geography", "")
+    final_description = extracted.get("description", "")
+    final_grant_type = extracted.get("grant_type", "")
+    final_app_url = extracted.get("application_url") or url
+    final_focus_areas = extracted.get("focus_areas", [])
+
+    # Merge LLM-detected themes with keyword themes
+    if final_focus_areas:
+        text_fa = " ".join(final_focus_areas).lower()
+        if any(k in text_fa for k in ["climate", "carbon", "cdr", "emission"]) and "climatetech" not in themes:
+            themes.append("climatetech")
+        if any(k in text_fa for k in ["ai", "machine learning", "data science"]) and "ai_for_sciences" not in themes:
+            themes.append("ai_for_sciences")
+
     doc = {
-        "title": title,
+        "title": final_title,
+        "grant_name": final_title,
         "url": url,
         "url_hash": url_hash,
-        "funder": funder,
+        "funder": final_funder,
         "raw_content": raw_content,
+        "full_content": raw_content[:30000],
+        "description": final_description,
+        "eligibility": final_eligibility,
+        "eligibility_raw": final_eligibility,
+        "geography": final_geography,
+        "grant_type": final_grant_type,
+        "application_url": final_app_url,
         "themes_detected": themes,
+        "themes_text": ", ".join(themes),
         "source": "manual",
-        "deadline": None,
-        "max_funding": None,
-        "currency": "USD",
-        "eligibility_raw": "",
+        "deadline": final_deadline,
+        "amount": final_amount,
+        "max_funding": final_amount,
+        "max_funding_usd": final_max_usd,
+        "currency": final_currency,
+        "focus_areas": final_focus_areas,
         "processed": False,
         "notes": body.notes or "",
         "scraped_at": datetime.now(timezone.utc).isoformat(),
     }
-    await db["grants_raw"].insert_one(doc)
+    result = await db["grants_raw"].insert_one(doc)
+    raw_id = str(result.inserted_id)
+
+    # Auto-run analyst on this grant in background
+    async def _auto_score():
+        try:
+            from backend.agents.analyst import AnalystAgent
+            agent = AnalystAgent()
+            grant_doc = await db["grants_raw"].find_one({"_id": result.inserted_id})
+            if grant_doc:
+                # Convert ObjectId to string for JSON compatibility
+                grant_doc["_id"] = str(grant_doc["_id"])
+                scored = await agent.run([grant_doc])
+                logger.info("Manual grant auto-scored: %s (%d results)", final_title[:60], len(scored))
+        except Exception as e:
+            logger.warning("Manual grant auto-score failed: %s", e)
+
+    background_tasks.add_task(_auto_score)
 
     return {
         "success": True,
-        "title": title,
-        "funder": funder,
+        "title": final_title,
+        "funder": final_funder,
         "themes": themes,
+        "deadline": final_deadline,
+        "funding": final_amount,
+        "eligibility": final_eligibility,
+        "geography": final_geography,
+        "description": final_description,
         "chars_fetched": len(raw_content),
-        "message": f"Saved '{title[:70]}' · {len(raw_content):,} chars · themes: {', '.join(themes)}",
+        "raw_id": raw_id,
+        "message": f"Saved '{final_title[:70]}' · {len(raw_content):,} chars · themes: {', '.join(themes)}" + (f" · deadline: {final_deadline}" if final_deadline else "") + (f" · funding: {final_amount}" if final_amount else ""),
     }
 
 
