@@ -81,18 +81,6 @@ const WRITING_STYLES = [
     textColor: "text-purple-900",
     iconColor: "text-purple-600",
   },
-  {
-    value: "startup-founder",
-    label: "Startup Founder",
-    icon: Rocket,
-    description:
-      "Operational honesty — lead with deployment scale, frame problems as bottlenecks, quantify the unlock, land on ecosystem impact. Strategy team approved structure for corporate grants.",
-    borderColor: "border-amber-600",
-    bgColor: "bg-amber-50",
-    ringColor: "ring-amber-200",
-    textColor: "text-amber-900",
-    iconColor: "text-amber-600",
-  },
 ];
 
 // ---------------------------------------------------------------------------
