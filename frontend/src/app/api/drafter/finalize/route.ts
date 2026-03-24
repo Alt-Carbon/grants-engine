@@ -14,7 +14,13 @@ export async function POST(req: Request) {
       body: JSON.stringify(body),
       cache: "no-store",
     });
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: `FastAPI /drafter/finalize failed (${res.status}): ${text.slice(0, 200)}` };
+    }
     return Response.json(data, { status: res.status });
   } catch (e) {
     return Response.json(
