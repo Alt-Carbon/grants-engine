@@ -2388,11 +2388,57 @@ async def drafter_chat_stream(
       event: metadata data: {"word_count": N, "sources_used": [...], ...}
       event: done     data: {}
       event: error    data: {"message": "..."}
+
+    Also handles slash commands: /remember, /facts, /forget
     """
     from starlette.responses import StreamingResponse
     from backend.db.mongo import grants_scored, agent_config as agent_config_col
     from backend.utils.llm import chat_stream, DRAFTER_DEFAULT, resolve_drafter_model
     from bson import ObjectId
+
+    # ── Handle slash commands via quick SSE response ─────────────────────
+    msg = body.message.strip()
+    if msg.lower().startswith("/remember") or msg.lower() == "/facts" or msg.lower().startswith("/forget"):
+
+        async def command_stream():
+            response_text = ""
+            if msg.lower().startswith("/remember"):
+                fact_text = msg[len("/remember"):].strip()
+                if not fact_text:
+                    response_text = "Usage: `/remember <company fact>`\n\nExample: `/remember Our team has 52 members`"
+                else:
+                    yield _sse("status", {"step": "Remembering fact...", "detail": ""})
+                    await _extract_and_store_facts(msg, body.grant_id)
+                    all_facts = await _load_company_facts()
+                    response_text = f"**Remembered.** I'll use this across all future grants.\n\n**Current company facts:**\n{all_facts or '(none)'}"
+
+            elif msg.lower() == "/facts":
+                all_facts = await _load_company_facts()
+                response_text = f"**Stored company facts:**\n{all_facts or '(none yet)'}\n\nUse `/remember <fact>` to add, `/forget <fact>` to remove."
+
+            elif msg.lower().startswith("/forget"):
+                forget_text = msg[len("/forget"):].strip()
+                if not forget_text:
+                    response_text = "Usage: `/forget <fact to remove>`"
+                else:
+                    from backend.db.mongo import company_facts as cf_col
+                    result = await cf_col().delete_many({"fact": {"$regex": forget_text, "$options": "i"}})
+                    remaining = await _load_company_facts()
+                    response_text = f"**Removed {result.deleted_count} fact(s).**\n\n**Remaining facts:**\n{remaining or '(none)'}"
+
+            yield _sse("token", {"content": response_text})
+            yield _sse("metadata", {
+                "word_count": len(response_text.split()),
+                "section_name": body.section_name,
+                "agent_name": "system",
+                "agent_theme": "",
+                "sources_used": ["company_facts"],
+                "agent_temperature": 0,
+                "model": "system",
+            })
+            yield _sse("done", {})
+
+        return StreamingResponse(command_stream(), media_type="text/event-stream")
 
     # Resolve user-selected model
     drafter_model = resolve_drafter_model(body.model) if body.model else DRAFTER_DEFAULT
