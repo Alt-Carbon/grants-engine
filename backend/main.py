@@ -1943,9 +1943,98 @@ async def resume_section_review(
     return {"status": "section_review_resumed", "thread_id": body.thread_id}
 
 
+# ---------------------------------------------------------------------------
+# Company Fact Memory — persists corrections across all grants
+# ---------------------------------------------------------------------------
+
+FACT_EXTRACTION_PROMPT = """Analyze this user message from a grant drafting session. Does it contain factual corrections or updates about the company (Alt Carbon)?
+
+Examples of company facts:
+- Team size, member names, roles
+- Office addresses, lab locations
+- Revenue, funding amounts, metrics
+- Technology specs, deployment numbers
+- Partnerships, buyers, clients
+- Founding date, registration details
+
+User message:
+"{message}"
+
+If the message contains one or more company facts, respond with JSON:
+{{"facts": [{{"category": "team|location|metrics|technology|partners|legal|other", "fact": "concise fact statement", "confidence": "high|medium"}}]}}
+
+If no company facts are present (e.g. it's just a drafting instruction or question), respond with:
+{{"facts": []}}
+
+Respond ONLY with valid JSON."""
+
+
+async def _extract_and_store_facts(message: str, grant_id: str = ""):
+    """Extract company facts from user message and store in MongoDB."""
+    try:
+        from backend.utils.llm import chat as llm_chat
+        from backend.db.mongo import company_facts
+        from datetime import datetime, timezone
+        import json
+
+        raw = await llm_chat(
+            FACT_EXTRACTION_PROMPT.format(message=message),
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            temperature=0,
+        )
+
+        # Strip markdown code fences if present
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[-1]  # remove ```json line
+            clean = clean.rsplit("```", 1)[0]  # remove closing ```
+        data = json.loads(clean.strip())
+        facts = data.get("facts", [])
+        if not facts:
+            return
+
+        col = company_facts()
+        for f in facts:
+            if f.get("confidence") != "high":
+                continue
+            await col.update_one(
+                {"fact": f["fact"]},
+                {"$set": {
+                    "category": f.get("category", "other"),
+                    "fact": f["fact"],
+                    "source_message": message[:500],
+                    "source_grant_id": grant_id,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }},
+                upsert=True,
+            )
+        if facts:
+            logger.info("Company facts extracted: %d from drafter chat", len([f for f in facts if f.get("confidence") == "high"]))
+    except Exception as e:
+        logger.debug("Fact extraction failed: %s", e)
+
+
+async def _load_company_facts() -> str:
+    """Load all stored company facts as a text block for injection."""
+    try:
+        from backend.db.mongo import company_facts
+        col = company_facts()
+        facts = await col.find({}).sort("updated_at", -1).to_list(length=50)
+        if not facts:
+            return ""
+        lines = []
+        for f in facts:
+            lines.append(f"- [{f.get('category', 'other')}] {f.get('fact', '')}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 @app.post("/drafter/chat")
 async def drafter_chat(
     body: DrafterChatRequest,
+    background_tasks: BackgroundTasks,
     _: None = Depends(verify_internal),
 ):
     """Direct chat endpoint for the Drafter UI.
@@ -2095,8 +2184,13 @@ async def drafter_chat(
     except Exception:
         pass
 
+    # Load persisted company facts (corrections from previous sessions)
+    company_facts_text = await _load_company_facts()
+
     # Combine context in priority order
     context_parts = []
+    if company_facts_text:
+        context_parts.append(f"[VERIFIED COMPANY FACTS — always prefer these over other sources]\n{company_facts_text}")
     if static_profile:
         context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:6000]}")
     if chunks_text:
@@ -2187,6 +2281,9 @@ Write a well-structured response in markdown format:"""
         word_count = len(content.split())
         evidence_gaps = re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", content)
 
+        # Extract company facts from user message in the background
+        background_tasks.add_task(_extract_and_store_facts, body.message, body.grant_id)
+
         return {
             "revised_content": content,
             "word_count": word_count,
@@ -2201,6 +2298,31 @@ Write a well-structured response in markdown format:"""
     except Exception as e:
         logger.error("Drafter chat failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Company Facts — API endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/company-facts")
+async def list_company_facts(_: None = Depends(verify_internal)):
+    """List all stored company facts."""
+    from backend.db.mongo import company_facts
+    facts = await company_facts().find({}).sort("updated_at", -1).to_list(length=100)
+    for f in facts:
+        f["_id"] = str(f["_id"])
+    return {"facts": facts, "total": len(facts)}
+
+
+@app.delete("/company-facts/{fact_id}")
+async def delete_company_fact(fact_id: str, _: None = Depends(verify_internal)):
+    """Delete a stored company fact."""
+    from backend.db.mongo import company_facts
+    from bson import ObjectId
+    result = await company_facts().delete_one({"_id": ObjectId(fact_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Fact not found")
+    return {"status": "deleted"}
 
 
 # ---------------------------------------------------------------------------
@@ -2401,8 +2523,13 @@ async def drafter_chat_stream(
 
             yield _sse("status", {"step": "Context ready", "detail": f"{len(sources_used)} sources loaded"})
 
+            # Load persisted company facts
+            company_facts_text = await _load_company_facts()
+
             # Combine context
             context_parts = []
+            if company_facts_text:
+                context_parts.append(f"[VERIFIED COMPANY FACTS — always prefer these over other sources]\n{company_facts_text}")
             if static_profile:
                 context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:6000]}")
             if chunks_text:
@@ -2574,6 +2701,9 @@ Write a well-structured response in markdown format:"""
             })
 
             yield _sse("done", {})
+
+            # Extract company facts from user message (fire-and-forget)
+            asyncio.ensure_future(_extract_and_store_facts(body.message, body.grant_id))
 
         except Exception as e:
             logger.error("Drafter stream failed: %s", e, exc_info=True)
