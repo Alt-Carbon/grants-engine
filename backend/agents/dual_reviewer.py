@@ -1139,11 +1139,29 @@ async def _run_single_review(
     )
 
     try:
-        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=4096, temperature=temperature)
+        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=8192, temperature=temperature)
         review = _parse_json_response(raw)
     except json.JSONDecodeError as e:
-        logger.error("Review JSON parse failed (%s): %s", perspective, e)
-        review = _fallback_review(perspective, f"JSON parse error: {e}")
+        logger.warning("Review JSON parse failed (%s), retrying with shorter prompt: %s", perspective, str(e)[:100])
+        # Retry: ask for a condensed review to fit within token limits
+        retry_prompt = (
+            f"Your previous review was cut off due to length. Please provide a CONDENSED review.\n\n"
+            f"GRANT: {grant.get('title') or grant.get('grant_name') or 'Untitled'}\n"
+            f"FUNDER: {grant.get('funder') or 'Unknown'}\n\n"
+            f"{section_structure_block}\n\n"
+            f"DRAFT:\n{draft_text[:8000]}\n\n"
+            f"Respond with valid JSON. Keep each field concise (1-2 sentences per issue/suggestion):\n"
+            f'{{"overall_score": <1-10>, "section_reviews": {{"<section>": {{"score": <1-10>, '
+            f'"strengths": ["..."], "issues": ["..."], "suggestions": ["..."]}}}}, '
+            f'"top_issues": ["..."], "strengths": ["..."], "verdict": "<strong_submit|submit_with_revisions|major_revisions>", '
+            f'"summary": "...", "research_insights": ["..."]}}'
+        )
+        try:
+            raw2 = await chat(retry_prompt, model=ANALYST_HEAVY, max_tokens=6000, temperature=temperature)
+            review = _parse_json_response(raw2)
+        except Exception as e2:
+            logger.error("Review retry also failed (%s): %s", perspective, e2)
+            review = _fallback_review(perspective, f"JSON parse error after retry: {e}")
     except Exception as e:
         logger.error("Review LLM call failed (%s): %s", perspective, e)
         review = _fallback_review(perspective, str(e))
