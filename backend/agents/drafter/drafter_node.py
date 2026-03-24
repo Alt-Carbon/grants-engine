@@ -36,9 +36,10 @@ async def _generate_outline(
     sections: List[Dict],
     company_context: str,
 ) -> str:
-    """Generate a narrative outline that ties all sections together.
+    """Generate a strategic outline that ties all sections into a coherent narrative.
 
-    This outline is passed to each section writer so sections tell a coherent story.
+    This outline is passed to each section writer so sections tell a coherent story
+    with explicit transitions, argument flow, and evidence allocation.
     """
     from backend.agents.drafter.theme_profiles import get_theme_profile
     from backend.utils.llm import chat, DRAFTER_DEFAULT
@@ -46,11 +47,30 @@ async def _generate_outline(
     profile = get_theme_profile(theme_key)
 
     section_list = "\n".join(
-        f"  {i+1}. {s.get('name', f'Section {i+1}')}: {s.get('description', '')}"
+        f"  {i+1}. {s.get('name', f'Section {i+1}')} ({s.get('word_limit', 500)} words): {s.get('description', '')}"
         for i, s in enumerate(sections)
     )
 
-    prompt = f"""You are planning a grant application for AltCarbon ({profile.get('display_name', 'Climate Tech')}).
+    # Extract evaluation criteria for strategic mapping
+    eval_criteria = (
+        (grant.get("grant_requirements") or {}).get("evaluation_criteria")
+        or grant.get("evaluation_criteria")
+        or (grant.get("deep_analysis") or {}).get("evaluation_criteria")
+        or []
+    )
+    criteria_block = ""
+    if eval_criteria:
+        criteria_block = "EVALUATION CRITERIA (the funder will score on these):\n" + "\n".join(
+            f"  - {c.get('criterion', '')}: {c.get('what_they_look_for', c.get('description', ''))} "
+            f"(weight: {c.get('weight', 'unspecified')})"
+            for c in eval_criteria
+        )
+
+    # Extract strategic angle if available
+    strategic_angle = (grant.get("deep_analysis") or {}).get("strategic_angle", "")
+    strategic_block = f"\nSTRATEGIC ANGLE (from grant analysis):\n{strategic_angle}" if strategic_angle else ""
+
+    prompt = f"""You are a grant strategist planning a winning application for AltCarbon ({profile.get('display_name', 'Climate Tech')}).
 
 GRANT: {grant.get('title', 'Unknown')}
 FUNDER: {grant.get('funder', 'Unknown')}
@@ -61,19 +81,41 @@ SECTIONS TO WRITE:
 COMPANY STRENGTHS:
 {chr(10).join('- ' + s for s in profile.get('strengths', []))}
 
-COMPANY CONTEXT (key knowledge):
-{company_context[:3000]}
+{criteria_block}
+{strategic_block}
 
-Generate a brief NARRATIVE OUTLINE (150-200 words) that:
-1. Identifies the core narrative thread connecting all sections
-2. Lists 3-5 key claims/arguments to weave through the application
-3. Notes which AltCarbon strengths to emphasize in which sections
-4. Identifies the "so what" — why should the funder care?
+COMPANY CONTEXT (verified facts and capabilities):
+{company_context[:6000]}
 
-Keep it concise — this will be provided as context to each section writer."""
+Generate a STRATEGIC OUTLINE (300-400 words) with this exact structure:
+
+## CORE NARRATIVE
+One sentence: what is AltCarbon proposing, why does it matter to THIS funder, and what makes it credible?
+
+## ARGUMENT FLOW
+For each section, specify:
+- **[Section Name]**: Opening claim → Key evidence to cite (specific numbers/facts from company context) → Closing hook that transitions to next section
+(Each section entry should be 2-3 sentences)
+
+## KEY CLAIMS (weave these through multiple sections)
+5-7 quantified claims that MUST appear, with the specific evidence source:
+- Claim: "..." → Evidence: "..." → Use in: Section X, Section Y
+
+## EVIDENCE ALLOCATION
+Map the strongest evidence to sections where it has maximum scoring impact:
+- [Evidence item] → [Section] (addresses criterion: ...)
+
+## FUNDER ALIGNMENT
+2-3 specific ways to mirror this funder's language, priorities, and scoring criteria.
+
+Rules:
+- Every claim must have a specific number, date, or verifiable fact
+- Every section must explicitly connect to at least one evaluation criterion
+- Transitions between sections must be logical, not generic ("Furthermore...")
+- Allocate evidence strategically — don't repeat the same fact in every section"""
 
     try:
-        outline = await chat(prompt, model=DRAFTER_DEFAULT, max_tokens=512)
+        outline = await chat(prompt, model=DRAFTER_DEFAULT, max_tokens=1024)
         return outline.strip()
     except Exception as e:
         logger.warning("Outline generation failed: %s", e)
@@ -521,6 +563,31 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         grant_theme, section_name, grant.get("title", ""), grant_themes, company_context,
     )
 
+    # ── Load previous reviewer feedback (if redrafting after review) ────
+    reviewer_feedback_block = ""
+    try:
+        from backend.db.mongo import draft_reviews
+        reviews_cursor = draft_reviews().find({"grant_id": str(grant_id)})
+        feedback_parts = []
+        async for rev in reviews_cursor:
+            perspective = rev.get("perspective", "")
+            for sec_name, sec_review in (rev.get("section_reviews") or {}).items():
+                if sec_name.lower() == section_name.lower() or section_name.lower() in sec_name.lower():
+                    suggestions = sec_review.get("suggestions", [])
+                    weaknesses = sec_review.get("weaknesses", [])
+                    if suggestions or weaknesses:
+                        parts = []
+                        if weaknesses:
+                            parts.append("Weaknesses: " + "; ".join(weaknesses[:3]))
+                        if suggestions:
+                            parts.append("Suggestions: " + "; ".join(suggestions[:3]))
+                        feedback_parts.append(f"[{perspective.upper()} REVIEWER] {' | '.join(parts)}")
+        if feedback_parts:
+            reviewer_feedback_block = "PREVIOUS REVIEWER FEEDBACK:\n" + "\n".join(feedback_parts)
+            logger.info("Drafter: loaded reviewer feedback for section '%s' (%d chars)", section_name, len(reviewer_feedback_block))
+    except Exception:
+        logger.debug("Reviewer feedback loading skipped", exc_info=True)
+
     # ── Preference learning: load user preferences + approved examples ────
     user_preferences = ""
     approved_examples = ""
@@ -593,6 +660,22 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
                 section_criteria = map_val
                 break
 
+    # Build prior sections summary for cross-section coherence
+    prior_sections_summary = ""
+    if approved_sections:
+        summary_parts = []
+        for sec_name, sec_data in approved_sections.items():
+            content = sec_data.get("content", "")
+            # Extract first 2 sentences + key claims (bold text) for a compact summary
+            sentences = [s.strip() for s in content.split(".") if s.strip()][:3]
+            summary = ". ".join(sentences) + "." if sentences else ""
+            wc = sec_data.get("word_count", 0)
+            summary_parts.append(f"**{sec_name}** ({wc} words): {summary[:300]}")
+        prior_sections_summary = "\n".join(summary_parts)
+        if prior_sections_summary:
+            logger.info("Drafter: passing %d prior sections as context (%d chars)",
+                         len(approved_sections), len(prior_sections_summary))
+
     result = await write_section(
         section=section,
         section_num=current_idx + 1,
@@ -605,7 +688,7 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         draft_outline=draft_outline,
         writing_style=drafter_cfg.get("writing_style", "professional"),
         custom_instructions=drafter_cfg.get("custom_instructions", ""),
-        temperature=theme_settings.get("temperature") or drafter_cfg.get("temperature"),
+        temperature=theme_settings.get("temperature") if theme_settings.get("temperature") is not None else drafter_cfg.get("temperature"),
         tone_override=theme_settings.get("tone", ""),
         voice_override=theme_settings.get("voice", ""),
         strengths_override=theme_settings.get("strengths") or None,
@@ -618,6 +701,10 @@ async def _drafter_node_inner(state: GrantState) -> Dict:
         # Preference learning
         user_preferences=user_preferences,
         approved_examples=approved_examples,
+        # Reviewer feedback for redraft context
+        reviewer_feedback=reviewer_feedback_block,
+        # Cross-section coherence
+        prior_sections_summary=prior_sections_summary,
     )
 
     # ── Notion Mission Control sync ──────────────────────────────────────────

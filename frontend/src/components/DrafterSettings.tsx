@@ -74,7 +74,7 @@ const WRITING_STYLES = [
     label: "Scientific / Academic",
     icon: FlaskConical,
     description:
-      "Academic grant style — rigorous, precise, evidence-driven. Finding → Evidence → Implication → Justification structure. Trained on SERB, ANRF, Cambridge proposals.",
+      "Academic grant style — rigorous, precise, evidence-driven. Finding → Evidence → Implication → Justification paragraph structure. Trained on SERB, ANRF, Cambridge proposals.",
     borderColor: "border-purple-600",
     bgColor: "bg-purple-50",
     ringColor: "ring-purple-200",
@@ -500,7 +500,10 @@ export function DrafterSettings({
       {/* Backdrop */}
       <div
         className="absolute inset-0 z-30 bg-black/10 backdrop-blur-[1px]"
-        onClick={onClose}
+        onClick={() => {
+          if (dirty && !window.confirm("You have unsaved changes. Discard them?")) return;
+          onClose();
+        }}
       />
       {/* Panel — wider to accommodate rich settings */}
       <div className="absolute right-0 top-0 bottom-0 z-40 flex w-[380px] flex-col border-l border-gray-200 bg-white shadow-xl">
@@ -513,7 +516,10 @@ export function DrafterSettings({
             </span>
           </div>
           <button
-            onClick={onClose}
+            onClick={() => {
+              if (dirty && !window.confirm("You have unsaved changes. Discard them?")) return;
+              onClose();
+            }}
             className="flex h-6 w-6 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
           >
             <X className="h-4 w-4" />

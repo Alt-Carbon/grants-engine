@@ -1913,9 +1913,7 @@ async def resume_section_review(
             config = {"configurable": {"thread_id": body.thread_id}}
             update: dict = {"section_review_decision": body.action}
             if body.edited_content:
-                # Strip source attribution lines before saving
-                import re as _re
-                clean = _re.sub(r"\n---\n\*{0,2}Sources\*{0,2}:?[^\n]*$", "", body.edited_content, flags=_re.IGNORECASE).rstrip()
+                clean = _strip_sources(body.edited_content)
                 update["section_edited_content"] = clean
             update["add_to_document"] = body.add_to_document
             if body.instructions:
@@ -2403,16 +2401,57 @@ async def drafter_chat_stream(
                 context_parts.append(f"[WEB SEARCH — latest information from the internet]\n{web_results[:6000]}")
             company_context = "\n\n".join(context_parts)
 
-            # Build chat history
+            # Build chat history — current section + cross-section context
             history_block = ""
             if body.chat_history:
                 history_lines = []
-                for msg in body.chat_history[-6:]:
+                for msg in body.chat_history[-8:]:  # last 8 messages for current section
                     role = msg.get("role", "user").upper()
-                    content = msg.get("content", "")[:500]
+                    content = msg.get("content", "")[:600]
                     history_lines.append(f"[{role}]: {content}")
                 if history_lines:
-                    history_block = "CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n\n"
+                    history_block = "CURRENT SECTION CONVERSATION:\n" + "\n".join(history_lines) + "\n\n"
+
+            # Cross-section context: load conversations from other sections
+            # so the drafter knows what the user asked for across the full draft
+            cross_section_block = ""
+            try:
+                from backend.db.mongo import drafter_chat_history as _dch, grants_pipeline as _gp
+                pipeline = await _gp().find_one(
+                    {"grant_id": body.grant_id, "status": {"$in": ["drafting", "pending_interrupt"]}},
+                    sort=[("started_at", -1)],
+                )
+                if pipeline:
+                    chat_doc = await _dch().find_one({"pipeline_id": str(pipeline["_id"])})
+                    if chat_doc:
+                        other_sections = []
+                        for sec_name, msgs in (chat_doc.get("sections") or {}).items():
+                            if sec_name == body.section_name or not isinstance(msgs, list):
+                                continue
+                            # Summarize: user instructions + final word count
+                            user_asks = []
+                            final_wc = 0
+                            for m in msgs:
+                                if m.get("role") == "user":
+                                    uc = (m.get("content") or "").strip()
+                                    if uc and len(uc) > 10:
+                                        user_asks.append(uc[:150])
+                                elif m.get("role") == "agent":
+                                    final_wc = len((m.get("content") or "").split())
+                            if user_asks or final_wc:
+                                summary = f"[{sec_name}] ({final_wc} words)"
+                                if user_asks:
+                                    summary += " — User asked: " + "; ".join(user_asks[-2:])
+                                other_sections.append(summary)
+                        if other_sections:
+                            cross_section_block = (
+                                "PRIOR SECTIONS (what the user asked for in other sections — maintain consistency):\n"
+                                + "\n".join(other_sections) + "\n\n"
+                            )
+            except Exception:
+                pass  # Non-critical — don't break the chat if this fails
+
+            history_block = cross_section_block + history_block
 
             # Load drafter config: per-grant overrides global
             drafter_cfg = await agent_config_col().find_one({"agent": "drafter"}) or {}
@@ -2422,22 +2461,31 @@ async def drafter_chat_stream(
             theme_overrides = (drafter_cfg.get("theme_settings") or {}).get(primary_theme) or {}
             agent_tone = theme_overrides.get("tone") or agent_info.get("tone", "")
             agent_voice = theme_overrides.get("voice") or agent_info.get("voice", "")
-            agent_temp = grant_drafter_settings.get("temperature") or theme_overrides.get("temperature") or drafter_cfg.get("temperature") or agent_info.get("temperature", 0.4)
+            # Use `is not None` checks — 0 is a valid temperature
+            _gt = grant_drafter_settings.get("temperature")
+            _tt = theme_overrides.get("temperature")
+            _dt = drafter_cfg.get("temperature")
+            _at = agent_info.get("temperature", 0.4)
+            agent_temp = _gt if _gt is not None else (_tt if _tt is not None else (_dt if _dt is not None else _at))
             custom_instructions = grant_drafter_settings.get("custom_instructions") or drafter_cfg.get("custom_instructions") or ""
 
             # Writing style: per-grant > global > default
             writing_style = grant_drafter_settings.get("writing_style") or drafter_cfg.get("writing_style") or "professional"
             style_descriptions = {
-                "professional": "Professional & Corporate — clear, formal, confident. Strong assertions, structured arguments.",
-                "scientific": "Scientific & Academic — rigorous, precise, evidence-driven. Finding → Evidence → Implication → Justification.",
-                "startup-founder": (
-                    "Startup-Founder voice — direct, operationally honest, conversational confidence. "
-                    "MANDATORY STRUCTURE: 1) Deployment context first (what Alt Carbon is already doing at scale), "
-                    "2) Problem as operational bottleneck (quantified pain, e.g. '2-4 weeks turnaround'), "
-                    "3) Intervention as unlock (quantified gains, e.g. '~80% reduction'), "
-                    "4) Operational outcome (D-CAL, MRV-as-a-service, processing capacity), "
-                    "5) Ecosystem impact (regional hub, Global South). "
-                    "Do NOT start with generic descriptions. Start with live operations. Respect word limits strictly."
+                "professional": (
+                    "Professional & Corporate — clear, formal, confident. "
+                    "Lead with credibility (operational scale, buyers, partnerships). "
+                    "Every claim backed by specific numbers. Declarative voice: 'will deploy' not 'aim to'. "
+                    "Paragraph pattern: Claim → Evidence → Implication. "
+                    "Close with value proposition vs alternatives."
+                ),
+                "scientific": (
+                    "Scientific & Academic — rigorous, precise, evidence-driven. "
+                    "Every paragraph follows Finding → Evidence → Implication → Justification. "
+                    "Open with established facts, support with data/citations (with units), "
+                    "state what it means, close with why it justifies the next step. "
+                    "Use precise terminology (ICP-MS not 'advanced instruments'). "
+                    "Evidence hierarchy: published results first, then pilot data, then proposed work."
                 ),
             }
             style_instruction = style_descriptions.get(writing_style, style_descriptions["professional"])
@@ -2497,7 +2545,9 @@ Write a well-structured response in markdown format:"""
 
             # ── Step 4: Send metadata ──
             import re
-            word_count = len(full_content.split())
+            # Strip source attribution for word counting (sources still visible in stream)
+            clean_content = _strip_sources(full_content)
+            word_count = len(clean_content.split())
             evidence_gaps = re.findall(r"\[EVIDENCE NEEDED:[^\]]+\]", full_content)
 
             yield _sse("metadata", {
@@ -2523,6 +2573,19 @@ Write a well-structured response in markdown format:"""
 def _sse(event: str, data: dict) -> str:
     """Format a Server-Sent Event."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _strip_sources(text: str) -> str:
+    """Remove source attribution block appended by the LLM."""
+    import re as _re
+    # Multi-line source block: ---\n**Sources**: ... (may span multiple lines)
+    text = _re.sub(
+        r"\n---\n\*{0,2}Sources?\*{0,2}:?.*",
+        "",
+        text,
+        flags=_re.IGNORECASE | _re.DOTALL,
+    ).rstrip()
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -2952,18 +3015,54 @@ async def finalize_draft(
 
     chat_sections = chat_doc.get("sections", {})
     sections: dict = {}
+    drafting_context: dict = {}  # Per-section drafting metadata for the reviewer
     for sec_name, messages in chat_sections.items():
         # Find the last agent message — that's the approved content
         agent_msgs = [m for m in messages if m.get("role") == "agent"]
+        user_msgs = [m for m in messages if m.get("role") == "user"]
         if agent_msgs:
             content = agent_msgs[-1].get("content", "")
-            # Strip source attribution
-            import re as _re
-            content = _re.sub(r"\n---\n\*{0,2}Sources\*{0,2}:?[^\n]*$", "", content, flags=_re.IGNORECASE).rstrip()
+            content = _strip_sources(content)
             sections[sec_name] = {"content": content, "word_count": len(content.split())}
+
+            # Extract full drafting context: ALL user instructions and revision history
+            revision_count = len(agent_msgs) - 1  # first is initial draft, rest are revisions
+            user_instructions = []
+            for um in user_msgs:
+                uc = (um.get("content") or "").strip()
+                if uc and len(uc) > 10:  # Skip trivial messages like "ok" or "approve"
+                    user_instructions.append(uc[:300])
+
+            # Build conversation summary — compact but complete
+            conversation_summary = []
+            for msg in messages:
+                role = msg.get("role", "")
+                mc = (msg.get("content") or "").strip()
+                if role == "user" and mc and len(mc) > 10:
+                    conversation_summary.append(f"USER: {mc[:250]}")
+                elif role == "agent" and mc:
+                    # Just note that agent responded, don't repeat the full content
+                    wc = len(mc.split())
+                    conversation_summary.append(f"AGENT: [wrote {wc} words]")
+
+            # Extract writing metadata from the last agent message
+            last_meta = agent_msgs[-1].get("metadata") or {}
+            drafting_context[sec_name] = {
+                "revision_count": revision_count,
+                "user_instructions": user_instructions,  # ALL instructions, not just last 3
+                "conversation_summary": conversation_summary,  # Full conversation flow
+                "writing_style": last_meta.get("agentTheme") or "",
+                "agent_temperature": last_meta.get("agentTemperature"),
+                "word_limit": last_meta.get("wordLimit"),
+            }
 
     if not sections:
         raise HTTPException(status_code=422, detail="No drafted sections found in chat history")
+
+    # Load drafter settings for this grant (writing style, custom instructions)
+    grant_drafter_settings = grant.get("drafter_settings") or {}
+    drafter_writing_style = grant_drafter_settings.get("writing_style") or ""
+    drafter_custom_instructions = grant_drafter_settings.get("custom_instructions") or ""
 
     # Find latest version
     latest = await grant_drafts().find_one({"grant_id": grant_id}, sort=[("version", -1)])
@@ -2976,6 +3075,12 @@ async def finalize_draft(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source": "chat_drafter",
         "finalized_by": user_email,
+        "drafting_context": {
+            "per_section": drafting_context,
+            "writing_style": drafter_writing_style,
+            "custom_instructions": drafter_custom_instructions[:500],
+            "total_sections": len(sections),
+        },
     }
     await grant_drafts().insert_one(draft_doc)
 
@@ -2984,6 +3089,19 @@ async def finalize_draft(
         {"_id": ObjectId(grant_id)},
         {"$set": {"status": "draft_complete", "updated_at": datetime.now(timezone.utc).isoformat()}},
     )
+
+    # Also update grants_pipeline so pipeline board stays in sync
+    await grants_pipeline().update_many(
+        {"grant_id": grant_id, "status": "drafting"},
+        {"$set": {"status": "draft_complete", "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+
+    # Sync status to Notion
+    try:
+        from backend.integrations.notion_sync import update_grant_status
+        await update_grant_status(grant_id, "draft_complete")
+    except Exception:
+        logger.debug("Notion sync skipped (finalize)", exc_info=True)
 
     # Audit
     try:
@@ -3009,6 +3127,21 @@ async def finalize_draft(
                 await run_dual_review(grant_id)
             except Exception as exc:
                 logger.error("Auto-review failed for %s: %s", grant_id, exc)
+                # Update status back to draft_complete (not reviewed) so it doesn't stay stuck
+                try:
+                    await grants_scored().update_one(
+                        {"_id": ObjectId(grant_id)},
+                        {"$set": {"status": "draft_complete"}},
+                    )
+                    await audit_logs().insert_one({
+                        "node": "reviewer",
+                        "action": "auto_review_failed",
+                        "grant_id": grant_id,
+                        "error": str(exc)[:500],
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception:
+                    pass
 
         background_tasks.add_task(_run_review)
 
@@ -3086,17 +3219,26 @@ async def start_draft(
                 },
             )
 
-    # ── Guard: prevent concurrent drafts for the same grant ──────────────────
-    existing_draft = await grants_pipeline().find_one({
-        "grant_id": body.grant_id,
-        "status": {"$in": ["drafting", "pending_interrupt"]},
-    })
-    if existing_draft:
+    # ── Guard: prevent concurrent drafts for the same grant (atomic) ─────────
+    # Use atomic findOneAndUpdate on grants_scored as a lock: only proceed if
+    # the grant is NOT already in "drafting" status.
+    from pymongo import ReturnDocument
+    lock_result = await grants_scored().find_one_and_update(
+        {"_id": ObjectId(body.grant_id), "status": {"$ne": "drafting"}},
+        {"$set": {"status": "drafting", "updated_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=ReturnDocument.BEFORE,
+    )
+    if lock_result is None:
+        # Either grant doesn't exist (already checked) or status is "drafting"
+        existing_draft = await grants_pipeline().find_one({
+            "grant_id": body.grant_id,
+            "status": {"$in": ["drafting", "pending_interrupt"]},
+        })
         raise HTTPException(
             status_code=409,
             detail={
                 "error": "draft_already_in_progress",
-                "reason": f"A draft is already in progress (thread: {existing_draft.get('thread_id', 'unknown')})",
+                "reason": f"A draft is already in progress (thread: {(existing_draft or {}).get('thread_id', 'unknown')})",
                 "grant_id": body.grant_id,
             },
         )
@@ -3160,11 +3302,7 @@ async def start_draft(
             "started_by": user_email,
         })
         pipeline_id = str(result.inserted_id)
-        # Keep grants_scored status in sync so dashboard/pipeline views reflect drafting
-        await grants_scored().update_one(
-            {"_id": ObjectId(body.grant_id)},
-            {"$set": {"status": "drafting"}},
-        )
+        # grants_scored status already set to "drafting" by the atomic lock above
         # Audit log
         await audit_logs().insert_one({
             "node": "drafter",

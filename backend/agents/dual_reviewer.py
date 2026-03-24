@@ -157,6 +157,8 @@ GRANT: {grant_title}
 FUNDER: {funder}
 {extra_context}
 
+{section_structure_block}
+
 EVALUATION CRITERIA (from the funder):
 {criteria}
 
@@ -178,6 +180,13 @@ COMPLETE DRAFT APPLICATION:
 
 {golden_benchmarks_block}
 
+REVIEW RULES:
+1. Review each section ONLY within its stated scope — do not penalize a section for not covering topics assigned to other sections
+2. If a word limit is shown for a section, flag violations. If NO word limit is shown, do not invent one or penalize length
+3. Evaluate whether each section addresses the evaluation criteria relevant to its scope
+4. Suggestions must be actionable within the section's constraints — if a word limit exists, don't suggest adding content that would exceed it
+5. Score each section relative to what it was ASKED to cover, not what you wish it covered
+
 Review this application thoroughly. Be specific and constructive. {perspective_guidance}
 Use the original grant document, web research context, past outcome lessons, and benchmark examples (if provided) to verify claims, calibrate scores, and identify gaps.
 
@@ -189,7 +198,10 @@ Respond ONLY with valid JSON:
       "score": <int 1-10>,
       "strengths": ["<specific strength>"],
       "issues": ["<specific issue>"],
-      "suggestions": ["<actionable fix>"]
+      "suggestions": ["<actionable fix within word limit>"],
+      "word_count": <int>,
+      "word_limit": <int or null>,
+      "within_scope": <bool — does this section stay within its stated scope?>
     }}
   }},
   "top_issues": ["<most critical issue 1>", "<issue 2>", "<issue 3>"],
@@ -328,6 +340,7 @@ async def _run_single_review(
     grant_raw_doc: str = "",
     outcome_lessons: str = "",
     golden_benchmarks: str = "",
+    section_structure_block: str = "",
 ) -> Dict:
     """Run a single review perspective with configurable settings.
 
@@ -410,6 +423,7 @@ async def _run_single_review(
         grant_title=grant.get("title") or grant.get("grant_name") or "Untitled",
         funder=grant.get("funder") or "Unknown",
         extra_context=extra_context,
+        section_structure_block=section_structure_block,
         criteria=criteria,
         custom_criteria_block=custom_criteria_block,
         grant_document_block=grant_document_block,
@@ -550,15 +564,135 @@ async def run_dual_review(grant_id: str) -> Dict:
     if not draft_doc:
         raise ValueError(f"No draft found for grant {grant_id}")
 
-    # Assemble draft text
+    # Assemble draft text with section metadata (word limits, word counts)
     sections = draft_doc.get("sections", {})
-    draft_text = "\n\n".join(
-        f"## {name}\n{sec.get('content', '')}"
-        for name, sec in sections.items()
-    )
+
+    # Load application_sections from grant for scope/description context
+    deep = grant.get("deep_analysis") or {}
+    app_sections = deep.get("application_sections") or []
+    # Build lookup: section name → {description, word limit}
+    section_spec = {}
+    for asec in app_sections:
+        sname = asec.get("section") or asec.get("name", "")
+        section_spec[sname.lower()] = {
+            "description": asec.get("what_to_cover") or asec.get("description", ""),
+            "limit": asec.get("limit") or asec.get("word_limit", ""),
+        }
+
+    # Build structured draft text with constraints
+    # Only show word limits that the grant itself specifies (from application_sections)
+    draft_parts = []
+    section_structure_parts = []
+    for name, sec in sections.items():
+        content = sec.get("content", "")
+        wc = sec.get("word_count") or len(content.split())
+        spec = section_spec.get(name.lower(), {})
+        desc = spec.get("description", "")
+        # Only use word limit from the grant's application_sections — not our internal defaults
+        grant_wl = spec.get("limit", "")
+
+        header = f"## {name}"
+        if grant_wl:
+            header += f" [{wc} / {grant_wl} words]"
+        else:
+            header += f" [{wc} words]"
+        draft_parts.append(f"{header}\n{content}")
+
+        # Build section structure summary for reviewer context
+        struct_line = f"- **{name}**: {wc} words"
+        if grant_wl:
+            struct_line += f" (limit: {grant_wl})"
+            try:
+                if wc > int(str(grant_wl).split()[0]):
+                    struct_line += " — OVER LIMIT"
+            except (ValueError, IndexError):
+                pass
+        if desc:
+            struct_line += f" — Scope: {desc[:150]}"
+        section_structure_parts.append(struct_line)
+
+    draft_text = "\n\n".join(draft_parts)
 
     if not draft_text.strip():
         raise ValueError("Draft has no content")
+
+    # Section structure block injected into reviewer prompt
+    section_structure_block = ""
+    if section_structure_parts:
+        section_structure_block = (
+            "APPLICATION STRUCTURE (review each section ONLY within its stated scope and word limit):\n"
+            + "\n".join(section_structure_parts)
+        )
+
+    # Build drafting context block — full conversation history per section
+    drafting_ctx = draft_doc.get("drafting_context") or {}
+    drafting_context_block = ""
+
+    # If draft doc doesn't have drafting_context, try loading from chat history directly
+    if not drafting_ctx.get("per_section"):
+        try:
+            from backend.db.mongo import drafter_chat_history, grants_pipeline
+            # Find the pipeline record to get chat history
+            pipeline = await grants_pipeline().find_one({"grant_id": grant_id}, sort=[("started_at", -1)])
+            if pipeline:
+                chat_doc = await drafter_chat_history().find_one({"pipeline_id": str(pipeline["_id"])})
+                if chat_doc:
+                    per_sec = {}
+                    for sec_name, messages in (chat_doc.get("sections") or {}).items():
+                        if not isinstance(messages, list):
+                            continue
+                        agent_msgs = [m for m in messages if m.get("role") == "agent"]
+                        user_msgs = [m for m in messages if m.get("role") == "user"]
+                        conversation_summary = []
+                        user_instructions = []
+                        for msg in messages:
+                            role = msg.get("role", "")
+                            mc = (msg.get("content") or "").strip()
+                            if role == "user" and mc and len(mc) > 10:
+                                conversation_summary.append(f"USER: {mc[:250]}")
+                                user_instructions.append(mc[:300])
+                            elif role == "agent" and mc:
+                                wc = len(mc.split())
+                                conversation_summary.append(f"AGENT: [wrote {wc} words]")
+                        per_sec[sec_name] = {
+                            "revision_count": max(0, len(agent_msgs) - 1),
+                            "user_instructions": user_instructions,
+                            "conversation_summary": conversation_summary,
+                        }
+                    if per_sec:
+                        drafting_ctx = {"per_section": per_sec}
+                        logger.info("Reviewer: loaded drafting context from chat history (%d sections)", len(per_sec))
+        except Exception:
+            logger.debug("Reviewer: chat history loading skipped", exc_info=True)
+
+    if drafting_ctx:
+        dc_parts = []
+        ws = drafting_ctx.get("writing_style")
+        if ws:
+            dc_parts.append(f"Writing style: {ws}")
+        ci = drafting_ctx.get("custom_instructions")
+        if ci:
+            dc_parts.append(f"Custom instructions given to drafter: {ci[:300]}")
+        per_sec = drafting_ctx.get("per_section") or {}
+        for sec_name, sec_ctx in per_sec.items():
+            revisions = sec_ctx.get("revision_count", 0)
+            instructions = sec_ctx.get("user_instructions", [])
+            conv_summary = sec_ctx.get("conversation_summary", [])
+
+            # Build a compact but complete conversation trail
+            sec_parts = [f"**{sec_name}**: {revisions} revision(s)"]
+            if instructions:
+                # Include ALL user instructions so reviewer understands full intent
+                for i, inst in enumerate(instructions):
+                    sec_parts.append(f"  [{i+1}] User: {inst[:200]}")
+            dc_parts.append("\n".join(sec_parts))
+
+        if dc_parts:
+            drafting_context_block = (
+                "DRAFTING CONTEXT (full conversation history — understand what the author asked for and iterated on):\n"
+                + "\n".join(dc_parts)
+            )
+            section_structure_block = section_structure_block + "\n\n" + drafting_context_block if section_structure_block else drafting_context_block
 
     # Load original grant context — use deep_analysis (always available on grants_scored)
     # The raw page HTML lives in the LangGraph checkpointer but is expensive to extract.
@@ -641,10 +775,12 @@ async def run_dual_review(grant_id: str) -> Dict:
     funder_result, scientific_result, coherence_result = await asyncio.gather(
         _run_single_review(grant, draft_text, "funder", funder_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
-                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
+                           section_structure_block=section_structure_block),
         _run_single_review(grant, draft_text, "scientific", scientific_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
-                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
+                           section_structure_block=section_structure_block),
         _run_coherence_review(grant, draft_text),
     )
 
@@ -685,6 +821,32 @@ async def run_dual_review(grant_id: str) -> Dict:
             [i.get("type") for i in coherence_issues[:5]],
         )
 
+    # Cross-reviewer contradiction detection
+    funder_verdict = funder_result.get("verdict", "")
+    scientific_verdict = scientific_result.get("verdict", "")
+    contradictions = None
+    submit_verdicts = {"strong_submit", "submit_with_revisions"}
+    reject_verdicts = {"major_revisions", "do_not_submit"}
+    if (funder_verdict in submit_verdicts and scientific_verdict in reject_verdicts) or \
+       (scientific_verdict in submit_verdicts and funder_verdict in reject_verdicts):
+        contradictions = {
+            "funder_verdict": funder_verdict,
+            "scientific_verdict": scientific_verdict,
+            "explanation": (
+                f"Funder reviewer says '{funder_verdict}' but scientific reviewer says '{scientific_verdict}'. "
+                f"These verdicts fundamentally disagree — averaged scores may hide this conflict."
+            ),
+        }
+        logger.warning(
+            "Contradiction detected for '%s': funder=%s vs scientific=%s",
+            grant_title, funder_verdict, scientific_verdict,
+        )
+        # Store contradiction alongside reviews
+        await draft_reviews().update_one(
+            {"grant_id": grant_id, "perspective": "funder"},
+            {"$set": {"contradictions": contradictions}},
+        )
+
     logger.info(
         "Full review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), coherence=%.1f",
         grant_title,
@@ -694,6 +856,22 @@ async def run_dual_review(grant_id: str) -> Dict:
         scientific_result.get("verdict", "?"),
         coherence_result.get("coherence_score", 0),
     )
+
+    # Update grant status to "reviewed"
+    try:
+        await grants_scored().update_one(
+            {"_id": ObjectId(grant_id)},
+            {"$set": {"status": "reviewed", "updated_at": now}},
+        )
+    except Exception as e:
+        logger.warning("run_dual_review: failed to update grant status: %s", e)
+
+    # Sync status to Notion
+    try:
+        from backend.integrations.notion_sync import update_grant_status
+        await update_grant_status(grant_id, "reviewed")
+    except Exception:
+        logger.debug("Notion sync skipped (review completion)", exc_info=True)
 
     # Update heartbeat
     try:
@@ -715,6 +893,7 @@ async def run_dual_review(grant_id: str) -> Dict:
         "funder": funder_result,
         "scientific": scientific_result,
         "coherence": coherence_result,
+        **({"contradictions": contradictions} if contradictions else {}),
     }
 
 
@@ -745,12 +924,57 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     # Load grant from MongoDB for full metadata
     grant = await grants_scored().find_one({"_id": ObjectId(grant_id)}) or {}
 
-    # Assemble draft text from graph state (approved_sections)
+    # Assemble draft text from graph state (approved_sections) with section metadata
     approved_sections = state.get("approved_sections") or {}
-    draft_text = "\n\n".join(
-        f"## {name}\n{sec.get('content', '')}"
-        for name, sec in approved_sections.items()
-    )
+
+    # Load application_sections from grant for scope/description context
+    _deep_for_sections = grant.get("deep_analysis") or {}
+    _app_sections = _deep_for_sections.get("application_sections") or []
+    _section_spec = {}
+    for _asec in _app_sections:
+        _sname = _asec.get("section") or _asec.get("name", "")
+        _section_spec[_sname.lower()] = {
+            "description": _asec.get("what_to_cover") or _asec.get("description", ""),
+            "limit": _asec.get("limit") or _asec.get("word_limit", ""),
+        }
+
+    draft_parts = []
+    section_structure_parts = []
+    for name, sec in approved_sections.items():
+        content = sec.get("content", "")
+        wc = sec.get("word_count") or len(content.split())
+        spec = _section_spec.get(name.lower(), {})
+        desc = spec.get("description", "")
+        # Only use word limit from the grant's application_sections — not our internal defaults
+        grant_wl = spec.get("limit", "")
+
+        header = f"## {name}"
+        if grant_wl:
+            header += f" [{wc} / {grant_wl} words]"
+        else:
+            header += f" [{wc} words]"
+        draft_parts.append(f"{header}\n{content}")
+
+        struct_line = f"- **{name}**: {wc} words"
+        if grant_wl:
+            struct_line += f" (limit: {grant_wl})"
+            try:
+                if wc > int(str(grant_wl).split()[0]):
+                    struct_line += " — OVER LIMIT"
+            except (ValueError, IndexError):
+                pass
+        if desc:
+            struct_line += f" — Scope: {desc[:150]}"
+        section_structure_parts.append(struct_line)
+
+    draft_text = "\n\n".join(draft_parts)
+
+    section_structure_block = ""
+    if section_structure_parts:
+        section_structure_block = (
+            "APPLICATION STRUCTURE (review each section ONLY within its stated scope and word limit):\n"
+            + "\n".join(section_structure_parts)
+        )
 
     if not draft_text.strip():
         logger.error("dual_reviewer_node: draft is empty")
@@ -835,10 +1059,12 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     funder_result, scientific_result, coherence_result = await asyncio.gather(
         _run_single_review(grant, draft_text, "funder", funder_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
-                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
+                           section_structure_block=section_structure_block),
         _run_single_review(grant, draft_text, "scientific", scientific_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
-                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks),
+                           outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
+                           section_structure_block=section_structure_block),
         _run_coherence_review(grant, draft_text),
     )
 
@@ -886,9 +1112,34 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
         (funder_score + scientific_score + coherence_score) / 3, 1
     )
 
-    # Determine ready_for_export from the core reviewer verdicts
+    # Determine ready_for_export from reviewer verdicts + coherence gate
     verdicts = [funder_result.get("verdict", ""), scientific_result.get("verdict", "")]
-    ready = all(v in ("strong_submit", "submit_with_revisions") for v in verdicts)
+    ready = all(v in ("strong_submit", "submit_with_revisions") for v in verdicts) and coherence_score >= 5.0
+
+    # Cross-reviewer contradiction detection
+    funder_verdict = funder_result.get("verdict", "")
+    scientific_verdict = scientific_result.get("verdict", "")
+    contradictions = None
+    _submit_v = {"strong_submit", "submit_with_revisions"}
+    _reject_v = {"major_revisions", "do_not_submit"}
+    if (funder_verdict in _submit_v and scientific_verdict in _reject_v) or \
+       (scientific_verdict in _submit_v and funder_verdict in _reject_v):
+        contradictions = {
+            "funder_verdict": funder_verdict,
+            "scientific_verdict": scientific_verdict,
+            "explanation": (
+                f"Funder reviewer says '{funder_verdict}' but scientific reviewer says '{scientific_verdict}'. "
+                f"These verdicts fundamentally disagree — averaged scores may hide this conflict."
+            ),
+        }
+        logger.warning(
+            "Pipeline: contradiction detected for '%s': funder=%s vs scientific=%s",
+            grant_title, funder_verdict, scientific_verdict,
+        )
+        await draft_reviews().update_one(
+            {"grant_id": grant_id, "perspective": "funder"},
+            {"$set": {"contradictions": contradictions}},
+        )
 
     logger.info(
         "Pipeline full review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), "
@@ -924,6 +1175,13 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     except Exception as e:
         logger.warning("dual_reviewer_node: failed to update grant status: %s", e)
 
+    # Sync status to Notion
+    try:
+        from backend.integrations.notion_sync import update_grant_status as _notion_status
+        await _notion_status(grant_id, "reviewed")
+    except Exception:
+        logger.debug("Notion sync skipped (pipeline review)", exc_info=True)
+
     # Build reviewer_output — backward-compatible shape + full review
     reviewer_output = {
         "overall_score": combined_score,
@@ -935,6 +1193,7 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
         "web_research_used": bool(any(research.values())),
         "outcome_lessons_used": bool(outcome_lessons),
         "golden_benchmarks_used": bool(golden_benchmarks),
+        **({"contradictions": contradictions} if contradictions else {}),
     }
 
     audit_entry = {
