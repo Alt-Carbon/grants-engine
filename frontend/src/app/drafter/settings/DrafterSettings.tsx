@@ -35,7 +35,7 @@ interface ThemeSettings {
 
 interface DrafterConfig {
   agent: string;
-  writing_style: "professional" | "scientific";
+  writing_style: "professional" | "scientific" | "startup-founder";
   custom_instructions: string;
   temperature: number;
   theme_settings: Record<string, ThemeSettings>;
