@@ -31,19 +31,22 @@ class TestDefaultWeights:
         total = sum(DEFAULT_WEIGHTS.values())
         assert abs(total - 1.0) < 1e-9, f"Weights sum to {total}, expected 1.0"
 
-    def test_has_six_dimensions(self):
-        assert len(DEFAULT_WEIGHTS) == 6
+    def test_has_five_dimensions(self):
+        assert len(DEFAULT_WEIGHTS) == 5
 
     def test_expected_dimensions_present(self):
         expected = {
             "theme_alignment",
             "eligibility_confidence",
             "funding_amount",
-            "deadline_urgency",
             "geography_fit",
             "competition_level",
         }
         assert set(DEFAULT_WEIGHTS.keys()) == expected
+
+    def test_deadline_urgency_not_in_weights(self):
+        """Deadline urgency is a separate flag, not a scoring dimension."""
+        assert "deadline_urgency" not in DEFAULT_WEIGHTS
 
     def test_all_weights_positive(self):
         for dim, w in DEFAULT_WEIGHTS.items():

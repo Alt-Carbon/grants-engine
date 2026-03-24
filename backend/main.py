@@ -549,10 +549,9 @@ async def _seed_default_agent_config():
             "agent": "analyst",
             "enabled": True,
             "scoring_weights": {
-                "theme_alignment": 0.25,
-                "eligibility_confidence": 0.20,
-                "funding_amount": 0.20,
-                "deadline_urgency": 0.15,
+                "theme_alignment": 0.30,
+                "eligibility_confidence": 0.25,
+                "funding_amount": 0.25,
                 "geography_fit": 0.10,
                 "competition_level": 0.10,
             },

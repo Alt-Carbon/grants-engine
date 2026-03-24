@@ -8,12 +8,15 @@ from typing import Dict, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# Default scoring weights — must sum to 1.0, all 6 dimensions required.
+# Default scoring weights — must sum to 1.0, 5 quality dimensions.
+# NOTE: deadline_urgency removed from scoring — it's a logistical constraint,
+# not a quality signal. Deadline is tracked separately via days_to_deadline
+# and deadline_urgent fields. A perfect grant with a tight deadline is still
+# a perfect grant.
 _DEFAULT_SCORING_WEIGHTS: Dict[str, float] = {
-    "theme_alignment":        0.25,
-    "eligibility_confidence": 0.20,
-    "funding_amount":         0.20,
-    "deadline_urgency":       0.15,
+    "theme_alignment":        0.30,
+    "eligibility_confidence": 0.25,
+    "funding_amount":         0.25,
     "geography_fit":          0.10,
     "competition_level":      0.10,
 }
@@ -41,7 +44,15 @@ def _parse_scoring_weights(v: str) -> Dict[str, float]:
         return _DEFAULT_SCORING_WEIGHTS
     try:
         parsed = json.loads(v)
-        if isinstance(parsed, dict) and len(parsed) == 6:
+        if isinstance(parsed, dict) and len(parsed) in (5, 6):
+            # Accept 5 (new) or 6 (legacy with deadline_urgency) dimensions
+            # If legacy 6-dim weights provided, drop deadline_urgency and redistribute
+            if "deadline_urgency" in parsed:
+                du_weight = parsed.pop("deadline_urgency")
+                remaining = sum(parsed.values())
+                if remaining > 0:
+                    scale = 1.0 / remaining
+                    parsed = {k: v * scale for k, v in parsed.items()}
             return parsed
     except (json.JSONDecodeError, TypeError):
         pass
