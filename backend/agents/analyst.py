@@ -299,21 +299,14 @@ Funder research context:
    3-4  = $10K–$25K
    1-2  = <$10K or amount unknown
 
-4. deadline_urgency:
-   9-10 = >3 months lead time remaining
-   7-8  = Rolling/continuous acceptance (always open)
-   5-6  = 1–3 months remaining, or deadline unknown
-   3-4  = <1 month remaining — rushed application
-   1-2  = <2 weeks or likely already closed
-
-5. geography_fit:
+4. geography_fit:
    9-10 = Explicitly targets India, South Asia, or developing countries
    7-8  = Global/international — open to all countries including India
    5-6  = Unclear geography, or targets a region that may include India (Asia-Pacific, BRICS, G20)
    3-4  = Targets a specific non-India region but does not explicitly exclude India
    1-2  = Explicitly excludes India (US-only, EU-only, specific country registration required)
 
-6. competition_level:
+5. competition_level:
    9-10 = Highly niche/selective (<50 expected applicants) — e.g. CDR-specific, ERW-specific, India climate only
    7-8  = Moderately selective (<200 expected applicants) — sector-specific or regional
    5-6  = Broad but themed (~200-1000 applicants) — e.g. "climate innovation" open call
@@ -326,7 +319,6 @@ Return this exact JSON (no other text):
     "theme_alignment": <int 1-10>,
     "eligibility_confidence": <int 1-10>,
     "funding_amount": <int 1-10>,
-    "deadline_urgency": <int 1-10>,
     "geography_fit": <int 1-10>,
     "competition_level": <int 1-10>
   }},
