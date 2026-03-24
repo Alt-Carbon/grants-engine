@@ -3959,6 +3959,76 @@ async def apply_suggestions(body: ApplySuggestionsRequest, _: None = Depends(ver
     }
 
 
+# ── Reviewer Chat — interactive follow-up ─────────────────────────────────────
+
+class ReviewerChatRequest(BaseModel):
+    grant_id: str
+    message: str
+    perspective: str = "funder"
+    chat_history: Optional[list] = None
+
+
+@app.post("/review/chat")
+async def review_chat_endpoint(
+    body: ReviewerChatRequest,
+    _: None = Depends(verify_internal),
+):
+    """Interactive chat with the reviewer about their review findings.
+
+    Ask follow-up questions like:
+      - "Why did you score section 3 so low?"
+      - "What would a 9/10 look like for the Impact section?"
+      - "Rewrite the problem statement to address your issues"
+    """
+    from backend.agents.dual_reviewer import reviewer_chat
+
+    try:
+        response = await reviewer_chat(
+            grant_id=body.grant_id,
+            message=body.message,
+            perspective=body.perspective,
+            chat_history=body.chat_history,
+        )
+        return {
+            "response": response,
+            "perspective": body.perspective,
+            "grant_id": body.grant_id,
+        }
+    except Exception as e:
+        logger.error("Reviewer chat failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/review/chat/stream")
+async def review_chat_stream_endpoint(
+    body: ReviewerChatRequest,
+    _: None = Depends(verify_internal),
+):
+    """Streaming version of reviewer chat — SSE endpoint."""
+    from starlette.responses import StreamingResponse
+    from backend.agents.dual_reviewer import reviewer_chat
+
+    async def generate():
+        try:
+            response = await reviewer_chat(
+                grant_id=body.grant_id,
+                message=body.message,
+                perspective=body.perspective,
+                chat_history=body.chat_history,
+            )
+            yield _sse("token", {"content": response})
+            yield _sse("metadata", {
+                "perspective": body.perspective,
+                "grant_id": body.grant_id,
+            })
+            yield _sse("done", {})
+        except Exception as e:
+            logger.error("Reviewer chat stream failed: %s", e, exc_info=True)
+            yield _sse("error", {"message": str(e)})
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 # ── Draft Version History & Diff ──────────────────────────────────────────────
 
 @app.get("/draft/{grant_id}/versions")
