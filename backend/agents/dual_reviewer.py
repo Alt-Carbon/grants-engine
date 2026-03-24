@@ -858,25 +858,30 @@ REVIEW RULES:
 Review this application thoroughly. Be specific and constructive. {perspective_guidance}
 Use the original grant document, web research context, past outcome lessons, and benchmark examples (if provided) to verify claims, calibrate scores, and identify gaps.
 
+CRITICAL OUTPUT CONSTRAINT: Keep your response under 6000 characters total. Be concise:
+- Max 2 strengths, 3 issues, 3 suggestions PER SECTION
+- Each string max 1-2 sentences
+- Prioritize the most important points
+
 Respond ONLY with valid JSON:
 {{
   "overall_score": <float 1-10>,
   "section_reviews": {{
     "<section_name>": {{
       "score": <int 1-10>,
-      "strengths": ["<specific strength with reasoning>"],
-      "issues": ["<specific issue — REASON: why this matters to the funder>"],
-      "suggestions": ["<actionable fix — BECAUSE: reasoning based on funder criteria or research>"],
+      "strengths": ["<1-2 sentence strength>"],
+      "issues": ["<1-2 sentence issue with reason>"],
+      "suggestions": ["<1-2 sentence actionable fix>"],
       "word_count": <int>,
       "word_limit": <int or null>,
-      "within_scope": <bool — does this section stay within its stated scope?>
+      "within_scope": true
     }}
   }},
-  "top_issues": ["<most critical issue with reasoning>", "<issue 2>", "<issue 3>"],
-  "strengths": ["<key strength 1>", "<strength 2>", "<strength 3>"],
-  "verdict": "<one of: strong_submit | submit_with_revisions | major_revisions | reconsider>",
-  "summary": "<2-3 sentence assessment explaining the reasoning behind the verdict>",
-  "research_insights": ["<key finding from web research that informed scoring — cite source>"]
+  "top_issues": ["<critical issue 1>", "<issue 2>", "<issue 3>"],
+  "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
+  "verdict": "<strong_submit | submit_with_revisions | major_revisions | reconsider>",
+  "summary": "<2-3 sentence assessment>",
+  "research_insights": ["<1 key web research finding>"]
 }}"""
 
 PERSPECTIVE_GUIDANCE = {
@@ -1019,13 +1024,54 @@ def _format_research_block(research: Dict[str, List[str]]) -> str:
 # ── Core logic ──────────────────────────────────────────────────────────────
 
 def _parse_json_response(raw: str) -> Dict:
-    """Parse LLM JSON response, stripping markdown fences if present."""
+    """Parse LLM JSON response, stripping markdown fences and fixing truncation."""
     raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-    return json.loads(raw)
+    raw = raw.strip()
+
+    # Try direct parse first
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Fix truncated JSON: try closing open braces/brackets
+    fixed = raw.rstrip()
+    # Remove trailing incomplete string (unterminated)
+    if fixed.count('"') % 2 != 0:
+        # Odd number of quotes — find last complete field
+        last_complete = fixed.rfind('",')
+        if last_complete > 0:
+            fixed = fixed[:last_complete + 1]
+
+    # Close any open structures
+    open_braces = fixed.count('{') - fixed.count('}')
+    open_brackets = fixed.count('[') - fixed.count(']')
+    # Trim trailing comma
+    fixed = fixed.rstrip().rstrip(',')
+    fixed += ']' * max(0, open_brackets)
+    fixed += '}' * max(0, open_braces)
+
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        # Last resort: find the last valid JSON object boundary
+        for end_pos in range(len(raw), max(0, len(raw) - 500), -1):
+            candidate = raw[:end_pos]
+            open_b = candidate.count('{') - candidate.count('}')
+            open_br = candidate.count('[') - candidate.count(']')
+            candidate = candidate.rstrip().rstrip(',')
+            candidate += ']' * max(0, open_br)
+            candidate += '}' * max(0, open_b)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        # Nothing worked — raise the original error
+        raise json.JSONDecodeError("Could not parse truncated JSON", raw, 0)
 
 
 async def _run_single_review(
