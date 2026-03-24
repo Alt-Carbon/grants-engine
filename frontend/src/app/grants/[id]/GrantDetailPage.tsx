@@ -6,6 +6,7 @@ import { ScoreRadar } from "@/components/ScoreRadar";
 import { StatusPicker } from "@/components/StatusPicker";
 import { CommentThread } from "@/components/CommentThread";
 import { GrantActivity } from "@/components/GrantActivity";
+import { DeadlineChip } from "@/components/DeadlineChip";
 import { requestHoldReason } from "@/lib/holdReason";
 import { formatCurrency as formatCurrencyUtil } from "@/lib/utils";
 import {
@@ -317,13 +318,8 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
               onStatusChange={handleStatusChange}
               size="md"
             />
-            {grant.deadline_urgent && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700">
-                <Clock className="h-3 w-3" />
-                {grant.days_to_deadline !== undefined
-                  ? `${grant.days_to_deadline} days left`
-                  : "Urgent"}
-              </span>
+            {(grant.deadline_urgent || (grant.days_to_deadline !== undefined && grant.days_to_deadline < 0)) && (
+              <DeadlineChip deadline={grant.deadline} daysLeft={grant.days_to_deadline} />
             )}
             {grant.recommended_action && (
               <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
@@ -418,7 +414,11 @@ export function GrantDetailPage({ grant }: { grant: GrantFull }) {
                       } catch { return grant.deadline; }
                     })()
                   : "Rolling / TBD",
-                sub: grant.days_to_deadline !== undefined ? `${grant.days_to_deadline}d left` : "",
+                sub: grant.days_to_deadline !== undefined
+                  ? grant.days_to_deadline < 0
+                    ? `Expired ${Math.abs(grant.days_to_deadline)}d ago`
+                    : `${grant.days_to_deadline}d left`
+                  : "",
               },
               {
                 icon: Globe,

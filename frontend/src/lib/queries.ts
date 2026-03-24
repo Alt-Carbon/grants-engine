@@ -86,7 +86,48 @@ export interface AgentConfig {
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function serializeId(doc: Record<string, unknown>): Record<string, unknown> {
-  return { ...doc, _id: String(doc._id) };
+  return refreshDeadline({ ...doc, _id: String(doc._id) });
+}
+
+/**
+ * Recompute days_to_deadline and deadline_urgent from the deadline field.
+ * The analyst calculates these once at scoring time, but they go stale.
+ * This ensures the UI always shows the correct days remaining.
+ */
+function refreshDeadline(doc: Record<string, unknown>): Record<string, unknown> {
+  const deadline = doc.deadline;
+  if (!deadline || typeof deadline !== "string") {
+    doc.days_to_deadline = undefined;
+    doc.deadline_urgent = false;
+    return doc;
+  }
+
+  try {
+    const deadlineDate = new Date(deadline);
+    if (isNaN(deadlineDate.getTime())) {
+      doc.days_to_deadline = undefined;
+      doc.deadline_urgent = false;
+      return doc;
+    }
+
+    const now = new Date();
+    const diffMs = deadlineDate.getTime() - now.getTime();
+    const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+    if (diffDays < 0) {
+      // Deadline has passed
+      doc.days_to_deadline = diffDays; // negative = expired
+      doc.deadline_urgent = true;
+    } else {
+      doc.days_to_deadline = diffDays;
+      doc.deadline_urgent = diffDays <= 30;
+    }
+  } catch {
+    doc.days_to_deadline = undefined;
+    doc.deadline_urgent = false;
+  }
+
+  return doc;
 }
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
