@@ -573,11 +573,14 @@ async def run_dual_review(grant_id: str) -> Dict:
     # Build lookup: section name → {description, word limit}
     section_spec = {}
     for asec in app_sections:
-        sname = asec.get("section") or asec.get("name", "")
-        section_spec[sname.lower()] = {
-            "description": asec.get("what_to_cover") or asec.get("description", ""),
-            "limit": asec.get("limit") or asec.get("word_limit", ""),
-        }
+        if isinstance(asec, dict):
+            sname = asec.get("section") or asec.get("name", "")
+            section_spec[sname.lower()] = {
+                "description": asec.get("what_to_cover") or asec.get("description", ""),
+                "limit": asec.get("limit") or asec.get("word_limit", ""),
+            }
+        elif isinstance(asec, str):
+            section_spec[asec.lower()] = {"description": "", "limit": ""}
 
     # Build structured draft text with constraints
     # Only show word limits that the grant itself specifies (from application_sections)
@@ -694,6 +697,20 @@ async def run_dual_review(grant_id: str) -> Dict:
             )
             section_structure_block = section_structure_block + "\n\n" + drafting_context_block if section_structure_block else drafting_context_block
 
+    # Detect application format: form-based (short answers) vs narrative (long-form)
+    avg_wc = sum(s.get("word_count", len(s.get("content", "").split())) for s in sections.values()) / max(len(sections), 1)
+    is_form_based = avg_wc < 200 and len(sections) >= 4
+    if is_form_based:
+        format_note = (
+            f"\n\nAPPLICATION FORMAT: This is a FORM-BASED application with short-answer fields "
+            f"(average {int(avg_wc)} words per section, {len(sections)} sections). "
+            "Do NOT suggest expanding to longer narratives — the form constrains length. "
+            "Evaluate quality, specificity, and impact WITHIN the short-answer format. "
+            "A concise answer can be excellent if it's precise and impactful. "
+            "Do NOT penalize brevity — penalize vagueness."
+        )
+        section_structure_block = section_structure_block + format_note
+
     # Load original grant context — use deep_analysis (always available on grants_scored)
     # The raw page HTML lives in the LangGraph checkpointer but is expensive to extract.
     # deep_analysis contains the structured extraction the analyst already performed.
@@ -714,14 +731,19 @@ async def run_dual_review(grant_id: str) -> Dict:
     if deep.get("evaluation_criteria"):
         ec = deep["evaluation_criteria"]
         if isinstance(ec, list):
-            grant_raw_parts.append("EVALUATION CRITERIA:\n" + "\n".join(
-                f"  - {c.get('criterion', '')}: {c.get('what_they_look_for', c.get('description', ''))}"
-                for c in ec
-            ))
+            ec_lines = []
+            for c in ec:
+                if isinstance(c, dict):
+                    ec_lines.append(f"  - {c.get('criterion', '')}: {c.get('what_they_look_for', c.get('description', ''))}")
+                else:
+                    ec_lines.append(f"  - {c}")
+            grant_raw_parts.append("EVALUATION CRITERIA:\n" + "\n".join(ec_lines))
     if deep.get("funding_terms"):
         ft = deep["funding_terms"]
         if isinstance(ft, dict):
             grant_raw_parts.append(f"FUNDING TERMS: {json.dumps(ft, default=str)[:1500]}")
+        elif isinstance(ft, str):
+            grant_raw_parts.append(f"FUNDING TERMS: {ft[:1500]}")
     grant_raw_doc = "\n\n".join(grant_raw_parts)
 
     # Step 1: Pre-review context gathering (run in parallel)
@@ -932,11 +954,14 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     _app_sections = _deep_for_sections.get("application_sections") or []
     _section_spec = {}
     for _asec in _app_sections:
-        _sname = _asec.get("section") or _asec.get("name", "")
-        _section_spec[_sname.lower()] = {
-            "description": _asec.get("what_to_cover") or _asec.get("description", ""),
-            "limit": _asec.get("limit") or _asec.get("word_limit", ""),
-        }
+        if isinstance(_asec, dict):
+            _sname = _asec.get("section") or _asec.get("name", "")
+            _section_spec[_sname.lower()] = {
+                "description": _asec.get("what_to_cover") or _asec.get("description", ""),
+                "limit": _asec.get("limit") or _asec.get("word_limit", ""),
+            }
+        elif isinstance(_asec, str):
+            _section_spec[_asec.lower()] = {"description": "", "limit": ""}
 
     draft_parts = []
     section_structure_parts = []
@@ -1004,14 +1029,19 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
     if deep.get("evaluation_criteria"):
         ec = deep["evaluation_criteria"]
         if isinstance(ec, list):
-            grant_raw_parts.append("EVALUATION CRITERIA:\n" + "\n".join(
-                f"  - {c.get('criterion', '')}: {c.get('what_they_look_for', c.get('description', ''))}"
-                for c in ec
-            ))
+            ec_lines = []
+            for c in ec:
+                if isinstance(c, dict):
+                    ec_lines.append(f"  - {c.get('criterion', '')}: {c.get('what_they_look_for', c.get('description', ''))}")
+                else:
+                    ec_lines.append(f"  - {c}")
+            grant_raw_parts.append("EVALUATION CRITERIA:\n" + "\n".join(ec_lines))
     if deep.get("funding_terms"):
         ft = deep["funding_terms"]
         if isinstance(ft, dict):
             grant_raw_parts.append(f"FUNDING TERMS: {json.dumps(ft, default=str)[:1500]}")
+        elif isinstance(ft, str):
+            grant_raw_parts.append(f"FUNDING TERMS: {ft[:1500]}")
     grant_raw_doc = "\n\n".join(grant_raw_parts)
 
     # Also use grant_raw_doc from state if deep_analysis is sparse
