@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "prebuild": "cp ../shared/pipeline_status_contract.json src/data/pipeline_status_contract.json",
+    "prebuild": "cp ../shared/pipeline_status_contract.json src/data/pipeline_status_contract.json 2>/dev/null || true",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
