@@ -3229,7 +3229,7 @@ async def finalize_draft(
     user_email: str = Depends(get_user_email),
 ):
     """Save chat-drafted sections as a grant_draft document, mark draft_complete, trigger review."""
-    from backend.db.mongo import grant_drafts, grants_scored, drafter_chat_history, audit_logs
+    from backend.db.mongo import grant_drafts, grants_scored, drafter_chat_history, audit_logs, grants_pipeline
     from bson import ObjectId
 
     grant_id = body.get("grant_id")
