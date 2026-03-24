@@ -105,6 +105,410 @@ async def _load_golden_benchmarks(grant: Dict, section_names: List[str]) -> str:
         return ""
 
 
+# ── Grant Page Fetcher — fetch actual application page for format/limits ──────
+
+async def _fetch_grant_page(grant: Dict) -> str:
+    """Fetch the actual grant application page to understand format, word limits, fields.
+
+    Returns extracted text from the grant page, or empty string on failure.
+    """
+    url = grant.get("url") or grant.get("application_url") or ""
+    if not url:
+        return ""
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(
+            timeout=20.0, follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                return ""
+
+            import re
+            html = r.text
+            # Strip scripts/styles
+            html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+            html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL)
+            text = re.sub(r'<[^>]+>', ' ', html)
+            text = re.sub(r'\s+', ' ', text).strip()
+
+            if len(text) > 500:
+                logger.info("Fetched grant page: %d chars from %s", len(text), url[:60])
+                return text[:10000]
+    except Exception as e:
+        logger.debug("Grant page fetch failed for %s: %s", url[:60], e)
+
+    return ""
+
+
+# ── Claim Verification — check draft claims against knowledge base ───────────
+
+async def _verify_claims(draft_text: str, grant: Dict) -> str:
+    """Extract factual claims from the draft and verify against the knowledge base.
+
+    Uses Haiku to extract claims, then checks Pinecone for supporting evidence.
+    Returns a formatted block of verified/unverified claims.
+    """
+    try:
+        from backend.utils.llm import chat as llm_chat
+        from backend.db.pinecone_store import search_similar, is_pinecone_configured
+        from backend.db.mongo import company_facts
+
+        if not is_pinecone_configured():
+            return ""
+
+        # Extract verifiable claims from draft
+        extract_prompt = f"""Extract all specific factual claims about the company from this grant draft.
+Focus on numbers, dates, team details, technology specs, certifications, partnerships.
+
+Draft:
+{draft_text[:5000]}
+
+Return JSON: {{"claims": ["<claim 1>", "<claim 2>", ...]}}
+Only include specific, verifiable claims (not opinions or plans). Max 10 claims."""
+
+        raw = await llm_chat(extract_prompt, model="claude-haiku-4-5-20251001", max_tokens=400, temperature=0)
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0]
+        claims = json.loads(clean.strip()).get("claims", [])
+
+        if not claims:
+            return ""
+
+        # Check each claim against Pinecone + company_facts
+        results = []
+        # Load company facts for quick lookup
+        facts_col = company_facts()
+        stored_facts = await facts_col.find({}).to_list(length=50)
+        facts_text = " ".join(f.get("fact", "") for f in stored_facts)
+
+        for claim in claims[:8]:
+            # Search Pinecone for supporting evidence
+            matches = search_similar(claim, top_k=2)
+            best_score = matches[0].get("score", 0) if matches else 0
+            best_source = matches[0].get("source_title", "") if matches else ""
+            best_content = matches[0].get("content", "")[:150] if matches else ""
+
+            # Check company_facts
+            claim_lower = claim.lower()
+            fact_match = any(
+                f.get("fact", "").lower() in claim_lower or claim_lower in f.get("fact", "").lower()
+                for f in stored_facts
+            )
+
+            if best_score > 0.85 or fact_match:
+                status = "VERIFIED"
+                source = f"Knowledge base ({best_source})" if best_score > 0.85 else "Company facts"
+            elif best_score > 0.7:
+                status = "PARTIALLY SUPPORTED"
+                source = f"Weak match in {best_source}"
+            else:
+                status = "UNVERIFIED"
+                source = "No supporting evidence found"
+
+            results.append(f"  [{status}] {claim}\n    → {source}")
+
+        if results:
+            return "CLAIM VERIFICATION (checked against company knowledge base):\n" + "\n".join(results)
+    except Exception as e:
+        logger.debug("Claim verification failed: %s", e)
+
+    return ""
+
+
+# ── Winning Proposal Analysis — search for and analyze past winners ──────────
+
+async def _analyze_past_winners(grant: Dict) -> str:
+    """Search for past winners of this grant and analyze what made them successful.
+
+    Uses Tavily for web search, then synthesizes findings with Haiku.
+    Returns a formatted analysis block.
+    """
+    from backend.config.settings import get_settings
+    s = get_settings()
+    if not s.tavily_api_key:
+        return ""
+
+    try:
+        from tavily import TavilyClient
+    except ImportError:
+        return ""
+
+    title = grant.get("title") or grant.get("grant_name") or ""
+    funder = grant.get("funder") or ""
+    if not title and not funder:
+        return ""
+
+    try:
+        client = TavilyClient(api_key=s.tavily_api_key)
+
+        # Search for past winners
+        queries = [
+            f'"{title}" winners awarded funded projects',
+            f'"{title}" successful proposal what they funded',
+            f'{funder} past grants funded organizations {datetime.now().year - 1}',
+        ]
+
+        all_snippets = []
+        for q in queries:
+            try:
+                result = await asyncio.to_thread(
+                    client.search, query=q, search_depth="advanced", max_results=5,
+                )
+                for r in result.get("results", []):
+                    snippet = r.get("content", "")[:500]
+                    source = r.get("url", "")
+                    if snippet and len(snippet) > 50:
+                        all_snippets.append(f"{snippet} [source: {source}]")
+            except Exception:
+                continue
+
+        if not all_snippets:
+            return ""
+
+        # Synthesize with Haiku
+        from backend.utils.llm import chat as llm_chat
+        synthesis_prompt = f"""Based on these web search results about past winners of "{title}" by {funder}, write a concise competitive intelligence briefing.
+
+Search results:
+{chr(10).join(all_snippets[:8])}
+
+Write 3-5 bullet points covering:
+1. Who won previously (org names, types)
+2. Common traits of winning proposals (themes, approaches, scale)
+3. What the funder specifically valued
+4. How this applicant (Alt Carbon, a climate tech company doing ERW + biochar CDR) compares
+
+Be specific — cite org names and project types from the search results."""
+
+        analysis = await llm_chat(synthesis_prompt, model="claude-haiku-4-5-20251001", max_tokens=500, temperature=0.1)
+        if analysis and len(analysis) > 50:
+            logger.info("Past winners analysis: %d chars", len(analysis))
+            return f"PAST WINNERS ANALYSIS (competitive intelligence):\n{analysis.strip()}"
+    except Exception as e:
+        logger.debug("Past winners analysis failed: %s", e)
+
+    return ""
+
+
+# ── Red Team Mode — brutal 30-second first impression ────────────────────────
+
+RED_TEAM_PROMPT = """You are a grant reviewer who has read 200 applications today for "{funder}" — "{title}".
+You have 30 seconds to decide: does this one go in the "maybe" pile or the "reject" pile?
+
+{format_note}
+
+APPLICATION:
+{draft}
+
+Give your gut reaction in this JSON format:
+{{
+  "first_impression": "<one sentence — what hit you first>",
+  "pile": "<maybe | reject | strong_maybe>",
+  "stand_out_factor": "<what, if anything, makes this different from the other 199 applications — or null if nothing>",
+  "instant_red_flags": ["<thing that would make you stop reading>"],
+  "missing_hook": "<what opening line or fact would have grabbed your attention in the first 10 seconds>",
+  "competitive_position": "<where this sits vs typical applications: bottom_third | middle | top_third | top_10_percent>"
+}}"""
+
+
+async def _run_red_team(grant: Dict, draft_text: str, format_note: str = "") -> Dict:
+    """Simulate a fatigued reviewer's 30-second first impression."""
+    try:
+        prompt = RED_TEAM_PROMPT.format(
+            funder=grant.get("funder") or "Unknown",
+            title=grant.get("title") or grant.get("grant_name") or "Untitled",
+            draft=draft_text[:6000],
+            format_note=format_note,
+        )
+        raw = await chat(prompt, model=ANALYST_HEAVY, max_tokens=500, temperature=0.4)
+        result = _parse_json_response(raw)
+        logger.info("Red team review: pile=%s, position=%s", result.get("pile"), result.get("competitive_position"))
+        return result
+    except Exception as e:
+        logger.debug("Red team review failed: %s", e)
+        return {}
+
+
+# ── Funder DNA Profiling — build funder profile from public data ─────────────
+
+async def _build_funder_dna(grant: Dict, research: Dict) -> str:
+    """Build a funder DNA profile from research findings.
+
+    Synthesizes what the funder values, their pattern of funding, and
+    what makes proposals successful with them.
+    """
+    funder = grant.get("funder") or ""
+    if not funder:
+        return ""
+
+    # Combine all research snippets
+    all_context = []
+    for key in ["funder_context", "claim_checks", "grant_format"]:
+        for snippet in (research.get(key) or []):
+            all_context.append(snippet)
+
+    if not all_context:
+        return ""
+
+    try:
+        from backend.utils.llm import chat as llm_chat
+
+        prompt = f"""Based on these research findings about {funder}, create a concise "Funder DNA" profile.
+
+Research:
+{chr(10).join(all_context[:10])}
+
+Write a structured profile:
+**Funding Pattern**: What types of projects/orgs they fund
+**Values**: What they care about most (open-source? scale? equity? scientific rigor?)
+**Red Lines**: What would get an application rejected
+**Sweet Spot**: The ideal proposal for this funder
+**Scoring Weights**: What they weight most heavily (estimate percentages)
+
+Keep it to 5-8 lines, specific and actionable."""
+
+        dna = await llm_chat(prompt, model="claude-haiku-4-5-20251001", max_tokens=400, temperature=0.1)
+        if dna and len(dna) > 50:
+            return f"FUNDER DNA PROFILE ({funder}):\n{dna.strip()}"
+    except Exception as e:
+        logger.debug("Funder DNA build failed: %s", e)
+
+    return ""
+
+
+# ── A/B Section Variants — generate alternatives for weak sections ───────────
+
+async def _generate_section_variants(
+    weak_sections: Dict[str, Dict],
+    grant: Dict,
+    company_context: str = "",
+) -> Dict[str, str]:
+    """For sections scoring below 5, generate an improved alternative.
+
+    Returns {section_name: improved_content}.
+    """
+    if not weak_sections:
+        return {}
+
+    try:
+        from backend.utils.llm import chat as llm_chat
+
+        funder = grant.get("funder") or ""
+        title = grant.get("title") or grant.get("grant_name") or ""
+        variants = {}
+
+        for sec_name, sec_data in list(weak_sections.items())[:3]:  # Max 3 sections
+            original = sec_data.get("content", "")
+            issues = sec_data.get("issues", [])
+            wc = len(original.split())
+
+            prompt = f"""Rewrite this grant section to address the reviewer's issues.
+
+GRANT: {title}
+FUNDER: {funder}
+SECTION: {sec_name}
+WORD COUNT TARGET: ~{wc} words (stay within ±20%)
+
+ORIGINAL:
+{original}
+
+ISSUES TO FIX:
+{chr(10).join(f'- {i}' for i in issues[:5])}
+
+{f'COMPANY CONTEXT:{chr(10)}{company_context[:3000]}' if company_context else ''}
+
+Write an improved version that:
+1. Fixes ALL listed issues
+2. Keeps roughly the same word count
+3. Uses specific data and claims (not generic statements)
+4. Is ready to submit
+
+Write ONLY the improved section text, nothing else."""
+
+            improved = await llm_chat(prompt, model=ANALYST_HEAVY, max_tokens=1500, temperature=0.3)
+            if improved and len(improved.split()) > 20:
+                variants[sec_name] = improved.strip()
+
+        return variants
+    except Exception as e:
+        logger.debug("Section variant generation failed: %s", e)
+        return {}
+
+
+# ── Revision Priority Matrix — rank issues by impact × effort ────────────────
+
+async def _build_revision_priorities(review_results: Dict) -> Dict:
+    """Analyze all review results and build a prioritized revision plan.
+
+    Returns a structured priority matrix with estimated score impact.
+    """
+    try:
+        from backend.utils.llm import chat as llm_chat
+
+        # Collect all issues across perspectives
+        all_issues = []
+        for perspective in ["funder", "scientific"]:
+            result = review_results.get(perspective, {})
+            for sec_name, sec_review in result.get("section_reviews", {}).items():
+                for issue in sec_review.get("issues", []):
+                    all_issues.append(f"[{perspective}/{sec_name}] {issue}")
+                for suggestion in sec_review.get("suggestions", []):
+                    all_issues.append(f"[{perspective}/{sec_name}] SUGGESTION: {suggestion}")
+
+        coherence = review_results.get("coherence", {})
+        for issue in coherence.get("issues", []):
+            desc = issue.get("description", "") if isinstance(issue, dict) else str(issue)
+            all_issues.append(f"[coherence] {desc}")
+
+        if not all_issues:
+            return {}
+
+        current_scores = {
+            "funder": review_results.get("funder", {}).get("overall_score", 0),
+            "scientific": review_results.get("scientific", {}).get("overall_score", 0),
+            "coherence": coherence.get("coherence_score", 0),
+        }
+
+        prompt = f"""Given these review issues from a grant application, create a revision priority matrix.
+
+Current scores: Funder: {current_scores['funder']}/10, Scientific: {current_scores['scientific']}/10, Coherence: {current_scores['coherence']}/10
+
+All issues:
+{chr(10).join(all_issues[:30])}
+
+Create a prioritized action plan. Return JSON:
+{{
+  "quick_wins": [
+    {{"action": "<what to do>", "sections": ["<affected sections>"], "estimated_score_impact": "+X.X points", "effort": "5 min"}}
+  ],
+  "high_impact": [
+    {{"action": "<what to do>", "sections": ["<affected sections>"], "estimated_score_impact": "+X.X points", "effort": "30 min"}}
+  ],
+  "nice_to_have": [
+    {{"action": "<what to do>", "sections": ["<affected sections>"], "estimated_score_impact": "+X.X points", "effort": "1 hour"}}
+  ],
+  "predicted_score_after_fixes": {{
+    "funder": <float>,
+    "scientific": <float>,
+    "coherence": <float>
+  }},
+  "top_3_actions": ["<most impactful action 1>", "<action 2>", "<action 3>"]
+}}"""
+
+        raw = await llm_chat(prompt, model="claude-haiku-4-5-20251001", max_tokens=800, temperature=0.1)
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0]
+        return json.loads(clean.strip())
+    except Exception as e:
+        logger.debug("Revision priority matrix failed: %s", e)
+        return {}
+
+
 # ── Default reviewer profiles ─────────────────────────────────────────────────
 
 REVIEWER_PROFILES: Dict[str, Dict] = {
@@ -797,11 +1201,38 @@ async def run_dual_review(grant_id: str) -> Dict:
     grant_raw_doc = "\n\n".join(grant_raw_parts)
 
     # Step 1: Pre-review context gathering (run in parallel)
-    research, outcome_lessons, golden_benchmarks = await asyncio.gather(
+    # Tier 1: grant page, web research, claim verification, past winners
+    # Plus existing: outcome lessons, golden benchmarks
+    format_note_for_red_team = (
+        f"This is a FORM-BASED application (~{int(avg_wc)} words avg, {len(sections)} sections)."
+        if is_form_based else ""
+    )
+    (
+        research, outcome_lessons, golden_benchmarks,
+        grant_page_content, claim_verification, past_winners_analysis,
+    ) = await asyncio.gather(
         _web_research_for_review(grant, draft_text),
         _load_outcome_lessons(grant),
         _load_golden_benchmarks(grant, list(sections.keys())),
+        _fetch_grant_page(grant),
+        _verify_claims(draft_text, grant),
+        _analyze_past_winners(grant),
     )
+
+    # Enhance grant_raw_doc with fetched page content
+    if grant_page_content:
+        grant_raw_doc = f"LIVE GRANT PAGE CONTENT (fetched from {grant.get('url', '')}):\n{grant_page_content[:6000]}\n\n{grant_raw_doc}"
+
+    # Add claim verification and past winners to section_structure_block
+    if claim_verification:
+        section_structure_block = section_structure_block + "\n\n" + claim_verification
+    if past_winners_analysis:
+        section_structure_block = section_structure_block + "\n\n" + past_winners_analysis
+
+    # Build funder DNA from research
+    funder_dna = await _build_funder_dna(grant, research)
+    if funder_dna:
+        section_structure_block = section_structure_block + "\n\n" + funder_dna
 
     # Load per-grant reviewer settings (stored by the frontend settings panel)
     grant_reviewer_cfg = (grant or {}).get("reviewer_settings") or {}
@@ -921,14 +1352,84 @@ async def run_dual_review(grant_id: str) -> Dict:
             {"$set": {"contradictions": contradictions}},
         )
 
+    # Step 3: Post-review enhancements (red team, priorities, A/B variants)
+    review_results = {
+        "funder": funder_result,
+        "scientific": scientific_result,
+        "coherence": coherence_result,
+    }
+
+    # Run red team + revision priorities in parallel
+    red_team_result, revision_priorities = await asyncio.gather(
+        _run_red_team(grant, draft_text, format_note=format_note_for_red_team),
+        _build_revision_priorities(review_results),
+    )
+
+    # Generate A/B variants for weak sections (score < 5)
+    weak_sections = {}
+    for sec_name, sec_review in funder_result.get("section_reviews", {}).items():
+        if sec_review.get("score", 10) < 5:
+            sec_content = sections.get(sec_name, {})
+            weak_sections[sec_name] = {
+                "content": sec_content.get("content", ""),
+                "issues": sec_review.get("issues", []) + sec_review.get("suggestions", []),
+            }
+
+    # Load company context for variants
+    company_ctx = ""
+    try:
+        from backend.agents.company_brain import _load_static_profile
+        company_ctx = _load_static_profile() or ""
+    except Exception:
+        pass
+
+    section_variants = await _generate_section_variants(weak_sections, grant, company_context=company_ctx)
+
+    # Store enhanced results
+    if red_team_result:
+        await draft_reviews().replace_one(
+            {"grant_id": grant_id, "perspective": "red_team"},
+            {
+                "grant_id": grant_id, "draft_id": draft_id, "draft_version": draft_version,
+                "perspective": "red_team", **red_team_result, "created_at": now,
+            },
+            upsert=True,
+        )
+
+    if revision_priorities:
+        await draft_reviews().replace_one(
+            {"grant_id": grant_id, "perspective": "revision_plan"},
+            {
+                "grant_id": grant_id, "draft_id": draft_id, "draft_version": draft_version,
+                "perspective": "revision_plan", **revision_priorities, "created_at": now,
+            },
+            upsert=True,
+        )
+
+    if section_variants:
+        await draft_reviews().replace_one(
+            {"grant_id": grant_id, "perspective": "section_variants"},
+            {
+                "grant_id": grant_id, "draft_id": draft_id, "draft_version": draft_version,
+                "perspective": "section_variants",
+                "variants": section_variants,
+                "created_at": now,
+            },
+            upsert=True,
+        )
+
     logger.info(
-        "Full review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), coherence=%.1f",
+        "Full review complete for '%s': funder=%.1f (%s), scientific=%.1f (%s), coherence=%.1f, "
+        "red_team=%s, priorities=%d actions, variants=%d sections",
         grant_title,
         funder_result.get("overall_score", 0),
         funder_result.get("verdict", "?"),
         scientific_result.get("overall_score", 0),
         scientific_result.get("verdict", "?"),
         coherence_result.get("coherence_score", 0),
+        red_team_result.get("pile", "?") if red_team_result else "skipped",
+        len(revision_priorities.get("top_3_actions", [])) if revision_priorities else 0,
+        len(section_variants),
     )
 
     # Update grant status to "reviewed"
@@ -968,6 +1469,9 @@ async def run_dual_review(grant_id: str) -> Dict:
         "scientific": scientific_result,
         "coherence": coherence_result,
         **({"contradictions": contradictions} if contradictions else {}),
+        **({"red_team": red_team_result} if red_team_result else {}),
+        **({"revision_plan": revision_priorities} if revision_priorities else {}),
+        **({"section_variants": section_variants} if section_variants else {}),
     }
 
 
