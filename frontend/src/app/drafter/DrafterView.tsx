@@ -1672,8 +1672,12 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                     {g.deadline && (
                       <div className="flex items-center gap-1.5 rounded-md bg-gray-50 px-2 py-1.5">
                         <Clock className="h-3 w-3 text-gray-400" />
-                        <span className={`text-[11px] font-medium truncate ${g.deadline_urgent ? "text-red-600" : "text-gray-700"}`}>
-                          {g.days_to_deadline !== undefined ? `${g.days_to_deadline}d left` : g.deadline}
+                        <span className={`text-[11px] font-medium truncate ${g.days_to_deadline !== undefined && g.days_to_deadline < 0 ? "text-gray-400 line-through" : g.deadline_urgent ? "text-red-600" : "text-gray-700"}`}>
+                          {g.days_to_deadline !== undefined
+                            ? g.days_to_deadline < 0
+                              ? `Expired ${Math.abs(g.days_to_deadline)}d ago`
+                              : `${g.days_to_deadline}d left`
+                            : g.deadline}
                         </span>
                       </div>
                     )}
