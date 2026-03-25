@@ -22,7 +22,6 @@ export interface Grant {
   themes_detected?: string[];
   recommended_action?: string;
   rationale?: string;
-  hold_reason?: string;
   scores?: Record<string, number>;
   rejection_reason?: string;
   human_override?: boolean;
@@ -148,7 +147,6 @@ export async function getDashboardStats() {
             { $match: { status: { $in: ["pursue", "pursuing"] } } },
             { $count: "n" },
           ],
-          onHold: [{ $match: { status: "hold" } }, { $count: "n" }],
           drafting: [{ $match: { status: "drafting" } }, { $count: "n" }],
           complete: [
             {
@@ -176,7 +174,6 @@ export async function getDashboardStats() {
   const total = f.total?.[0]?.n ?? 0;
   const triage = f.triage?.[0]?.n ?? 0;
   const pursuing = f.pursuing?.[0]?.n ?? 0;
-  const onHold = f.onHold?.[0]?.n ?? 0;
   const drafting = f.drafting?.[0]?.n ?? 0;
   const complete = f.complete?.[0]?.n ?? 0;
   const urgentCount = f.urgent?.[0]?.n ?? 0;
@@ -192,15 +189,10 @@ export async function getDashboardStats() {
       `${urgentCount} grant(s) with urgent deadlines (≤30 days) in your active queue — review now.`
     );
   }
-  if (onHold > 0) {
-    warnings.push(`${onHold} grant(s) on HOLD due to unresolved currency — manual review needed.`);
-  }
-
   return {
     total_discovered: total,
     in_triage: triage,
     pursuing,
-    on_hold: onHold,
     deadline_urgent_count: urgentCount,
     drafting,
     draft_complete: complete,
@@ -246,7 +238,6 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
   const grouped: Record<string, Grant[]> = {
     shortlisted: [],
     pursue: [],
-    hold: [],
     drafting: [],
     submitted: [],
     rejected: [],
@@ -258,7 +249,6 @@ export async function getPipelineGrants(): Promise<Record<string, Grant[]>> {
 
     if (g.status === "triage" || g.status === "watch") grouped.shortlisted.push(g);
     else if (g.status === "pursue" || g.status === "pursuing") grouped.pursue.push(g);
-    else if (g.status === "hold") grouped.hold.push(g);
     else if (g.status === "drafting") grouped.drafting.push(g);
     else if (g.status === "draft_complete" || g.status === "reviewed" || g.status === "submitted" || g.status === "won")
       grouped.submitted.push(g);
@@ -475,7 +465,6 @@ export interface AgentRun {
   total_found?: number;
   pursue_count?: number;
   auto_pass_count?: number;
-  hold_count?: number;
   top_score?: number;
   run_at?: string;
   quality_rejected?: number;
@@ -788,7 +777,6 @@ export interface PipelineSummary {
   total_discovered: number;
   in_triage: number;
   pursuing: number;
-  on_hold: number;
   drafting: number;
   submitted: number;
   rejected: number;
@@ -812,7 +800,6 @@ export async function getPipelineSummary(): Promise<PipelineSummary> {
               { $match: { status: { $in: ["pursue", "pursuing"] } } },
               { $count: "n" },
             ],
-            onHold: [{ $match: { status: "hold" } }, { $count: "n" }],
             drafting: [{ $match: { status: "drafting" } }, { $count: "n" }],
             submitted: [
               {
@@ -852,7 +839,6 @@ export async function getPipelineSummary(): Promise<PipelineSummary> {
     total_discovered: f.total?.[0]?.n ?? 0,
     in_triage: f.triage?.[0]?.n ?? 0,
     pursuing: f.pursuing?.[0]?.n ?? 0,
-    on_hold: f.onHold?.[0]?.n ?? 0,
     drafting: f.drafting?.[0]?.n ?? 0,
     submitted: f.submitted?.[0]?.n ?? 0,
     rejected: f.rejected?.[0]?.n ?? 0,

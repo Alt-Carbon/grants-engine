@@ -122,7 +122,6 @@ describe("POST /api/grants/status", () => {
       "passed",
       "auto_pass",
       "human_passed",
-      "hold",
       "reported",
     ];
 
