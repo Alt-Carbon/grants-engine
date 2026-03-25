@@ -8,6 +8,7 @@ import { WarningsBanner } from "@/components/WarningsBanner";
 import { WhatsNewDigest } from "@/components/WhatsNewDigest";
 import { ActivityChart } from "@/components/ActivityChart";
 import { PipelineTable } from "@/components/PipelineTable";
+import { RerunHoldButton } from "@/components/RerunHoldButton";
 import {
   Telescope,
   ListChecks,
@@ -126,6 +127,7 @@ export default async function DashboardPage() {
             <p className="mt-1 text-2xl font-bold text-orange-600">
               {stats.on_hold}
             </p>
+            {stats.on_hold > 0 && <RerunHoldButton />}
           </CardContent>
         </Card>
         <Card>

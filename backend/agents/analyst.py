@@ -489,12 +489,10 @@ async def _resolve_unknown_currency(grant: Dict) -> Optional[Dict]:
 
 
 def _check_hold_conditions(grant: Dict) -> Optional[str]:
-    """Return a hold reason if the grant should be placed on HOLD for manual review.
+    """Return a reason string if the grant has an unknown currency with a stated amount.
 
-    Triggered when a funding amount is stated but the currency is unrecognised —
-    we cannot evaluate the minimum-funding rule without knowing the monetary scale.
-    If no funding amount is present there is no ambiguity, so the grant proceeds
-    to normal scoring.
+    Used to trigger currency resolution attempts. If resolution fails, the grant
+    proceeds to scoring anyway (with an evidence gap note) — never blocks triage.
     """
     raw_funding = grant.get("max_funding_usd") or grant.get("max_funding")
     try:
@@ -519,6 +517,62 @@ def _check_hold_conditions(grant: Dict) -> Optional[str]:
             f"without knowing the currency; needs manual review"
         )
     return None
+
+
+# ── Amount string → currency parser ──────────────────────────────────────────
+
+# Maps common prefixes/symbols in amount strings to ISO currency codes
+_AMOUNT_CURRENCY_PATTERNS = [
+    (r"(?:INR|₹|Rs\.?)\s*", "INR"),
+    (r"(?:USD|\$|US\$)\s*", "USD"),
+    (r"(?:EUR|€)\s*", "EUR"),
+    (r"(?:GBP|£)\s*", "GBP"),
+    (r"(?:CAD|C\$|CA\$)\s*", "CAD"),
+    (r"(?:AUD|A\$|AU\$)\s*", "AUD"),
+    (r"(?:SGD|S\$|SG\$)\s*", "SGD"),
+    (r"(?:JPY|¥)\s*", "JPY"),
+    (r"(?:BRL|R\$)\s*", "BRL"),
+]
+
+
+def _patch_currency_from_amount(grant: Dict) -> None:
+    """If currency is empty/unknown, try to parse it from the amount string.
+
+    E.g. amount="INR 85,000,000" → sets currency="INR", max_funding=85000000.
+    Mutates grant in-place.
+    """
+    currency = (grant.get("currency") or "").strip().upper()
+    if currency and currency not in {t.upper() for t in _UNKNOWN_CURRENCY_TERMS}:
+        return  # Already has a valid currency
+
+    amount_str = grant.get("amount") or ""
+    if not amount_str:
+        return
+
+    for pattern, iso_code in _AMOUNT_CURRENCY_PATTERNS:
+        m = re.match(pattern, amount_str, re.IGNORECASE)
+        if m:
+            # Extract the numeric part after the currency prefix
+            remainder = amount_str[m.end():].strip()
+            # Parse number (handle commas, spaces)
+            num_match = re.match(r"[\d,.\s]+", remainder)
+            if num_match:
+                num_str = num_match.group().replace(",", "").replace(" ", "").strip()
+                try:
+                    amount_val = float(num_str)
+                    if amount_val > 0:
+                        grant["currency"] = iso_code
+                        grant["max_funding"] = amount_val
+                        grant["max_funding_usd"] = _normalize_to_usd(amount_val, iso_code)
+                        logger.info(
+                            "Parsed currency from amount string: '%s' → %s %.0f (USD %.0f)",
+                            amount_str[:40], iso_code, amount_val,
+                            grant["max_funding_usd"],
+                        )
+                        return
+                except (ValueError, TypeError):
+                    pass
+            break  # Pattern matched but number didn't parse — don't try other patterns
 
 
 # ── Date parsing ───────────────────────────────────────────────────────────────
@@ -1277,10 +1331,14 @@ async def _score_grant(
             scoring_error=False,
         )
 
-    # ── Hold check — unknown currency with a stated amount ────────────────────
-    # Before giving up, try to resolve the currency from the grant's raw content.
-    # This catches cases where the LLM extraction missed a ₹/$ symbol or an
-    # Indian govt page that clearly implies INR.
+    # ── Currency resolution: parse from amount string, then try raw content ──
+    # Many grants have currency embedded in the amount field (e.g. "INR 85,000,000")
+    # but the currency field is empty. Parse it before scoring.
+    _patch_currency_from_amount(grant)
+
+    # If currency is still unknown and there's a stated amount, try to resolve
+    # from raw content via an LLM call.
+    _currency_gap = False
     hold_reason = _check_hold_conditions(grant)
     if hold_reason:
         logger.info(
@@ -1289,28 +1347,16 @@ async def _score_grant(
         )
         patch = await _resolve_unknown_currency(grant)
         if patch:
-            # Resolution succeeded — patch the grant and fall through to scoring
             grant.update(patch)
             logger.info(
                 "Currency resolved to %s — continuing to score: %s",
                 patch["currency"], grant.get("url", "")[:60],
             )
         else:
-            # Still unknown after trying — place on hold for manual review
-            logger.warning("Currency unresolvable — placing on hold: %s", grant.get("url", "")[:80])
-            return _build_scored_doc(
-                grant=grant,
-                scores={k: 0 for k in weights},
-                weighted_total=0.0,
-                action="hold",
-                rationale="",
-                reasoning=hold_reason,
-                evidence_found=[],
-                evidence_gaps=["Currency unknown — funding threshold not evaluated"],
-                red_flags=[],
-                funder_context="",
-                scoring_error=False,
-            )
+            # Unresolvable — note it as evidence gap and continue to scoring.
+            # The LLM will score funding_amount low when currency is unclear.
+            logger.info("Currency unresolvable — scoring anyway: %s", grant.get("url", "")[:80])
+            _currency_gap = True
 
     # ── AI scoring with retry ─────────────────────────────────────────────────
     content_snippet = (grant.get("raw_content") or "")[:6000]   # raised from 4000
@@ -1531,30 +1577,21 @@ async def _score_grant(
             scoring["evidence_gaps"] = evidence_gaps_list
 
         if not has_funding and action != "auto_pass":
-            missing = ["funding amount / ticket size"]
+            # Missing funding is an evidence gap, not a blocker.
+            # The grant proceeds to triage with a note so humans can decide.
+            evidence_gaps_list = list(scoring.get("evidence_gaps", []))
+            evidence_gaps_list.append("No published funding amount / ticket size — verify on grant page")
+            scoring["evidence_gaps"] = evidence_gaps_list
             logger.info(
-                "Demoting %s → hold (missing %s): %s",
-                action, " & ".join(missing),
-                (grant.get("grant_name") or grant.get("title", ""))[:60],
+                "Missing funding for %s grant — noting as evidence gap (not holding): %s",
+                action, (grant.get("grant_name") or grant.get("title", ""))[:60],
             )
-            action = "hold"
-            hold_reason = f"Missing mandatory fields: {', '.join(missing)}"
-            evidence_gaps = list(scoring.get("evidence_gaps", []))
-            evidence_gaps.append(hold_reason)
-            return _build_scored_doc(
-                grant=grant,
-                scores=scores,
-                weighted_total=round(weighted_total, 2),
-                action=action,
-                rationale=scoring.get("rationale", ""),
-                reasoning=hold_reason,
-                evidence_found=scoring.get("evidence_found", []),
-                evidence_gaps=evidence_gaps,
-                red_flags=scoring.get("red_flags", []),
-                funder_context=funder_context,
-                scoring_error=scoring_error,
-                deep_analysis=deep_analysis,
-            )
+
+    # Append currency gap note if currency was unresolvable
+    if _currency_gap:
+        evidence_gaps_list = list(scoring.get("evidence_gaps", []))
+        evidence_gaps_list.append("Currency unknown — funding amount could not be verified")
+        scoring["evidence_gaps"] = evidence_gaps_list
 
     return _build_scored_doc(
         grant=grant,
@@ -1589,10 +1626,10 @@ def _build_scored_doc(
     """Build the full document written to grants_scored."""
     # Status mapping:
     #   auto_pass → skipped (failed hard rules or low score)
-    #   hold      → needs manual review (e.g. unknown currency, missing data)
     #   pursue    → shortlisted (high priority)
     #   watch     → shortlisted (lower priority, same queue as pursue)
-    status = "auto_pass" if action == "auto_pass" else "hold" if action == "hold" else "triage"
+    #   everything else → triage (awaiting human review)
+    status = "auto_pass" if action == "auto_pass" else "triage"
 
     grant_name = grant.get("grant_name") or grant.get("title") or ""
 

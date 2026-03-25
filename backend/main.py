@@ -1799,6 +1799,147 @@ async def rescore_single_grant(
     }
 
 
+@app.post("/run/analyst/hold")
+async def rescore_hold_grants(
+    background_tasks: BackgroundTasks,
+    _: None = Depends(verify_internal),
+    user_email: str = Depends(get_user_email),
+):
+    """Re-run the Analyst on all grants currently in 'hold' status.
+
+    Hold grants are those with unresolvable currency, missing fields, etc.
+    This deletes them from grants_scored and re-runs the full analyst pipeline
+    (hard rules, currency resolution, Perplexity enrichment, LLM scoring).
+    """
+    global _analyst_running, _analyst_started_at
+    async with _analyst_lock:
+        if _analyst_running:
+            return {"status": "analyst_already_running", "started_at": _analyst_started_at}
+        _analyst_running = True
+        _analyst_started_at = datetime.now(timezone.utc).isoformat()
+
+    async def _run():
+        global _analyst_running, _analyst_started_at
+        try:
+            from backend.agents.analyst import AnalystAgent, DEFAULT_WEIGHTS
+            from backend.config.settings import get_settings
+            from backend.db.mongo import grants_scored, agent_config, get_db
+
+            s = get_settings()
+            cfg_doc = await agent_config().find_one({"agent": "analyst"}) or {}
+            weights = cfg_doc.get("scoring_weights") or DEFAULT_WEIGHTS
+            min_funding = cfg_doc.get("min_funding", s.min_grant_funding)
+
+            # 1. Fetch all hold grants
+            hold_grants = await grants_scored().find(
+                {"status": "hold"}
+            ).to_list(2000)
+            logger.info("Analyst hold re-run: %d hold grants found", len(hold_grants))
+
+            if not hold_grants:
+                logger.info("Analyst hold re-run: no hold grants to process")
+                return
+
+            # 2. Convert scored grants back to raw-like format for the analyst
+            raw_like = []
+            for g in hold_grants:
+                raw_doc = {
+                    "_id": g["_id"],
+                    "title": g.get("title") or g.get("grant_name") or "",
+                    "grant_name": g.get("grant_name") or g.get("title") or "",
+                    "url": g.get("url") or g.get("source_url") or "",
+                    "source_url": g.get("source_url") or g.get("url") or "",
+                    "application_url": g.get("application_url") or "",
+                    "url_hash": g.get("url_hash", ""),
+                    "content_hash": g.get("content_hash", ""),
+                    "funder": g.get("funder", ""),
+                    "deadline": g.get("deadline", ""),
+                    "amount": g.get("amount") or "",
+                    "max_funding": g.get("max_funding"),
+                    "max_funding_usd": g.get("max_funding_usd"),
+                    "currency": g.get("currency", ""),
+                    "eligibility": g.get("eligibility", ""),
+                    "geography": g.get("geography", ""),
+                    "grant_type": g.get("grant_type", ""),
+                    "themes_detected": g.get("themes_detected", []),
+                    "themes_text": g.get("themes_text", ""),
+                    "notes": g.get("notes", ""),
+                    "about_opportunity": g.get("about_opportunity", ""),
+                    "application_process": g.get("application_process", ""),
+                    "eligibility_details": g.get("eligibility_details", ""),
+                    "raw_content": g.get("raw_content", ""),
+                    "scraped_at": g.get("scraped_at", ""),
+                }
+                raw_like.append(raw_doc)
+
+            # 3. Delete existing scored records so analyst doesn't skip them
+            hold_ids = [g["_id"] for g in hold_grants]
+            delete_result = await grants_scored().delete_many({"_id": {"$in": hold_ids}})
+            logger.info("Analyst hold re-run: deleted %d existing hold records", delete_result.deleted_count)
+
+            # 4. Run analyst on raw-like grants
+            agent = AnalystAgent(
+                perplexity_api_key=s.perplexity_api_key,
+                gateway_api_key=s.ai_gateway_api_key,
+                gateway_url=s.ai_gateway_url,
+                weights=weights,
+                min_funding=min_funding,
+            )
+            scored = await agent.run(raw_like)
+            logger.info("Analyst hold re-run: %d grants re-scored", len(scored))
+
+            # 5. Audit log
+            db = get_db()
+            await db["audit_logs"].insert_one({
+                "event": "analyst_hold_rescore",
+                "scored_count": len(scored),
+                "input_count": len(hold_grants),
+                "triggered_by": user_email,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+            # 6. Notify
+            try:
+                from backend.notifications.hub import notify
+                triage_count = sum(1 for g in scored if g.get("status") == "triage")
+                still_hold = sum(1 for g in scored if g.get("status") == "hold")
+                await notify(
+                    event_type="analyst_hold_rescore",
+                    title=f"Hold re-run: {len(scored)} grants re-scored",
+                    body=(
+                        f"{triage_count} moved to triage, "
+                        f"{still_hold} still on hold"
+                    ),
+                    action_url="/pipeline",
+                    metadata={
+                        "scored_count": len(scored),
+                        "triage_count": triage_count,
+                        "still_hold": still_hold,
+                    },
+                )
+            except Exception:
+                logger.debug("Hold rescore notification failed", exc_info=True)
+
+        except Exception as e:
+            logger.error("Analyst hold re-run failed: %s", e)
+            try:
+                import traceback as _tb
+                from backend.integrations.notion_sync import log_error
+                await log_error(agent="analyst", error=e, tb=_tb.format_exc(), severity="Critical")
+            except Exception:
+                pass
+        finally:
+            async with _analyst_lock:
+                _analyst_running = False
+                _analyst_started_at = None
+
+    background_tasks.add_task(_run)
+    return {
+        "status": "hold_rescore_started",
+        "started_at": _analyst_started_at,
+    }
+
+
 # ── Resume endpoints ───────────────────────────────────────────────────────────
 
 @app.post("/resume/triage")
