@@ -1522,13 +1522,16 @@ async def _score_grant(
             except Exception as e:
                 logger.debug("Grant page enrichment failed: %s", e)
 
-        missing = []
+        # Only demote to hold if FUNDING is missing.
+        # Deadline is NOT mandatory — many grants are rolling/always-open.
+        # Missing deadline is noted as evidence gap but doesn't block triage.
         if not has_deadline:
-            missing.append("application deadline")
-        if not has_funding:
-            missing.append("funding amount / ticket size")
+            evidence_gaps_list = list(scoring.get("evidence_gaps", []))
+            evidence_gaps_list.append("No published application deadline — verify if rolling or check grant page")
+            scoring["evidence_gaps"] = evidence_gaps_list
 
-        if missing and action != "auto_pass":
+        if not has_funding and action != "auto_pass":
+            missing = ["funding amount / ticket size"]
             logger.info(
                 "Demoting %s → hold (missing %s): %s",
                 action, " & ".join(missing),
