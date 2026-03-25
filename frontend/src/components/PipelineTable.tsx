@@ -9,7 +9,6 @@ import { ScoreCell, PriorityBadge } from "./ScoreBadge";
 import { getThemeLabel, formatCurrency, formatRelativeTime, formatDateShort } from "@/lib/utils";
 import { useLastSeen, isNewSince } from "@/hooks/useLastSeen";
 import { useGrantUrl } from "@/hooks/useGrantUrl";
-import { requestHoldReason } from "@/lib/holdReason";
 import type { Grant } from "@/lib/queries";
 import {
   ChevronUp,
@@ -38,7 +37,6 @@ const STATUS_TABS = [
   { id: "new", label: "New", icon: Sparkles },
   { id: "shortlisted", label: "Shortlisted" },
   { id: "pursue", label: "Pursue" },
-  { id: "hold", label: "Hold" },
   { id: "drafting", label: "Drafting" },
   { id: "submitted", label: "Submitted" },
   { id: "rejected", label: "Rejected" },
@@ -90,17 +88,10 @@ export function PipelineTable({
   }, [initialGrants]);
 
   async function handleStatusChange(grantId: string, newStatus: string) {
-    const existingGrant = allGrants.find((g) => g._id === grantId);
-    const holdReason =
-      newStatus === "hold"
-        ? requestHoldReason((existingGrant as { hold_reason?: string } | undefined)?.hold_reason) ?? undefined
-        : undefined;
-    if (newStatus === "hold" && !holdReason) return;
-
     // Optimistic: update local state immediately
     setAllGrants((prev) =>
       prev.map((g) =>
-        g._id === grantId ? { ...g, status: newStatus, hold_reason: holdReason } : g
+        g._id === grantId ? { ...g, status: newStatus } : g
       )
     );
     // Persist to backend
@@ -111,7 +102,6 @@ export function PipelineTable({
         body: JSON.stringify({
           grant_id: grantId,
           status: newStatus,
-          hold_reason: holdReason,
         }),
       });
       if (!res.ok) {
@@ -148,8 +138,6 @@ export function PipelineTable({
       return allGrants.filter((g) =>
         ["draft_complete", "reviewed", "submitted", "won"].includes(g.status)
       );
-    if (statusFilter === "hold")
-      return allGrants.filter((g) => g.status === "hold");
     if (statusFilter === "rejected")
       return allGrants.filter((g) =>
         ["passed", "auto_pass", "human_passed", "reported", "guardrail_rejected"].includes(g.status)
@@ -224,8 +212,6 @@ export function PipelineTable({
           ? "shortlisted"
           : g.status === "pursuing"
           ? "pursue"
-          : g.status === "hold"
-          ? "hold"
           : ["draft_complete", "reviewed", "submitted", "won"].includes(g.status)
           ? "submitted"
           : ["passed", "auto_pass", "human_passed", "reported", "guardrail_rejected"].includes(

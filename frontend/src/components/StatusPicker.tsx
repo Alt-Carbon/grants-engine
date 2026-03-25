@@ -16,7 +16,6 @@ const STATUS_STYLES: Record<string, string> = {
   passed:         "bg-gray-100 text-gray-500 hover:ring-2 hover:ring-gray-300",
   auto_pass:      "bg-gray-100 text-gray-500 hover:ring-2 hover:ring-gray-300",
   human_passed:   "bg-gray-200 text-gray-600 hover:ring-2 hover:ring-gray-400",
-  hold:           "bg-orange-100 text-orange-800 hover:ring-2 hover:ring-orange-300",
   reported:       "bg-red-100 text-red-600 hover:ring-2 hover:ring-red-300",
   guardrail_rejected: "bg-rose-100 text-rose-700 hover:ring-2 hover:ring-rose-300",
 };
@@ -34,7 +33,6 @@ const STATUS_LABELS: Record<string, string> = {
   passed:         "Rejected",
   auto_pass:      "Auto Rejected",
   human_passed:   "Rejected",
-  hold:           "Hold",
   reported:       "Reported",
   guardrail_rejected: "Guardrail Rejected",
 };
@@ -42,7 +40,6 @@ const STATUS_LABELS: Record<string, string> = {
 const MOVE_OPTIONS = [
   { value: "triage",       label: "Shortlisted", dot: "bg-amber-400" },
   { value: "pursue",       label: "Pursue",      dot: "bg-green-400" },
-  { value: "hold",         label: "Hold",         dot: "bg-orange-400" },
   { value: "submitted",    label: "Submitted",    dot: "bg-cyan-400" },
   { value: "won",          label: "Won",          dot: "bg-emerald-400" },
   { value: "human_passed", label: "Rejected",      dot: "bg-red-400" },

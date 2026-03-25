@@ -17,7 +17,6 @@ export async function POST(req: Request) {
     const body = await req.json();
     const grantId = body.grant_id ?? body.grantId;
     const status = body.status;
-    const holdReason = body.hold_reason;
 
     if (!grantId || !status) {
       return Response.json(
@@ -29,7 +28,7 @@ export async function POST(req: Request) {
     const res = await fetch(`${url}/update/grant-status`, {
       method: "POST",
       headers: await proxyHeaders(),
-      body: JSON.stringify({ grant_id: grantId, status, hold_reason: holdReason }),
+      body: JSON.stringify({ grant_id: grantId, status }),
       cache: "no-store",
     });
 

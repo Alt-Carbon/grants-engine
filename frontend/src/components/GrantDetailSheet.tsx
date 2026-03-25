@@ -230,7 +230,7 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                 {grant.deadline_urgent && (
                   <DeadlineChip deadline={grant.deadline} daysLeft={grant.days_to_deadline} />
                 )}
-                {(grant.status === "pursue" || grant.status === "pursuing" || grant.status === "hold" || grant.status === "triage") && (
+                {(grant.status === "pursue" || grant.status === "pursuing" || grant.status === "triage") && (
                   <button
                     onClick={async () => {
                       setDraftLoading(true);
@@ -321,12 +321,6 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                   <span className="inline-flex items-center gap-1 rounded-full bg-purple-100 px-2.5 py-0.5 text-xs font-semibold text-purple-700">
                     <FileText className="h-3 w-3" />
                     Drafting
-                  </span>
-                )}
-                {grant.status === "hold" && grant.hold_reason && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2.5 py-0.5 text-xs font-semibold text-orange-700">
-                    <AlertTriangle className="h-3 w-3" />
-                    Hold reason: {grant.hold_reason}
                   </span>
                 )}
                 {!reanalyzeStarted && (

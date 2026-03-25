@@ -13,7 +13,6 @@ const STATUS_STYLES: Record<string, string> = {
   passed:         "bg-red-100 text-red-600",
   auto_pass:      "bg-red-100 text-red-600",
   human_passed:   "bg-red-200 text-red-700",
-  hold:           "bg-orange-100 text-orange-800",
   reported:       "bg-red-100 text-red-600",
   guardrail_rejected: "bg-rose-100 text-rose-700",
 };
@@ -32,7 +31,6 @@ const STATUS_LABELS: Record<string, string> = {
   passed:         "Rejected",
   auto_pass:      "Auto Rejected",
   human_passed:   "Rejected",
-  hold:           "Hold",
   reported:       "Reported",
   guardrail_rejected: "Guardrail Rejected",
 };

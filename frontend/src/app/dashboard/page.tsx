@@ -8,7 +8,6 @@ import { WarningsBanner } from "@/components/WarningsBanner";
 import { WhatsNewDigest } from "@/components/WhatsNewDigest";
 import { ActivityChart } from "@/components/ActivityChart";
 import { PipelineTable } from "@/components/PipelineTable";
-import { RerunHoldButton } from "@/components/RerunHoldButton";
 import {
   Telescope,
   ListChecks,
@@ -120,25 +119,14 @@ export default async function DashboardPage() {
       </Card>
 
       {/* Extra stats row — stack on mobile, 3 cols on sm+ */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
-        <Card>
-          <CardContent className="p-4 sm:p-5">
-            <p className="text-xs font-medium text-gray-500">On Hold</p>
-            <p className="mt-1 text-2xl font-bold text-orange-600">
-              {stats.on_hold}
-            </p>
-            {stats.on_hold > 0 && <RerunHoldButton />}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4 sm:p-5">
-            <p className="text-xs font-medium text-gray-500">Submitted</p>
-            <p className="mt-1 text-2xl font-bold text-cyan-600">
-              {stats.draft_complete}
-            </p>
-          </CardContent>
-        </Card>
-      </div>
+      <Card>
+        <CardContent className="p-4 sm:p-5">
+          <p className="text-xs font-medium text-gray-500">Submitted</p>
+          <p className="mt-1 text-2xl font-bold text-cyan-600">
+            {stats.draft_complete}
+          </p>
+        </CardContent>
+      </Card>
 
       {/* All discovered grants */}
       <div>

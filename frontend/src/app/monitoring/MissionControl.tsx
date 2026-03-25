@@ -99,7 +99,6 @@ interface PipelineSummary {
   total_discovered: number;
   in_triage: number;
   pursuing: number;
-  on_hold: number;
   drafting: number;
   submitted: number;
   rejected: number;
@@ -1127,7 +1126,6 @@ const STATUS_BADGE: Record<string, { bg: string; text: string; border: string; l
   triage: { bg: "bg-blue-50", text: "text-blue-700", border: "border-blue-200", label: "Triage" },
   pursue: { bg: "bg-emerald-50", text: "text-emerald-700", border: "border-emerald-200", label: "Pursue" },
   pursuing: { bg: "bg-emerald-50", text: "text-emerald-700", border: "border-emerald-200", label: "Pursuing" },
-  hold: { bg: "bg-slate-50", text: "text-slate-600", border: "border-slate-200", label: "Hold" },
   passed: { bg: "bg-rose-50", text: "text-rose-700", border: "border-rose-200", label: "Passed" },
   auto_pass: { bg: "bg-rose-50", text: "text-rose-500", border: "border-rose-200", label: "Auto-Pass" },
   drafting: { bg: "bg-purple-50", text: "text-purple-700", border: "border-purple-200", label: "Drafting" },
