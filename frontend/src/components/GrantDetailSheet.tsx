@@ -269,6 +269,15 @@ export function GrantDetailSheet({ grantId, onClose }: GrantDetailSheetProps) {
                     {draftLoading ? "Starting..." : "Start Draft"}
                   </button>
                 )}
+                {grant.status === "guardrail_rejected" && grant.rejection_reason && (
+                  <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                    <Shield className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-rose-500" />
+                    <div>
+                      <span className="font-semibold">Rejection reason:</span>{" "}
+                      {grant.rejection_reason}
+                    </div>
+                  </div>
+                )}
                 {grant.status === "guardrail_rejected" && (
                   <button
                     onClick={async () => {

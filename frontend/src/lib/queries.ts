@@ -24,6 +24,7 @@ export interface Grant {
   rationale?: string;
   hold_reason?: string;
   scores?: Record<string, number>;
+  rejection_reason?: string;
   human_override?: boolean;
   override_reason?: string;
   override_at?: string;
