@@ -1547,9 +1547,38 @@ async def run_dual_review(grant_id: str) -> Dict:
         f"This is a FORM-BASED application (~{int(avg_wc)} words avg, {len(sections)} sections)."
         if is_form_based else ""
     )
+    # Load articulation docs + company context for the reviewer
+    async def _load_reviewer_articulations():
+        try:
+            from backend.main import _load_articulations
+            themes = grant.get("themes_detected") or []
+            primary_theme = themes[0] if themes else "climatetech"
+            return await _load_articulations(primary_theme, draft_text[:500], grant.get("title", ""))
+        except Exception:
+            return ""
+
+    async def _load_reviewer_company_context():
+        parts = []
+        try:
+            from backend.agents.company_brain import _load_static_profile
+            profile = _load_static_profile() or ""
+            if profile:
+                parts.append(profile[:8000])
+        except Exception:
+            pass
+        try:
+            from backend.db.mongo import company_facts
+            facts = await company_facts().find({}).to_list(length=50)
+            if facts:
+                parts.append("VERIFIED FACTS:\n" + "\n".join(f"- {f['fact']}" for f in facts if f.get("fact")))
+        except Exception:
+            pass
+        return "\n\n".join(parts)
+
     (
         research, outcome_lessons, golden_benchmarks,
         grant_page_content, claim_verification, past_winners_analysis,
+        articulation_text, company_context,
     ) = await asyncio.gather(
         _web_research_for_review(grant, draft_text),
         _load_outcome_lessons(grant),
@@ -1557,11 +1586,19 @@ async def run_dual_review(grant_id: str) -> Dict:
         _fetch_grant_page(grant),
         _verify_claims(draft_text, grant),
         _analyze_past_winners(grant),
+        _load_reviewer_articulations(),
+        _load_reviewer_company_context(),
     )
 
     # Enhance grant_raw_doc with fetched page content
     if grant_page_content:
         grant_raw_doc = f"LIVE GRANT PAGE CONTENT (fetched from {grant.get('url', '')}):\n{grant_page_content[:6000]}\n\n{grant_raw_doc}"
+
+    # Add articulation docs + company context — reviewer needs these to verify claims
+    if articulation_text:
+        grant_raw_doc += f"\n\nARTICULATION DOCUMENTS (AltCarbon's authoritative methodology & data — verify draft claims against these):\n{articulation_text}"
+    if company_context:
+        grant_raw_doc += f"\n\nCOMPANY CONTEXT (verified facts about AltCarbon):\n{company_context[:6000]}"
 
     # Add claim verification and past winners to section_structure_block
     if claim_verification:
