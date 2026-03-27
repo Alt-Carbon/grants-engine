@@ -153,7 +153,7 @@ async def _load_articulations(
         try:
             content = await notion_mcp.fetch_page(art["page_id"])
             if content and len(content) > 100:
-                parts.append(f"### {art['title']}\n{content[:8000]}")
+                parts.append(f"### {art['title']}\n{content[:12000]}")
         except Exception as e:
             logger.debug("Failed to fetch articulation %s: %s", art_key, e)
 
@@ -2480,16 +2480,16 @@ async def drafter_chat(
     if chunks_text:
         context_parts.append(f"[KNOWLEDGE CHUNKS]\n{chunks_text}")
     if notion_context:
-        context_parts.append(f"[LIVE NOTION]\n{notion_context[:12000]}")
+        context_parts.append(f"[LIVE NOTION]\n{notion_context[:16000]}")
     company_context = "\n\n".join(context_parts)
 
     # Build chat history for context
     history_block = ""
     if body.chat_history:
         history_lines = []
-        for msg in body.chat_history[-6:]:  # last 6 messages for context
+        for msg in body.chat_history[-12:]:  # last 12 messages for longer conversations
             role = msg.get("role", "user").upper()
-            content = msg.get("content", "")[:500]
+            content = msg.get("content", "")[:800]
             history_lines.append(f"[{role}]: {content}")
         if history_lines:
             history_block = "CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n\n"
@@ -2592,7 +2592,7 @@ Write a well-structured response in markdown format:"""
 
     try:
         content = await llm_chat(
-            prompt, model=drafter_model, max_tokens=2048, system=system_prompt,
+            prompt, model=drafter_model, max_tokens=4096, system=system_prompt,
             temperature=agent_temp,
         )
         content = content.strip()
@@ -2906,7 +2906,7 @@ async def drafter_chat_stream(
             if chunks_text:
                 context_parts.append(f"[KNOWLEDGE CHUNKS]\n{chunks_text}")
             if notion_context:
-                context_parts.append(f"[LIVE NOTION]\n{notion_context[:12000]}")
+                context_parts.append(f"[LIVE NOTION]\n{notion_context[:16000]}")
             if web_results:
                 context_parts.append(f"[WEB SEARCH — latest information from the internet]\n{web_results[:6000]}")
             company_context = "\n\n".join(context_parts)
@@ -2915,9 +2915,9 @@ async def drafter_chat_stream(
             history_block = ""
             if body.chat_history:
                 history_lines = []
-                for msg in body.chat_history[-8:]:  # last 8 messages for current section
+                for msg in body.chat_history[-12:]:  # last 12 messages for longer conversations
                     role = msg.get("role", "user").upper()
-                    content = msg.get("content", "")[:600]
+                    content = msg.get("content", "")[:800]
                     history_lines.append(f"[{role}]: {content}")
                 if history_lines:
                     history_block = "CURRENT SECTION CONVERSATION:\n" + "\n".join(history_lines) + "\n\n"
@@ -3051,7 +3051,7 @@ Write a well-structured response in markdown format:"""
 
             full_content = ""
             async for chunk in chat_stream(
-                user_prompt, model=drafter_model, max_tokens=2048,
+                user_prompt, model=drafter_model, max_tokens=4096,
                 system=system_prompt, temperature=agent_temp,
             ):
                 full_content += chunk
