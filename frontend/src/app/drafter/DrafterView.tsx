@@ -1348,18 +1348,22 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       : "";
 
     try {
-      const res = await fetch("/api/drafter/section-review", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          thread_id: selectedPipeline.thread_id,
-          section_name: activeTile.label,
-          action: "approve",
-          edited_content: latestContent,
-          add_to_document: addToDoc,
-        }),
-      });
-      if (!res.ok) throw new Error(await res.text());
+      // Manual drafts: approve locally (no LangGraph pipeline to resume)
+      // Pipeline drafts: call section-review API to resume the graph
+      if (!isManualDraft && selectedPipeline.thread_id) {
+        const res = await fetch("/api/drafter/section-review", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            thread_id: selectedPipeline.thread_id,
+            section_name: activeTile.label,
+            action: "approve",
+            edited_content: latestContent,
+            add_to_document: addToDoc,
+          }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+      }
 
       setApprovedSections((prev) => new Set(prev).add(activeKey));
 
@@ -1381,7 +1385,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     } finally {
       setApproving(false);
     }
-  }, [activeKey, activeTile, selectedPipeline, activeMessages, addToDoc, triggerSave]);
+  }, [activeKey, activeTile, selectedPipeline, activeMessages, addToDoc, triggerSave, isManualDraft]);
 
   // -- Export ----------------------------------------------------------------
   const exportDraft = useCallback(() => {
