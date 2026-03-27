@@ -1510,6 +1510,7 @@ async def manual_sync_profile(
 
 @app.post("/run/index-articulations")
 async def index_articulations(
+    force: bool = False,
     _: None = Depends(verify_internal),
 ):
     """Fetch articulation docs from Notion and index into MongoDB + Pinecone.
@@ -1550,7 +1551,7 @@ async def index_articulations(
                 {"source_id": page_id, "chunk_index": 0},
                 {"content_hash": 1},
             )
-            if existing and existing.get("content_hash") == content_hash:
+            if not force and existing and existing.get("content_hash") == content_hash:
                 old_count = await col.count_documents({"source_id": page_id})
                 results[art_key] = {"status": "unchanged", "chunks": old_count}
                 total_chunks += old_count
