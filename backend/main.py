@@ -2738,7 +2738,14 @@ FUNDER: {funder}
 
 {f"COMPANY KNOWLEDGE:{chr(10)}{company_context}" if company_context else ""}
 
-The ARTICULATION DOCUMENTS section contains AltCarbon's authoritative descriptions of their technology, methodology, and projects — ALWAYS prefer these over generic knowledge for specific claims about ERW, Biochar, Laser Ablation, AI/ML approaches, and isotope research. Use exact data, metrics, and methodology described in these documents.
+CRITICAL — ARTICULATION DOCUMENTS:
+The ARTICULATION DOCUMENTS section is AltCarbon's ground truth. These are the AUTHORITATIVE source for ALL claims about ERW, Biochar, Laser Ablation, AI/ML, and isotope research. You MUST:
+1. Use EXACT numbers, costs, timelines, and metrics from these documents — do not round, paraphrase, or generalize
+2. Use the specific methodology descriptions (protocols, instruments, workflows) verbatim where possible
+3. Reference specific capabilities, partnerships, and infrastructure as stated in the articulations
+4. When the articulation has a cost breakdown or data table, reproduce it with exact figures
+5. Do NOT repeat the same stats across multiple sections — each section should draw DIFFERENT evidence from the articulations
+6. If the articulation covers a topic, NEVER use generic language — always use the specific framing from the document
 
 The COMPANY PROFILE section contains verified facts about AltCarbon — always use these for founding details, team, address, buyers, and technology specs. Never use placeholders like [YEAR] or [ADDRESS] when this data is available. The LIVE NOTION section has the latest information from the company workspace.
 
@@ -2746,6 +2753,7 @@ The COMPANY PROFILE section contains verified facts about AltCarbon — always u
 - Answer the user's question or draft the requested section
 - Adopt the TONE and VOICE described above consistently throughout your response
 - Be specific and concrete — draw from ARTICULATION DOCUMENTS for technology-specific content
+- Use DIFFERENT evidence in each section — do NOT repeat the same stats (e.g., "40,000+ acres", "30,000+ samples") across multiple sections. If PRIOR SECTIONS already cited a stat, find a DIFFERENT supporting fact from the articulations
 - Only flag [EVIDENCE NEEDED: brief description] for information truly absent from all provided knowledge sources
 - Do NOT invent statistics, team names, or technical claims
 - Format your response in clear markdown with headings, bold, and lists where appropriate
@@ -3194,7 +3202,14 @@ FUNDER: {funder}
 
 {f"COMPANY KNOWLEDGE:{chr(10)}{company_context}" if company_context else ""}
 
-The ARTICULATION DOCUMENTS section contains AltCarbon's authoritative descriptions of their technology, methodology, and projects — ALWAYS prefer these over generic knowledge for specific claims about ERW, Biochar, Laser Ablation, AI/ML approaches, and isotope research. Use exact data, metrics, and methodology described in these documents.
+CRITICAL — ARTICULATION DOCUMENTS:
+The ARTICULATION DOCUMENTS section is AltCarbon's ground truth. These are the AUTHORITATIVE source for ALL claims about ERW, Biochar, Laser Ablation, AI/ML, and isotope research. You MUST:
+1. Use EXACT numbers, costs, timelines, and metrics from these documents — do not round, paraphrase, or generalize
+2. Use the specific methodology descriptions (protocols, instruments, workflows) verbatim where possible
+3. Reference specific capabilities, partnerships, and infrastructure as stated in the articulations
+4. When the articulation has a cost breakdown or data table, reproduce it with exact figures
+5. Do NOT repeat the same stats across multiple sections — each section should draw DIFFERENT evidence from the articulations
+6. If the articulation covers a topic, NEVER use generic language — always use the specific framing from the document
 
 The COMPANY PROFILE section contains verified facts about AltCarbon — always use these for founding details, team, address, buyers, and technology specs. Never use placeholders like [YEAR] or [ADDRESS] when this data is available. The LIVE NOTION section has the latest information from the company workspace.
 
@@ -3202,6 +3217,7 @@ The COMPANY PROFILE section contains verified facts about AltCarbon — always u
 - Answer the user's question or draft the requested section
 - Adopt the TONE and VOICE described above consistently throughout your response
 - Be specific and concrete — draw from ARTICULATION DOCUMENTS for technology-specific content
+- Use DIFFERENT evidence in each section — do NOT repeat the same stats (e.g., "40,000+ acres", "30,000+ samples") across multiple sections. If PRIOR SECTIONS already cited a stat, find a DIFFERENT supporting fact from the articulations
 - Only flag [EVIDENCE NEEDED: brief description] for information truly absent from all provided knowledge sources
 - Do NOT invent statistics, team names, or technical claims
 - Format your response in clear markdown with headings, bold, and lists where appropriate
