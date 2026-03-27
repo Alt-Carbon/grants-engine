@@ -2494,6 +2494,46 @@ async def drafter_chat(
         if history_lines:
             history_block = "CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n\n"
 
+    # Cross-section context: load conversations from other sections
+    # so the drafter knows what the user asked for across the full draft
+    cross_section_block = ""
+    try:
+        from backend.db.mongo import drafter_chat_history as _dch, grants_pipeline as _gp
+        pipeline = await _gp().find_one(
+            {"grant_id": body.grant_id, "status": {"$in": ["drafting", "pending_interrupt"]}},
+            sort=[("started_at", -1)],
+        )
+        if pipeline:
+            chat_doc = await _dch().find_one({"pipeline_id": str(pipeline["_id"])})
+            if chat_doc:
+                other_sections = []
+                for sec_name, msgs in (chat_doc.get("sections") or {}).items():
+                    if sec_name == body.section_name or not isinstance(msgs, list):
+                        continue
+                    user_asks = []
+                    final_wc = 0
+                    for m in msgs:
+                        if m.get("role") == "user":
+                            uc = (m.get("content") or "").strip()
+                            if uc and len(uc) > 10:
+                                user_asks.append(uc[:200])
+                        elif m.get("role") == "agent":
+                            final_wc = len((m.get("content") or "").split())
+                    if user_asks or final_wc:
+                        summary = f"[{sec_name}] ({final_wc} words)"
+                        if user_asks:
+                            summary += " — User asked: " + "; ".join(user_asks[-3:])
+                        other_sections.append(summary)
+                if other_sections:
+                    cross_section_block = (
+                        "PRIOR SECTIONS (what the user asked for in other sections — maintain consistency):\n"
+                        + "\n".join(other_sections) + "\n\n"
+                    )
+    except Exception:
+        pass  # Non-critical
+
+    history_block = cross_section_block + history_block
+
     # Track which sources were loaded
     sources_used = []
     if articulation_text:
