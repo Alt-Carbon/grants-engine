@@ -3760,7 +3760,9 @@ async def finalize_draft(
         real_grant_id = str(result.inserted_id)
 
         # Create grants_pipeline record (thread_id must be unique — use a UUID)
+        # Clean up any orphaned null-thread_id docs from previous bugs
         import uuid
+        await grants_pipeline().delete_many({"thread_id": None})
         await grants_pipeline().insert_one({
             "grant_id": real_grant_id,
             "thread_id": f"manual-{uuid.uuid4()}",
