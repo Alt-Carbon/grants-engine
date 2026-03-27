@@ -3759,9 +3759,11 @@ async def finalize_draft(
         result = await grants_scored().insert_one(manual_grant_doc)
         real_grant_id = str(result.inserted_id)
 
-        # Create grants_pipeline record
+        # Create grants_pipeline record (thread_id must be unique — use a UUID)
+        import uuid
         await grants_pipeline().insert_one({
             "grant_id": real_grant_id,
+            "thread_id": f"manual-{uuid.uuid4()}",
             "status": "drafting",
             "started_at": now_iso,
             "started_by": user_email,
