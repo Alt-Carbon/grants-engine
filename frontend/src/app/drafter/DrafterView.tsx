@@ -981,6 +981,25 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     }, 800);
   }, [selectedId, selectedPipeline, userEmail, sessionId]);
 
+  // -- Build cross-section content for context sharing ----------------------
+  const buildOtherSectionsContent = useCallback((): { section_name: string; content: string }[] => {
+    const result: { section_name: string; content: string }[] = [];
+    for (const tile of tiles) {
+      if (tile.id === activeTileId) continue;
+      const key = buildKey(selectedId, tile.id);
+      const msgs = chatHistories[key] ?? [];
+      const agentMsgs = msgs.filter((m) => m.role === "agent");
+      if (agentMsgs.length > 0) {
+        const latest = agentMsgs[agentMsgs.length - 1].content;
+        result.push({
+          section_name: tile.label,
+          content: latest.length > 1500 ? latest.slice(0, 1500) + "..." : latest,
+        });
+      }
+    }
+    return result;
+  }, [tiles, activeTileId, selectedId, chatHistories]);
+
   // -- Non-streaming fallback -------------------------------------------------
   const chatFallback = useCallback(
     async (
@@ -1004,6 +1023,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           model: drafterModel,
           user_email: userEmail,
           session_id: sessionId,
+          other_sections: buildOtherSectionsContent(),
           ...manualOverrides,
         }),
       });
@@ -1043,7 +1063,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       }));
       setTimeout(() => triggerSave(), 50);
     },
-    [selectedId, triggerSave, userEmail, sessionId, isManualDraft, manualDraftMeta]
+    [selectedId, triggerSave, userEmail, sessionId, isManualDraft, manualDraftMeta, buildOtherSectionsContent]
   );
 
   // -- Streaming SSE helper (per-key, falls back to non-streaming) ----------
@@ -1083,6 +1103,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
               model: drafterModel,
               user_email: userEmail,
               session_id: sessionId,
+              other_sections: buildOtherSectionsContent(),
               ...streamManualOverrides,
             }),
             signal: controller.signal,
@@ -1199,7 +1220,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         textareaRef.current?.focus();
       }
     },
-    [selectedId, triggerSave, chatFallback, userEmail, sessionId, isManualDraft, manualDraftMeta]
+    [selectedId, triggerSave, chatFallback, userEmail, sessionId, isManualDraft, manualDraftMeta, buildOtherSectionsContent]
   );
 
   // -- Auto-scroll -----------------------------------------------------------
@@ -1398,12 +1419,26 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     ];
     for (const tile of tiles) {
       const key = buildKey(selectedId, tile.id);
+      // Only include approved sections that have "Add to document" checked
+      if (!approvedSections.has(key)) continue;
       const msgs = chatHistories[key] ?? [];
       const agentMsgs = msgs.filter((m) => m.role === "agent");
       const content = agentMsgs.length
         ? stripSources(agentMsgs[agentMsgs.length - 1].content)
         : "";
       if (content) lines.push(`## ${tile.label}`, "", content, "");
+    }
+    if (lines.length <= 4) {
+      // No approved sections — fall back to all sections with content
+      for (const tile of tiles) {
+        const key = buildKey(selectedId, tile.id);
+        const msgs = chatHistories[key] ?? [];
+        const agentMsgs = msgs.filter((m) => m.role === "agent");
+        const content = agentMsgs.length
+          ? stripSources(agentMsgs[agentMsgs.length - 1].content)
+          : "";
+        if (content) lines.push(`## ${tile.label}`, "", content, "");
+      }
     }
     const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
@@ -1412,7 +1447,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     a.download = `${(selectedPipeline.grant_title || "draft").replace(/\s+/g, "_")}.md`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [selectedPipeline, tiles, chatHistories, selectedId]);
+  }, [selectedPipeline, tiles, chatHistories, selectedId, approvedSections]);
 
   // -- Delete section --------------------------------------------------------
   const deleteSection = useCallback(async (tileId: string) => {
