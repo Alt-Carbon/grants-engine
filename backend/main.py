@@ -3696,9 +3696,60 @@ async def finalize_draft(
     if not grant_id or not pipeline_id:
         raise HTTPException(status_code=400, detail="grant_id and pipeline_id required")
 
-    grant = await grants_scored().find_one({"_id": ObjectId(grant_id)})
-    if not grant:
-        raise HTTPException(status_code=404, detail="Grant not found")
+    # Manual drafts: create grants_scored + grants_pipeline records on-the-fly
+    is_manual = grant_id == "__manual__" or str(grant_id).startswith("manual_")
+    if is_manual:
+        manual_title = body.get("grant_title") or "Manual Draft"
+        manual_funder = body.get("grant_funder") or ""
+        manual_themes = body.get("grant_themes") or ["climatetech"]
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Create a minimal grants_scored record
+        manual_grant_doc = {
+            "grant_name": manual_title,
+            "title": manual_title,
+            "funder": manual_funder,
+            "themes_detected": manual_themes,
+            "status": "drafting",
+            "source": "manual_draft",
+            "manual_draft_id": grant_id,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "created_by": user_email,
+        }
+        # Carry over drafter settings from localStorage (sent by frontend)
+        if body.get("drafter_settings"):
+            manual_grant_doc["drafter_settings"] = body["drafter_settings"]
+
+        result = await grants_scored().insert_one(manual_grant_doc)
+        real_grant_id = str(result.inserted_id)
+
+        # Create grants_pipeline record
+        await grants_pipeline().insert_one({
+            "grant_id": real_grant_id,
+            "status": "drafting",
+            "started_at": now_iso,
+            "started_by": user_email,
+            "source": "manual_draft",
+            "manual_draft_id": grant_id,
+        })
+
+        # Update grant_id for the rest of the pipeline
+        grant_id = real_grant_id
+        grant = manual_grant_doc
+        grant["_id"] = result.inserted_id
+
+        # Re-key the chat history from manual ID to real grant_id
+        await drafter_chat_history().update_many(
+            {"pipeline_id": pipeline_id},
+            {"$set": {"grant_id": real_grant_id}},
+        )
+
+        logger.info("Manual draft finalized: created grant %s from manual ID %s", real_grant_id, body.get("grant_id"))
+    else:
+        grant = await grants_scored().find_one({"_id": ObjectId(grant_id)})
+        if not grant:
+            raise HTTPException(status_code=404, detail="Grant not found")
 
     # Load chat history to extract approved sections
     query: dict = {"pipeline_id": pipeline_id}
