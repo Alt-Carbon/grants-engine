@@ -302,6 +302,43 @@ const EMPTY_THEME: ThemeSetting = {
 };
 
 // ---------------------------------------------------------------------------
+// localStorage helpers for manual drafts (no MongoDB document)
+// ---------------------------------------------------------------------------
+
+function isManualDraft(grantId: string | null): boolean {
+  return grantId === "__manual__" || (grantId?.startsWith("manual_") ?? false);
+}
+
+function manualSettingsKey(grantId: string): string {
+  return `drafter_settings_${grantId}`;
+}
+
+function loadManualSettings(grantId: string): DrafterConfig {
+  try {
+    const raw = localStorage.getItem(manualSettingsKey(grantId));
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveManualSettingsToStorage(grantId: string, config: DrafterConfig): void {
+  try {
+    localStorage.setItem(manualSettingsKey(grantId), JSON.stringify(config));
+  } catch {
+    // localStorage full or unavailable
+  }
+}
+
+function deleteManualSettings(grantId: string): void {
+  try {
+    localStorage.removeItem(manualSettingsKey(grantId));
+  } catch {
+    // ignore
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Inline Editable List (compact for panel)
 // ---------------------------------------------------------------------------
 
@@ -385,7 +422,32 @@ export function DrafterSettings({
       setLoading(false);
       return;
     }
+
     setLoading(true);
+
+    if (isManualDraft(grantId)) {
+      // Manual drafts: load from localStorage, fall back to global agent_config
+      const local = loadManualSettings(grantId);
+      if (local && Object.keys(local).length > 0) {
+        setConfig(local);
+        setIsDefault(false);
+      } else {
+        try {
+          const res = await fetch("/api/drafter/global-settings");
+          if (res.ok) {
+            const data = await res.json();
+            setConfig(data);
+            setIsDefault(true);
+          }
+        } catch {
+          setConfig({});
+          setIsDefault(true);
+        }
+      }
+      setLoading(false);
+      return;
+    }
+
     try {
       const res = await fetch(
         `/api/grants/${encodeURIComponent(grantId)}/drafter-settings`
@@ -415,14 +477,19 @@ export function DrafterSettings({
     setSaving(true);
     try {
       const { _id, agent, is_default, ...rest } = config;
-      await fetch(
-        `/api/grants/${encodeURIComponent(grantId)}/drafter-settings`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(rest),
-        }
-      );
+
+      if (isManualDraft(grantId)) {
+        saveManualSettingsToStorage(grantId, rest as DrafterConfig);
+      } else {
+        await fetch(
+          `/api/grants/${encodeURIComponent(grantId)}/drafter-settings`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(rest),
+          }
+        );
+      }
       setIsDefault(false);
       setDirty(false);
     } catch {
@@ -437,10 +504,14 @@ export function DrafterSettings({
     if (!grantId) return;
     setResetting(true);
     try {
-      await fetch(
-        `/api/grants/${encodeURIComponent(grantId)}/drafter-settings`,
-        { method: "DELETE" }
-      );
+      if (isManualDraft(grantId)) {
+        deleteManualSettings(grantId);
+      } else {
+        await fetch(
+          `/api/grants/${encodeURIComponent(grantId)}/drafter-settings`,
+          { method: "DELETE" }
+        );
+      }
       await loadConfig();
       setDirty(false);
     } catch {

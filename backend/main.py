@@ -78,6 +78,88 @@ def _build_theme_agents() -> dict:
 
 THEME_AGENTS = _build_theme_agents()
 
+# ── Articulation documents — authoritative Notion pages per topic ─────────────
+# These are the core reference docs the drafter MUST use for specific, grounded content.
+ARTICULATION_PAGES: dict[str, dict[str, str]] = {
+    "erw": {
+        "page_id": "31f50d0e-c20e-8003-bcae-f000cdc338b6",
+        "title": "ERW Articulation",
+        "keywords": "erw,enhanced rock weathering,basalt,silicate,mineral,weathering,darjeeling",
+    },
+    "biochar": {
+        "page_id": "31f50d0e-c20e-8044-83e2-de49cbbb6e28",
+        "title": "Biochar Articulation",
+        "keywords": "biochar,pyrolysis,biomass,char,bengal,soil amendment",
+    },
+    "laser_ablation": {
+        "page_id": "31f50d0e-c20e-804d-aa07-ce56bcca88e6",
+        "title": "Laser Ablation Articulation",
+        "keywords": "laser ablation,la-icp-ms,icp-ms,mrv,measurement,verification,d-cal,feluda",
+    },
+    "ai_for_sciences": {
+        "page_id": "31f50d0e-c20e-804f-ac14-f07cd00f2ffb",
+        "title": "AI for Sciences Grant Articulations",
+        "keywords": "ai,machine learning,ml,computer vision,remote sensing,geospatial,sensor fusion",
+    },
+    "metal_stable_isotope": {
+        "page_id": "31f50d0e-c20e-8010-814e-c1f3182e4eaf",
+        "title": "Metal Stable Isotope Research",
+        "keywords": "isotope,stable isotope,metal isotope,geochemistry,tracer,fractionation",
+    },
+}
+
+# Map themes to which articulation docs are most relevant
+THEME_ARTICULATIONS: dict[str, list[str]] = {
+    "climatetech": ["erw", "biochar", "laser_ablation"],
+    "agritech": ["biochar", "erw"],
+    "ai_for_sciences": ["ai_for_sciences", "laser_ablation"],
+    "applied_earth_sciences": ["erw", "metal_stable_isotope", "laser_ablation"],
+    "social_impact": ["erw", "biochar"],
+    "deeptech": ["laser_ablation", "ai_for_sciences"],
+}
+
+
+async def _load_articulations(
+    primary_theme: str, user_message: str, grant_title: str = ""
+) -> str:
+    """Fetch relevant articulation docs from Notion. Returns combined text."""
+    from backend.integrations.notion_mcp import notion_mcp
+    if not notion_mcp.connected:
+        return ""
+
+    # Determine which articulations to fetch:
+    # 1. Theme-based defaults
+    # 2. Keyword matches from user message / grant title
+    combined_text = (user_message + " " + grant_title).lower()
+    to_fetch: list[str] = []
+
+    # Add theme defaults
+    for art_key in THEME_ARTICULATIONS.get(primary_theme, ["erw", "biochar"]):
+        if art_key not in to_fetch:
+            to_fetch.append(art_key)
+
+    # Add keyword matches from user message
+    for art_key, art_info in ARTICULATION_PAGES.items():
+        if art_key in to_fetch:
+            continue
+        keywords = art_info["keywords"].split(",")
+        if any(kw.strip() in combined_text for kw in keywords):
+            to_fetch.append(art_key)
+
+    # Fetch (limit to 3 most relevant to stay within context budget)
+    parts: list[str] = []
+    for art_key in to_fetch[:3]:
+        art = ARTICULATION_PAGES[art_key]
+        try:
+            content = await notion_mcp.fetch_page(art["page_id"])
+            if content and len(content) > 100:
+                parts.append(f"### {art['title']}\n{content[:8000]}")
+        except Exception as e:
+            logger.debug("Failed to fetch articulation %s: %s", art_key, e)
+
+    return "\n\n---\n\n".join(parts)
+
+
 # ── Full grant context builder ────────────────────────────────────────────────
 
 def _build_grant_context(grant: dict) -> str:
@@ -502,6 +584,13 @@ class DrafterChatRequest(BaseModel):
     model: Optional[str] = None  # "gpt-5.4" | "opus-4.6" — user-selectable
     user_email: Optional[str] = None  # authenticated user's email
     session_id: Optional[str] = None  # UUID per drafter session
+    # Inline overrides — used by manual drafts (no DB document exists)
+    temperature: Optional[float] = None
+    custom_instructions: Optional[str] = None
+    writing_style: Optional[str] = None
+    grant_title: Optional[str] = None
+    grant_funder: Optional[str] = None
+    grant_themes: Optional[list[str]] = None
 
 
 class UpdateGrantStatusRequest(BaseModel):
@@ -2243,14 +2332,14 @@ async def drafter_chat(
     except Exception:
         pass
 
-    grant_title = grant.get("grant_name") or grant.get("title") or "Unknown Grant"
-    funder = grant.get("funder") or "Unknown"
+    grant_title = body.grant_title or grant.get("grant_name") or grant.get("title") or "Unknown Grant"
+    funder = body.grant_funder or grant.get("funder") or "Unknown"
 
     # Build comprehensive grant context from ALL available fields
     grant_deep = _build_grant_context(grant)
 
     # Resolve theme-specific sub-agent
-    themes_detected = grant.get("themes_detected") or []
+    themes_detected = body.grant_themes or grant.get("themes_detected") or []
     primary_theme = themes_detected[0] if themes_detected else "climatetech"
     agent_info = THEME_AGENTS.get(primary_theme, THEME_AGENTS["climatetech"])
     agent_name = agent_info["name"]
@@ -2370,6 +2459,13 @@ async def drafter_chat(
     except Exception:
         pass
 
+    # Load articulation documents (theme-specific, keyword-matched)
+    articulation_text = ""
+    try:
+        articulation_text = await _load_articulations(primary_theme, body.message, grant_title)
+    except Exception:
+        pass
+
     # Load persisted company facts (corrections from previous sessions)
     company_facts_text = await _load_company_facts()
 
@@ -2377,6 +2473,8 @@ async def drafter_chat(
     context_parts = []
     if company_facts_text:
         context_parts.append(f"[VERIFIED COMPANY FACTS — always prefer these over other sources]\n{company_facts_text}")
+    if articulation_text:
+        context_parts.append(f"[ARTICULATION DOCUMENTS — authoritative reference for AltCarbon's work; use these for specific claims, data, and methodology]\n{articulation_text}")
     if static_profile:
         context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:6000]}")
     if chunks_text:
@@ -2398,6 +2496,8 @@ async def drafter_chat(
 
     # Track which sources were loaded
     sources_used = []
+    if articulation_text:
+        sources_used.append("articulation_docs")
     if static_profile:
         sources_used.append("company_profile")
     if chunks_text:
@@ -2407,17 +2507,48 @@ async def drafter_chat(
     if grant_deep:
         sources_used.append("grant_deep_analysis")
 
-    # Load DB overrides for drafter config (theme-specific tone/voice/temperature)
+    # Load drafter config: request-body > per-grant > global > theme > defaults
     from backend.db.mongo import agent_config
     drafter_cfg = await agent_config().find_one({"agent": "drafter"}) or {}
+    grant_drafter_settings = grant.get("drafter_settings") or {}
+
     theme_overrides = (drafter_cfg.get("theme_settings") or {}).get(primary_theme) or {}
     agent_tone = theme_overrides.get("tone") or agent_info.get("tone", "")
     agent_voice = theme_overrides.get("voice") or agent_info.get("voice", "")
-    agent_temp = theme_overrides.get("temperature") or agent_info.get("temperature", 0.4)
-    custom_instructions = drafter_cfg.get("custom_instructions") or ""
+    # Use `is not None` checks — 0 is a valid temperature
+    _req_t = body.temperature
+    _gt = grant_drafter_settings.get("temperature")
+    _tt = theme_overrides.get("temperature")
+    _dt = drafter_cfg.get("temperature")
+    _at = agent_info.get("temperature", 0.4)
+    agent_temp = _req_t if _req_t is not None else (_gt if _gt is not None else (_tt if _tt is not None else (_dt if _dt is not None else _at)))
+    custom_instructions = body.custom_instructions or grant_drafter_settings.get("custom_instructions") or drafter_cfg.get("custom_instructions") or ""
+
+    # Writing style: request-body > per-grant > global > default
+    writing_style = body.writing_style or grant_drafter_settings.get("writing_style") or drafter_cfg.get("writing_style") or "professional"
+    style_descriptions = {
+        "professional": (
+            "Professional & Corporate — clear, formal, confident. "
+            "Lead with credibility (operational scale, buyers, partnerships). "
+            "Every claim backed by specific numbers. Declarative voice: 'will deploy' not 'aim to'. "
+            "Paragraph pattern: Claim → Evidence → Implication. "
+            "Close with value proposition vs alternatives."
+        ),
+        "scientific": (
+            "Scientific & Academic — rigorous, precise, evidence-driven. "
+            "Every paragraph follows Finding → Evidence → Implication → Justification. "
+            "Open with established facts, support with data/citations (with units), "
+            "state what it means, close with why it justifies the next step. "
+            "Use precise terminology (ICP-MS not 'advanced instruments'). "
+            "Evidence hierarchy: published results first, then pilot data, then proposed work."
+        ),
+    }
+    style_instruction = style_descriptions.get(writing_style, style_descriptions["professional"])
 
     system_prompt = f"""You are {agent_name}, a grant writing assistant for AltCarbon, a climate technology company.
 You help draft responses to grant application questions and requirements.
+
+WRITING STYLE: {style_instruction}
 
 TONE: {agent_tone}
 VOICE: {agent_voice}
@@ -2431,12 +2562,14 @@ FUNDER: {funder}
 
 {f"COMPANY KNOWLEDGE:{chr(10)}{company_context}" if company_context else ""}
 
+The ARTICULATION DOCUMENTS section contains AltCarbon's authoritative descriptions of their technology, methodology, and projects — ALWAYS prefer these over generic knowledge for specific claims about ERW, Biochar, Laser Ablation, AI/ML approaches, and isotope research. Use exact data, metrics, and methodology described in these documents.
+
 The COMPANY PROFILE section contains verified facts about AltCarbon — always use these for founding details, team, address, buyers, and technology specs. Never use placeholders like [YEAR] or [ADDRESS] when this data is available. The LIVE NOTION section has the latest information from the company workspace.
 
 {f"CUSTOM INSTRUCTIONS:{chr(10)}{custom_instructions}{chr(10)}" if custom_instructions else ""}INSTRUCTIONS:
 - Answer the user's question or draft the requested section
 - Adopt the TONE and VOICE described above consistently throughout your response
-- Be specific and concrete — use the company knowledge when available
+- Be specific and concrete — draw from ARTICULATION DOCUMENTS for technology-specific content
 - Only flag [EVIDENCE NEEDED: brief description] for information truly absent from all provided knowledge sources
 - Do NOT invent statistics, team names, or technical claims
 - Format your response in clear markdown with headings, bold, and lists where appropriate
@@ -2444,12 +2577,13 @@ The COMPANY PROFILE section contains verified facts about AltCarbon — always u
 
 SOURCE ATTRIBUTION:
 At the end of your response, add a "---" divider followed by a small "Sources" section listing which knowledge sources you drew from. Use these labels:
+- "Articulation Docs" — if you used facts from the [ARTICULATION DOCUMENTS] section
 - "Company Profile" — if you used facts from the [COMPANY PROFILE] section
 - "Knowledge Base" — if you used facts from the [KNOWLEDGE CHUNKS] section
 - "Notion (Live)" — if you used facts from the [LIVE NOTION] section
 - "Grant Analysis" — if you used facts from the GRANT DETAILS section
 - "Web Search" — if you used facts from the [WEB SEARCH] section (cite the source URL when possible)
-Only list sources you actually referenced. Format as a compact comma-separated line, e.g.: **Sources:** Company Profile, Grant Analysis"""
+Only list sources you actually referenced. Format as a compact comma-separated line, e.g.: **Sources:** Articulation Docs, Company Profile"""
 
     prompt = f"""{history_block}USER MESSAGE:
 {body.message}
@@ -2594,13 +2728,13 @@ async def drafter_chat_stream(
             except Exception:
                 pass
 
-            grant_title = grant.get("grant_name") or grant.get("title") or "Unknown Grant"
-            funder = grant.get("funder") or "Unknown"
+            grant_title = body.grant_title or grant.get("grant_name") or grant.get("title") or "Unknown Grant"
+            funder = body.grant_funder or grant.get("funder") or "Unknown"
 
             # Build comprehensive grant context from ALL available fields
             grant_deep = _build_grant_context(grant)
 
-            themes_detected = grant.get("themes_detected") or []
+            themes_detected = body.grant_themes or grant.get("themes_detected") or []
             primary_theme = themes_detected[0] if themes_detected else "climatetech"
             agent_info = THEME_AGENTS.get(primary_theme, THEME_AGENTS["climatetech"])
             agent_name = agent_info["name"]
@@ -2736,12 +2870,15 @@ async def drafter_chat_stream(
                     logger.debug("Drafter web search skipped: %s", e)
                     return ""
 
-            static_profile, chunks_text, notion_context, web_results = await aio.gather(
-                _load_profile(), _load_chunks(), _load_notion(), _web_search()
+            static_profile, chunks_text, notion_context, web_results, articulation_text = await aio.gather(
+                _load_profile(), _load_chunks(), _load_notion(), _web_search(),
+                _load_articulations(primary_theme, body.message, grant_title),
             )
 
             # Report sources loaded
             sources_used = []
+            if articulation_text:
+                sources_used.append("articulation_docs")
             if static_profile:
                 sources_used.append("company_profile")
             if chunks_text:
@@ -2762,6 +2899,8 @@ async def drafter_chat_stream(
             context_parts = []
             if company_facts_text:
                 context_parts.append(f"[VERIFIED COMPANY FACTS — always prefer these over other sources]\n{company_facts_text}")
+            if articulation_text:
+                context_parts.append(f"[ARTICULATION DOCUMENTS — authoritative reference for AltCarbon's work; use these for specific claims, data, and methodology]\n{articulation_text}")
             if static_profile:
                 context_parts.append(f"[COMPANY PROFILE]\n{static_profile[:6000]}")
             if chunks_text:
@@ -2828,20 +2967,21 @@ async def drafter_chat_stream(
             drafter_cfg = await agent_config_col().find_one({"agent": "drafter"}) or {}
             grant_drafter_settings = grant.get("drafter_settings") or {}
 
-            # Merge: per-grant > global > theme > defaults
+            # Merge: request-body > per-grant > global > theme > defaults
             theme_overrides = (drafter_cfg.get("theme_settings") or {}).get(primary_theme) or {}
             agent_tone = theme_overrides.get("tone") or agent_info.get("tone", "")
             agent_voice = theme_overrides.get("voice") or agent_info.get("voice", "")
             # Use `is not None` checks — 0 is a valid temperature
+            _req_t = body.temperature
             _gt = grant_drafter_settings.get("temperature")
             _tt = theme_overrides.get("temperature")
             _dt = drafter_cfg.get("temperature")
             _at = agent_info.get("temperature", 0.4)
-            agent_temp = _gt if _gt is not None else (_tt if _tt is not None else (_dt if _dt is not None else _at))
-            custom_instructions = grant_drafter_settings.get("custom_instructions") or drafter_cfg.get("custom_instructions") or ""
+            agent_temp = _req_t if _req_t is not None else (_gt if _gt is not None else (_tt if _tt is not None else (_dt if _dt is not None else _at)))
+            custom_instructions = body.custom_instructions or grant_drafter_settings.get("custom_instructions") or drafter_cfg.get("custom_instructions") or ""
 
-            # Writing style: per-grant > global > default
-            writing_style = grant_drafter_settings.get("writing_style") or drafter_cfg.get("writing_style") or "professional"
+            # Writing style: request-body > per-grant > global > default
+            writing_style = body.writing_style or grant_drafter_settings.get("writing_style") or drafter_cfg.get("writing_style") or "professional"
             style_descriptions = {
                 "professional": (
                     "Professional & Corporate — clear, formal, confident. "
@@ -2878,12 +3018,14 @@ FUNDER: {funder}
 
 {f"COMPANY KNOWLEDGE:{chr(10)}{company_context}" if company_context else ""}
 
+The ARTICULATION DOCUMENTS section contains AltCarbon's authoritative descriptions of their technology, methodology, and projects — ALWAYS prefer these over generic knowledge for specific claims about ERW, Biochar, Laser Ablation, AI/ML approaches, and isotope research. Use exact data, metrics, and methodology described in these documents.
+
 The COMPANY PROFILE section contains verified facts about AltCarbon — always use these for founding details, team, address, buyers, and technology specs. Never use placeholders like [YEAR] or [ADDRESS] when this data is available. The LIVE NOTION section has the latest information from the company workspace.
 
 {f"CUSTOM INSTRUCTIONS:{chr(10)}{custom_instructions}{chr(10)}" if custom_instructions else ""}INSTRUCTIONS:
 - Answer the user's question or draft the requested section
 - Adopt the TONE and VOICE described above consistently throughout your response
-- Be specific and concrete — use the company knowledge when available
+- Be specific and concrete — draw from ARTICULATION DOCUMENTS for technology-specific content
 - Only flag [EVIDENCE NEEDED: brief description] for information truly absent from all provided knowledge sources
 - Do NOT invent statistics, team names, or technical claims
 - Format your response in clear markdown with headings, bold, and lists where appropriate
@@ -2891,12 +3033,13 @@ The COMPANY PROFILE section contains verified facts about AltCarbon — always u
 
 SOURCE ATTRIBUTION:
 At the end of your response, add a "---" divider followed by a small "Sources" section listing which knowledge sources you drew from. Use these labels:
+- "Articulation Docs" — if you used facts from the [ARTICULATION DOCUMENTS] section
 - "Company Profile" — if you used facts from the [COMPANY PROFILE] section
 - "Knowledge Base" — if you used facts from the [KNOWLEDGE CHUNKS] section
 - "Notion (Live)" — if you used facts from the [LIVE NOTION] section
 - "Grant Analysis" — if you used facts from the GRANT DETAILS section
 - "Web Search" — if you used facts from the [WEB SEARCH] section (cite the source URL when possible)
-Only list sources you actually referenced. Format as a compact comma-separated line, e.g.: **Sources:** Company Profile, Grant Analysis"""
+Only list sources you actually referenced. Format as a compact comma-separated line, e.g.: **Sources:** Articulation Docs, Company Profile"""
 
             user_prompt = f"""{history_block}USER MESSAGE:
 {body.message}

@@ -11,17 +11,9 @@
 import { apiPost } from "@/lib/api";
 import { NextRequest, NextResponse } from "next/server";
 
-interface ChatRequestBody {
-  thread_id?: string;
-  section_name: string;
-  message: string;
-  grant_id: string;
-  chat_history?: { role: string; content: string }[];
-}
-
 export async function POST(req: NextRequest) {
   try {
-    const body: ChatRequestBody = await req.json();
+    const body = await req.json();
 
     if (!body.grant_id || !body.section_name || !body.message) {
       return NextResponse.json(
@@ -33,14 +25,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const payload = {
-      grant_id: body.grant_id,
-      section_name: body.section_name,
-      message: body.message,
-      chat_history: body.chat_history ?? [],
-    };
-
-    const data = await apiPost("/drafter/chat", payload);
+    const data = await apiPost("/drafter/chat", body);
 
     return NextResponse.json(data, { status: 200 });
   } catch (e) {
