@@ -1508,6 +1508,141 @@ async def manual_sync_profile(
     return result
 
 
+@app.post("/run/index-articulations")
+async def index_articulations(
+    _: None = Depends(verify_internal),
+):
+    """Fetch articulation docs from Notion and index into MongoDB + Pinecone.
+
+    Fetches: ERW, Biochar, Laser Ablation, AI for Sciences, Metal Stable Isotope.
+    Chunks, tags with Haiku, and upserts to both stores for RAG retrieval.
+    """
+    import hashlib
+    from backend.integrations.notion_mcp import notion_mcp
+    from backend.db.mongo import knowledge_chunks
+    from backend.db.pinecone_store import is_pinecone_configured, upsert_chunks as pc_upsert
+    from backend.agents.company_brain import _chunk_text, CompanyBrainAgent
+
+    if not notion_mcp.connected:
+        raise HTTPException(status_code=503, detail="Notion MCP not connected")
+
+    use_pinecone = is_pinecone_configured()
+    col = knowledge_chunks()
+    brain = CompanyBrainAgent()  # for _tag_chunk
+    results = {}
+    pinecone_vectors = []
+    total_chunks = 0
+
+    for art_key, art_info in ARTICULATION_PAGES.items():
+        page_id = art_info["page_id"]
+        title = art_info["title"]
+        keywords = art_info["keywords"].split(",")
+
+        try:
+            content = await notion_mcp.fetch_page(page_id)
+            if not content or len(content) < 100:
+                results[art_key] = {"status": "skipped", "reason": "empty or too short"}
+                continue
+
+            # Check if content changed (hash-based incremental)
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
+            existing = await col.find_one(
+                {"source_id": page_id, "chunk_index": 0},
+                {"content_hash": 1},
+            )
+            if existing and existing.get("content_hash") == content_hash:
+                old_count = await col.count_documents({"source_id": page_id})
+                results[art_key] = {"status": "unchanged", "chunks": old_count}
+                total_chunks += old_count
+                continue
+
+            # Chunk the content
+            chunks = _chunk_text(content)
+            if not chunks:
+                results[art_key] = {"status": "skipped", "reason": "no chunks after splitting"}
+                continue
+
+            # Map articulation key → themes
+            theme_map = {
+                "erw": ["climatetech", "applied_earth_sciences", "agritech"],
+                "biochar": ["climatetech", "agritech", "social_impact"],
+                "laser_ablation": ["climatetech", "ai_for_sciences", "applied_earth_sciences", "deeptech"],
+                "ai_for_sciences": ["ai_for_sciences", "deeptech"],
+                "metal_stable_isotope": ["applied_earth_sciences"],
+            }
+            art_themes = theme_map.get(art_key, ["climatetech"])
+
+            for i, chunk in enumerate(chunks):
+                tag = await brain._tag_chunk(chunk)
+                # Override themes with known articulation themes
+                tag_themes = list(set((tag.get("themes") or []) + art_themes))
+
+                doc_record = {
+                    "source": "articulation",
+                    "source_id": page_id,
+                    "source_title": title,
+                    "chunk_index": i,
+                    "content": chunk,
+                    "content_hash": content_hash,
+                    "doc_type": tag.get("doc_type", "technical_methodology"),
+                    "themes": tag_themes,
+                    "key_topics": (tag.get("key_topics") or []) + [kw.strip() for kw in keywords[:3]],
+                    "contains_data": tag.get("contains_data", True),
+                    "is_useful_for_grants": True,
+                    "confidence": "high",
+                    "priority": "high",
+                    "last_synced": datetime.now(timezone.utc).isoformat(),
+                    "articulation_key": art_key,
+                }
+
+                await col.update_one(
+                    {"source_id": page_id, "chunk_index": i},
+                    {"$set": doc_record},
+                    upsert=True,
+                )
+
+                if use_pinecone:
+                    pinecone_vectors.append({
+                        "_id": f"{page_id}#{i}",
+                        "content": chunk,
+                        "source": "articulation",
+                        "source_id": page_id,
+                        "source_title": title,
+                        "doc_type": tag.get("doc_type", "technical_methodology"),
+                        "themes": tag_themes,
+                        "key_topics": (tag.get("key_topics") or []) + [kw.strip() for kw in keywords[:3]],
+                        "contains_data": tag.get("contains_data", True),
+                        "is_useful_for_grants": True,
+                        "priority": "high",
+                        "articulation_key": art_key,
+                    })
+
+            # Clean stale chunks if doc shrank
+            await col.delete_many({"source_id": page_id, "chunk_index": {"$gte": len(chunks)}})
+
+            results[art_key] = {"status": "indexed", "chunks": len(chunks), "chars": len(content)}
+            total_chunks += len(chunks)
+
+        except Exception as e:
+            results[art_key] = {"status": "error", "error": str(e)[:200]}
+            logger.error("Failed to index articulation %s: %s", art_key, e)
+
+    # Batch upsert to Pinecone
+    pc_count = 0
+    if use_pinecone and pinecone_vectors:
+        try:
+            pc_count = pc_upsert(pinecone_vectors)
+        except Exception as e:
+            logger.error("Pinecone upsert failed for articulations: %s", e)
+
+    return {
+        "status": "completed",
+        "total_chunks": total_chunks,
+        "pinecone_upserted": pc_count,
+        "per_document": results,
+    }
+
+
 @app.post("/run/sync-past-grants")
 async def sync_past_grants(
     _: None = Depends(verify_internal),
