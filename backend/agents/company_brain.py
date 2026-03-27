@@ -35,7 +35,9 @@ logger = logging.getLogger(__name__)
 
 # ── Static knowledge profile (from Notion, cached locally) ─────────────────
 _PROFILE_PATH = Path(__file__).resolve().parent.parent / "knowledge" / "altcarbon_profile.md"
+_SUPPLEMENTS_PATH = Path(__file__).resolve().parent.parent / "knowledge" / "articulation_supplements.md"
 _cached_profile: Optional[str] = None
+_cached_supplements: Optional[str] = None
 
 
 def _load_static_profile() -> str:
@@ -50,6 +52,19 @@ def _load_static_profile() -> str:
         logger.warning("Static profile not found at %s", _PROFILE_PATH)
         _cached_profile = ""
     return _cached_profile
+
+
+def _load_articulation_supplements() -> str:
+    """Load IoT/sensor specs, biochar costs, and LA-ICP-MS details."""
+    global _cached_supplements
+    if _cached_supplements is not None:
+        return _cached_supplements
+    try:
+        _cached_supplements = _SUPPLEMENTS_PATH.read_text(encoding="utf-8")
+        logger.info("Loaded articulation supplements (%d chars)", len(_cached_supplements))
+    except FileNotFoundError:
+        _cached_supplements = ""
+    return _cached_supplements
 
 
 _s = get_settings()

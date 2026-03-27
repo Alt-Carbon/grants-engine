@@ -591,6 +591,8 @@ class DrafterChatRequest(BaseModel):
     grant_title: Optional[str] = None
     grant_funder: Optional[str] = None
     grant_themes: Optional[list[str]] = None
+    # Cross-section context: actual content from other sections (sent by frontend)
+    other_sections: Optional[list[dict]] = None  # [{section_name, content}, ...]
 
 
 class UpdateGrantStatusRequest(BaseModel):
@@ -2486,8 +2488,11 @@ async def drafter_chat(
     # Layer 1: Static profile (always available, has core company facts)
     static_profile = ""
     try:
-        from backend.agents.company_brain import _load_static_profile
+        from backend.agents.company_brain import _load_static_profile, _load_articulation_supplements
         static_profile = _load_static_profile() or ""
+        supplements = _load_articulation_supplements() or ""
+        if supplements:
+            static_profile += "\n\n" + supplements
     except Exception:
         pass
 
@@ -2630,43 +2635,49 @@ async def drafter_chat(
         if history_lines:
             history_block = "CONVERSATION HISTORY:\n" + "\n".join(history_lines) + "\n\n"
 
-    # Cross-section context: load conversations from other sections
-    # so the drafter knows what the user asked for across the full draft
+    # Cross-section context: FULL content from other sections (sent by frontend)
+    # This lets the drafter see exactly what was written and avoid repetition
     cross_section_block = ""
-    try:
-        from backend.db.mongo import drafter_chat_history as _dch, grants_pipeline as _gp
-        pipeline = await _gp().find_one(
-            {"grant_id": body.grant_id, "status": {"$in": ["drafting", "pending_interrupt"]}},
-            sort=[("started_at", -1)],
-        )
-        if pipeline:
-            chat_doc = await _dch().find_one({"pipeline_id": str(pipeline["_id"])})
-            if chat_doc:
-                other_sections = []
-                for sec_name, msgs in (chat_doc.get("sections") or {}).items():
-                    if sec_name == body.section_name or not isinstance(msgs, list):
-                        continue
-                    user_asks = []
-                    final_wc = 0
-                    for m in msgs:
-                        if m.get("role") == "user":
-                            uc = (m.get("content") or "").strip()
-                            if uc and len(uc) > 10:
-                                user_asks.append(uc[:200])
-                        elif m.get("role") == "agent":
-                            final_wc = len((m.get("content") or "").split())
-                    if user_asks or final_wc:
-                        summary = f"[{sec_name}] ({final_wc} words)"
-                        if user_asks:
-                            summary += " — User asked: " + "; ".join(user_asks[-3:])
-                        other_sections.append(summary)
-                if other_sections:
-                    cross_section_block = (
-                        "PRIOR SECTIONS (what the user asked for in other sections — maintain consistency):\n"
-                        + "\n".join(other_sections) + "\n\n"
-                    )
-    except Exception:
-        pass  # Non-critical
+    if body.other_sections:
+        sec_parts = []
+        for sec in body.other_sections:
+            sname = sec.get("section_name", "")
+            scontent = sec.get("content", "")
+            if sname and scontent:
+                wc = len(scontent.split())
+                sec_parts.append(f"### {sname} [{wc} words]\n{scontent}")
+        if sec_parts:
+            cross_section_block = (
+                "ALREADY WRITTEN SECTIONS (FULL CONTENT — do NOT repeat stats, claims, or phrasing from these):\n\n"
+                + "\n\n---\n\n".join(sec_parts) + "\n\n"
+            )
+    else:
+        # Fallback: load summaries from DB (when frontend doesn't send content)
+        try:
+            from backend.db.mongo import drafter_chat_history as _dch, grants_pipeline as _gp
+            pipeline = await _gp().find_one(
+                {"grant_id": body.grant_id, "status": {"$in": ["drafting", "pending_interrupt"]}},
+                sort=[("started_at", -1)],
+            )
+            if pipeline:
+                chat_doc = await _dch().find_one({"pipeline_id": str(pipeline["_id"])})
+                if chat_doc:
+                    other_sections = []
+                    for sec_name, msgs in (chat_doc.get("sections") or {}).items():
+                        if sec_name == body.section_name or not isinstance(msgs, list):
+                            continue
+                        agent_msgs = [m for m in msgs if m.get("role") == "agent"]
+                        if agent_msgs:
+                            content = (agent_msgs[-1].get("content") or "")[:1500]
+                            wc = len(content.split())
+                            other_sections.append(f"### {sec_name} [{wc} words]\n{content}")
+                    if other_sections:
+                        cross_section_block = (
+                            "ALREADY WRITTEN SECTIONS (FULL CONTENT — do NOT repeat stats, claims, or phrasing from these):\n\n"
+                            + "\n\n---\n\n".join(other_sections) + "\n\n"
+                        )
+        except Exception:
+            pass
 
     history_block = cross_section_block + history_block
 
@@ -2931,8 +2942,12 @@ async def drafter_chat_stream(
 
             async def _load_profile():
                 try:
-                    from backend.agents.company_brain import _load_static_profile
-                    return _load_static_profile() or ""
+                    from backend.agents.company_brain import _load_static_profile, _load_articulation_supplements
+                    profile = _load_static_profile() or ""
+                    supplements = _load_articulation_supplements() or ""
+                    if supplements:
+                        profile += "\n\n" + supplements
+                    return profile
                 except Exception:
                     return ""
 
@@ -3106,44 +3121,48 @@ async def drafter_chat_stream(
                 if history_lines:
                     history_block = "CURRENT SECTION CONVERSATION:\n" + "\n".join(history_lines) + "\n\n"
 
-            # Cross-section context: load conversations from other sections
-            # so the drafter knows what the user asked for across the full draft
+            # Cross-section context: FULL content from other sections
             cross_section_block = ""
-            try:
-                from backend.db.mongo import drafter_chat_history as _dch, grants_pipeline as _gp
-                pipeline = await _gp().find_one(
-                    {"grant_id": body.grant_id, "status": {"$in": ["drafting", "pending_interrupt"]}},
-                    sort=[("started_at", -1)],
-                )
-                if pipeline:
-                    chat_doc = await _dch().find_one({"pipeline_id": str(pipeline["_id"])})
-                    if chat_doc:
-                        other_sections = []
-                        for sec_name, msgs in (chat_doc.get("sections") or {}).items():
-                            if sec_name == body.section_name or not isinstance(msgs, list):
-                                continue
-                            # Summarize: user instructions + final word count
-                            user_asks = []
-                            final_wc = 0
-                            for m in msgs:
-                                if m.get("role") == "user":
-                                    uc = (m.get("content") or "").strip()
-                                    if uc and len(uc) > 10:
-                                        user_asks.append(uc[:150])
-                                elif m.get("role") == "agent":
-                                    final_wc = len((m.get("content") or "").split())
-                            if user_asks or final_wc:
-                                summary = f"[{sec_name}] ({final_wc} words)"
-                                if user_asks:
-                                    summary += " — User asked: " + "; ".join(user_asks[-2:])
-                                other_sections.append(summary)
-                        if other_sections:
-                            cross_section_block = (
-                                "PRIOR SECTIONS (what the user asked for in other sections — maintain consistency):\n"
-                                + "\n".join(other_sections) + "\n\n"
-                            )
-            except Exception:
-                pass  # Non-critical — don't break the chat if this fails
+            if body.other_sections:
+                sec_parts = []
+                for sec in body.other_sections:
+                    sname = sec.get("section_name", "")
+                    scontent = sec.get("content", "")
+                    if sname and scontent:
+                        wc = len(scontent.split())
+                        sec_parts.append(f"### {sname} [{wc} words]\n{scontent}")
+                if sec_parts:
+                    cross_section_block = (
+                        "ALREADY WRITTEN SECTIONS (FULL CONTENT — do NOT repeat stats, claims, or phrasing from these):\n\n"
+                        + "\n\n---\n\n".join(sec_parts) + "\n\n"
+                    )
+            else:
+                # Fallback: load from DB
+                try:
+                    from backend.db.mongo import drafter_chat_history as _dch, grants_pipeline as _gp
+                    pipeline = await _gp().find_one(
+                        {"grant_id": body.grant_id, "status": {"$in": ["drafting", "pending_interrupt"]}},
+                        sort=[("started_at", -1)],
+                    )
+                    if pipeline:
+                        chat_doc = await _dch().find_one({"pipeline_id": str(pipeline["_id"])})
+                        if chat_doc:
+                            other_sections = []
+                            for sec_name, msgs in (chat_doc.get("sections") or {}).items():
+                                if sec_name == body.section_name or not isinstance(msgs, list):
+                                    continue
+                                agent_msgs = [m for m in msgs if m.get("role") == "agent"]
+                                if agent_msgs:
+                                    content = (agent_msgs[-1].get("content") or "")[:1500]
+                                    wc = len(content.split())
+                                    other_sections.append(f"### {sec_name} [{wc} words]\n{content}")
+                            if other_sections:
+                                cross_section_block = (
+                                    "ALREADY WRITTEN SECTIONS (FULL CONTENT — do NOT repeat stats, claims, or phrasing from these):\n\n"
+                                    + "\n\n---\n\n".join(other_sections) + "\n\n"
+                                )
+                except Exception:
+                    pass
 
             history_block = cross_section_block + history_block
 
