@@ -854,6 +854,9 @@ REVIEW RULES:
 6. For EVERY issue and suggestion, explain your REASONING: WHY this matters to the funder, WHY this weakens the application, and WHAT EVIDENCE from the web research or grant criteria supports your assessment
 7. Use web research findings to ground your feedback — cite specific insights about the funder's priorities, past winners, or domain context when making suggestions
 8. If the application format is form-based (short answers), evaluate density and impact of each answer, not length
+9. VERIFY claims against ARTICULATION DOCUMENTS: if the draft states a number, cost, timeline, or capability, check it against the articulation docs. Flag any claim that is inaccurate, exaggerated, or unsupported by the articulations
+10. FLAG REPETITION: if the same statistic or claim appears across multiple sections, flag it as an issue — each section should use different supporting evidence
+11. CHECK DEPTH: if the articulation docs contain specific methodology, protocols, or data that the draft summarizes too generically, suggest using the exact details from the articulations
 
 Review this application thoroughly. Be specific and constructive. {perspective_guidance}
 Use the original grant document, web research context, past outcome lessons, and benchmark examples (if provided) to verify claims, calibrate scores, and identify gaps.
@@ -1152,11 +1155,22 @@ async def _run_single_review(
     # Grant document block — original funder page for reference
     grant_document_block = ""
     if grant_raw_doc:
-        # Truncate to keep prompt reasonable
-        truncated = grant_raw_doc[:8000]
         grant_document_block = (
             "ORIGINAL GRANT DOCUMENT (from funder's page — use to verify alignment):\n"
-            f"{truncated}"
+            f"{grant_raw_doc[:12000]}"
+        )
+
+    # Articulation + company context as separate blocks (not truncated with grant doc)
+    if articulation_text:
+        grant_document_block += (
+            "\n\nARTICULATION DOCUMENTS — AltCarbon's ground truth for ALL technical claims. "
+            "Verify draft claims against these. Flag any claim that contradicts or cannot be supported by this data:\n"
+            f"{articulation_text[:24000]}"
+        )
+    if company_context:
+        grant_document_block += (
+            "\n\nVERIFIED COMPANY FACTS — Use to verify team, partnership, and operational claims:\n"
+            f"{company_context[:8000]}"
         )
 
     # Research block — web-sourced intelligence
@@ -1180,7 +1194,7 @@ async def _run_single_review(
         custom_instructions_block=custom_instructions_block,
         outcome_lessons_block=outcome_lessons,
         golden_benchmarks_block=golden_benchmarks,
-        draft=draft_text[:15000],
+        draft=draft_text[:24000],
         perspective_guidance=PERSPECTIVE_GUIDANCE.get(perspective, ""),
     )
 
@@ -1281,13 +1295,20 @@ async def _run_coherence_review(
     draft_text: str,
     section_structure_block: str = "",
     research_block: str = "",
+    articulation_text: str = "",
 ) -> Dict:
     """Run holistic coherence review across all sections."""
+    articulation_block = ""
+    if articulation_text:
+        articulation_block = (
+            "\n\nARTICULATION REFERENCE — verify claims and check for stat repetition across sections:\n"
+            f"{articulation_text[:16000]}"
+        )
     prompt = COHERENCE_PROMPT.format(
         grant_title=grant.get("title") or grant.get("grant_name") or "Untitled",
         funder=grant.get("funder") or "Unknown",
-        draft=draft_text[:15000],
-        section_structure_block=section_structure_block,
+        draft=draft_text[:20000],
+        section_structure_block=section_structure_block + articulation_block,
         research_block=research_block,
     )
 
@@ -1594,11 +1615,8 @@ async def run_dual_review(grant_id: str) -> Dict:
     if grant_page_content:
         grant_raw_doc = f"LIVE GRANT PAGE CONTENT (fetched from {grant.get('url', '')}):\n{grant_page_content[:6000]}\n\n{grant_raw_doc}"
 
-    # Add articulation docs + company context — reviewer needs these to verify claims
-    if articulation_text:
-        grant_raw_doc += f"\n\nARTICULATION DOCUMENTS (AltCarbon's authoritative methodology & data — verify draft claims against these):\n{articulation_text}"
-    if company_context:
-        grant_raw_doc += f"\n\nCOMPANY CONTEXT (verified facts about AltCarbon):\n{company_context[:6000]}"
+    # articulation_text and company_context are injected into grant_document_block
+    # separately (see below) to avoid truncation
 
     # Add claim verification and past winners to section_structure_block
     if claim_verification:
@@ -1663,7 +1681,8 @@ async def run_dual_review(grant_id: str) -> Dict:
                            section_structure_block=section_structure_block),
         _run_coherence_review(grant, draft_text,
                               section_structure_block=section_structure_block,
-                              research_block=_format_research_block(research)),
+                              research_block=_format_research_block(research),
+                              articulation_text=articulation_text),
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -2050,7 +2069,8 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
                            section_structure_block=section_structure_block),
         _run_coherence_review(grant, draft_text,
                               section_structure_block=section_structure_block,
-                              research_block=_format_research_block(research)),
+                              research_block=_format_research_block(research),
+                              articulation_text=articulation_text),
     )
 
     now = datetime.now(timezone.utc).isoformat()
