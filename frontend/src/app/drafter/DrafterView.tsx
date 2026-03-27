@@ -1491,6 +1491,14 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     setFinalizing(true);
     setError(null);
     try {
+      // For manual drafts: send metadata so backend can create pipeline records
+      const manualPayload = isManualDraft ? {
+        grant_title: manualDraftMeta?.title || "Manual Draft",
+        grant_funder: "",
+        grant_themes: [activeTheme],
+        drafter_settings: loadManualDraftSettings(selectedId),
+      } : {};
+
       const res = await fetch("/api/drafter/finalize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1498,6 +1506,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           grant_id: grantId,
           pipeline_id: selectedId,
           auto_review: true,
+          ...manualPayload,
         }),
       });
       const data = await res.json();
@@ -1509,7 +1518,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     } finally {
       setFinalizing(false);
     }
-  }, [selectedPipeline, selectedId, finalizing]);
+  }, [selectedPipeline, selectedId, finalizing, isManualDraft, manualDraftMeta, activeTheme]);
 
   // -- Download Intelligence Brief ------------------------------------------
   const downloadIntelBrief = useCallback(async (format: "md" | "pdf" = "md") => {
