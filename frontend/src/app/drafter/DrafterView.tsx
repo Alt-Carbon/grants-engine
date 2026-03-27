@@ -65,6 +65,44 @@ interface Tile {
   label: string;
 }
 
+interface ManualDraft {
+  id: string;        // "manual_<uuid>"
+  title: string;
+  created_at: string;
+}
+
+const MANUAL_DRAFTS_KEY = "drafter_manual_drafts";
+
+function loadManualDrafts(): ManualDraft[] {
+  try {
+    const raw = localStorage.getItem(MANUAL_DRAFTS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveManualDrafts(drafts: ManualDraft[]): void {
+  try {
+    localStorage.setItem(MANUAL_DRAFTS_KEY, JSON.stringify(drafts));
+  } catch {
+    // ignore
+  }
+}
+
+function loadManualDraftSettings(draftId: string): {
+  temperature?: number;
+  custom_instructions?: string;
+  writing_style?: string;
+} {
+  try {
+    const raw = localStorage.getItem(`drafter_settings_${draftId}`);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
 interface DrafterViewProps {
   pipelines: PipelineRecord[];
 }
@@ -567,6 +605,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [grantData, setGrantData] = useState<Record<string, any>>({});
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [manualDrafts, setManualDrafts] = useState<ManualDraft[]>(loadManualDrafts);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -579,16 +618,18 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
   const grantDataRef = useRef<Record<string, any>>({});
 
   // -- Derived ---------------------------------------------------------------
+  const isManualDraft = selectedId === "__manual__" || selectedId.startsWith("manual_");
+  const manualDraftMeta = manualDrafts.find((d) => d.id === selectedId);
   const selectedPipeline = pipelines.find((p) => p._id === selectedId) ?? (
-    selectedId === "__manual__"
+    isManualDraft
       ? {
-          _id: "__manual__",
-          grant_id: "__manual__",
-          grant_title: "Manual Draft",
+          _id: selectedId,
+          grant_id: selectedId,
+          grant_title: manualDraftMeta?.title || "Manual Draft",
           grant_funder: "",
           grant_themes: [],
           status: "drafting",
-          started_at: new Date().toISOString(),
+          started_at: manualDraftMeta?.created_at || new Date().toISOString(),
         } as unknown as (typeof pipelines)[number]
       : undefined
   );
@@ -629,19 +670,19 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
 
   // -- Init tiles for manual draft -------------------------------------------
   useEffect(() => {
-    if (selectedId !== "__manual__") return;
-    if (tilesMap["__manual__"]) return; // already initialized
+    if (!isManualDraft) return;
+    if (tilesMap[selectedId]) return; // already initialized
 
     const defaultTiles: Tile[] = [
-      { id: "manual-1", label: "Section 1" },
-      { id: "manual-2", label: "Section 2" },
-      { id: "manual-3", label: "Section 3" },
+      { id: `${selectedId}-sec-1`, label: "Section 1" },
+      { id: `${selectedId}-sec-2`, label: "Section 2" },
+      { id: `${selectedId}-sec-3`, label: "Section 3" },
     ];
-    setTilesMap((prev) => ({ ...prev, __manual__: defaultTiles }));
+    setTilesMap((prev) => ({ ...prev, [selectedId]: defaultTiles }));
     setChatHistories((prev) => {
       const next = { ...prev };
       for (const tile of defaultTiles) {
-        const key = buildKey("__manual__", tile.id);
+        const key = buildKey(selectedId, tile.id);
         if (!next[key]) {
           next[key] = [initSystemMessage(tile.label, "climatetech")];
         }
@@ -649,7 +690,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       return next;
     });
     setActiveTileId(defaultTiles[0].id);
-  }, [selectedId]);
+  }, [selectedId, isManualDraft]);
 
   // -- Init tiles & histories on grant change --------------------------------
   useEffect(() => {
@@ -949,6 +990,9 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       userMessage: string,
       chatHistory: { role: string; content: string }[]
     ) => {
+      const manualOverrides = isManualDraft
+        ? { ...loadManualDraftSettings(selectedId), ...(manualDraftMeta?.title ? { grant_title: manualDraftMeta.title } : {}) }
+        : {};
       const res = await fetch("/api/drafter/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -960,6 +1004,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           model: drafterModel,
           user_email: userEmail,
           session_id: sessionId,
+          ...manualOverrides,
         }),
       });
 
@@ -998,7 +1043,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
       }));
       setTimeout(() => triggerSave(), 50);
     },
-    [selectedId, triggerSave, userEmail, sessionId]
+    [selectedId, triggerSave, userEmail, sessionId, isManualDraft, manualDraftMeta]
   );
 
   // -- Streaming SSE helper (per-key, falls back to non-streaming) ----------
@@ -1024,6 +1069,9 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         // Try streaming first
         let streamed = false;
         try {
+          const streamManualOverrides = isManualDraft
+            ? { ...loadManualDraftSettings(selectedId), ...(manualDraftMeta?.title ? { grant_title: manualDraftMeta.title } : {}) }
+            : {};
           const res = await fetch("/api/drafter/chat-stream", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1035,6 +1083,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
               model: drafterModel,
               user_email: userEmail,
               session_id: sessionId,
+              ...streamManualOverrides,
             }),
             signal: controller.signal,
           });
@@ -1150,7 +1199,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         textareaRef.current?.focus();
       }
     },
-    [selectedId, triggerSave, chatFallback, userEmail, sessionId]
+    [selectedId, triggerSave, chatFallback, userEmail, sessionId, isManualDraft, manualDraftMeta]
   );
 
   // -- Auto-scroll -----------------------------------------------------------
@@ -1177,6 +1226,55 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
     setActiveTileId(newTile.id);
     setError(null);
   }, [tiles, selectedId, activeTheme]);
+
+  // -- Create new manual draft -----------------------------------------------
+  const createManualDraft = useCallback(() => {
+    const newDraft: ManualDraft = {
+      id: `manual_${crypto.randomUUID()}`,
+      title: "Untitled Draft",
+      created_at: now(),
+    };
+    const updated = [...manualDrafts, newDraft];
+    setManualDrafts(updated);
+    saveManualDrafts(updated);
+    setSelectedId(newDraft.id);
+    setActiveTileId(null);
+  }, [manualDrafts]);
+
+  // -- Delete a manual draft -------------------------------------------------
+  const deleteManualDraft = useCallback((draftId: string) => {
+    const updated = manualDrafts.filter((d) => d.id !== draftId);
+    setManualDrafts(updated);
+    saveManualDrafts(updated);
+    // Clean up tiles and chat histories for this draft
+    setTilesMap((prev) => {
+      const next = { ...prev };
+      delete next[draftId];
+      return next;
+    });
+    setChatHistories((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (key.startsWith(`${draftId}::`)) delete next[key];
+      }
+      return next;
+    });
+    try { localStorage.removeItem(`drafter_settings_${draftId}`); } catch { /* ignore */ }
+    // Switch to first available
+    if (selectedId === draftId) {
+      setSelectedId(pipelines[0]?._id ?? (updated[0]?.id) ?? "__manual__");
+      setActiveTileId(null);
+    }
+  }, [manualDrafts, selectedId, pipelines]);
+
+  // -- Rename a manual draft -------------------------------------------------
+  const renameManualDraft = useCallback((draftId: string, newTitle: string) => {
+    const updated = manualDrafts.map((d) =>
+      d.id === draftId ? { ...d, title: newTitle.trim() || "Untitled Draft" } : d
+    );
+    setManualDrafts(updated);
+    saveManualDrafts(updated);
+  }, [manualDrafts]);
 
   // -- Rename tile -----------------------------------------------------------
   const saveTileRename = useCallback(
@@ -1584,7 +1682,12 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
           <select
             value={selectedId}
             onChange={(e) => {
-              setSelectedId(e.target.value);
+              const val = e.target.value;
+              if (val === "__new_manual__") {
+                createManualDraft();
+                return;
+              }
+              setSelectedId(val);
               setActiveTileId(null);
             }}
             className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm font-medium text-gray-800 transition-colors focus:border-violet-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-violet-100"
@@ -1594,14 +1697,51 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
                 {p.grant_title || "Untitled"}
               </option>
             ))}
-            <option value="__manual__" className="font-medium text-violet-700">
-              + New Manual Draft
-            </option>
+            {manualDrafts.length > 0 && (
+              <optgroup label="Manual Drafts">
+                {manualDrafts.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.title}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {selectedId === "__manual__" && !manualDrafts.some((d) => d.id === "__manual__") && (
+              <option value="__manual__">Manual Draft (legacy)</option>
+            )}
+            <option value="__new_manual__">+ New Manual Draft</option>
           </select>
-          {selectedId === "__manual__" ? (
-            <p className="mt-1 text-[11px] text-violet-500">
-              Draft without a pre-existing grant — paste questions directly
-            </p>
+          {isManualDraft ? (
+            <div className="mt-1 flex items-center gap-2">
+              <p className="flex-1 text-[11px] text-violet-500 truncate">
+                {manualDraftMeta?.title || "Manual Draft"} — paste questions directly
+              </p>
+              {manualDraftMeta && (
+                <>
+                  <button
+                    onClick={() => {
+                      const newName = window.prompt("Rename draft:", manualDraftMeta.title);
+                      if (newName !== null) renameManualDraft(manualDraftMeta.id, newName);
+                    }}
+                    className="text-gray-400 hover:text-violet-600 transition-colors"
+                    title="Rename draft"
+                  >
+                    <Pencil className="h-3 w-3" />
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (window.confirm(`Delete "${manualDraftMeta.title}"?`)) {
+                        deleteManualDraft(manualDraftMeta.id);
+                      }
+                    }}
+                    className="text-gray-400 hover:text-red-500 transition-colors"
+                    title="Delete draft"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </>
+              )}
+            </div>
           ) : selectedPipeline?.grant_funder ? (
             <p className="mt-1 text-[11px] text-gray-400 truncate">
               {selectedPipeline.grant_funder}
@@ -1615,7 +1755,7 @@ export function DrafterView({ pipelines }: DrafterViewProps) {
         </div>
 
         {/* ── Grant Intel Panel ──────────────────────────────────── */}
-        {selectedId !== "__manual__" && (() => {
+        {!isManualDraft && (() => {
           const gid = selectedPipeline?.grant_id;
           const g = gid ? grantData[gid] : null;
           if (!g) return null;
