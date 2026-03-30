@@ -1087,6 +1087,8 @@ async def _run_single_review(
     outcome_lessons: str = "",
     golden_benchmarks: str = "",
     section_structure_block: str = "",
+    articulation_text: str = "",
+    company_context: str = "",
 ) -> Dict:
     """Run a single review perspective with configurable settings.
 
@@ -1095,6 +1097,8 @@ async def _run_single_review(
         grant_raw_doc: Original grant page content for full context.
         outcome_lessons: Formatted text block with past win/loss lessons.
         golden_benchmarks: Formatted text block with high-scoring example sections.
+        articulation_text: AltCarbon articulation docs for claim verification.
+        company_context: Company profile + verified facts.
     """
     profile = REVIEWER_PROFILES.get(perspective, REVIEWER_PROFILES["funder"])
 
@@ -1674,11 +1678,15 @@ async def run_dual_review(grant_id: str) -> Dict:
         _run_single_review(grant, draft_text, "funder", funder_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
                            outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
-                           section_structure_block=section_structure_block),
+                           section_structure_block=section_structure_block,
+                           articulation_text=articulation_text,
+                           company_context=company_context),
         _run_single_review(grant, draft_text, "scientific", scientific_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
                            outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
-                           section_structure_block=section_structure_block),
+                           section_structure_block=section_structure_block,
+                           articulation_text=articulation_text,
+                           company_context=company_context),
         _run_coherence_review(grant, draft_text,
                               section_structure_block=section_structure_block,
                               research_block=_format_research_block(research),
@@ -2021,10 +2029,39 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
         grant_raw_doc = (state.get("grant_raw_doc") or "")[:8000]
 
     # Step 1: Pre-review context gathering (run in parallel)
-    research, outcome_lessons, golden_benchmarks = await asyncio.gather(
+    async def _load_node_articulations():
+        try:
+            from backend.main import _load_articulations
+            themes = grant.get("themes_detected") or []
+            primary_theme = themes[0] if themes else "climatetech"
+            return await _load_articulations(primary_theme, draft_text[:500], grant.get("title", ""))
+        except Exception:
+            return ""
+
+    async def _load_node_company_context():
+        parts = []
+        try:
+            from backend.agents.company_brain import _load_static_profile
+            profile = _load_static_profile() or ""
+            if profile:
+                parts.append(profile[:8000])
+        except Exception:
+            pass
+        try:
+            from backend.db.mongo import company_facts
+            facts = await company_facts().find({}).to_list(length=50)
+            if facts:
+                parts.append("VERIFIED FACTS:\n" + "\n".join(f"- {f['fact']}" for f in facts if f.get("fact")))
+        except Exception:
+            pass
+        return "\n\n".join(parts)
+
+    research, outcome_lessons, golden_benchmarks, articulation_text, company_context = await asyncio.gather(
         _web_research_for_review(grant, draft_text),
         _load_outcome_lessons(grant),
         _load_golden_benchmarks(grant, list(approved_sections.keys())),
+        _load_node_articulations(),
+        _load_node_company_context(),
     )
 
     # Load reviewer settings (global + per-grant overrides)
@@ -2062,11 +2099,15 @@ async def dual_reviewer_node(state: "GrantState") -> Dict:
         _run_single_review(grant, draft_text, "funder", funder_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
                            outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
-                           section_structure_block=section_structure_block),
+                           section_structure_block=section_structure_block,
+                           articulation_text=articulation_text,
+                           company_context=company_context),
         _run_single_review(grant, draft_text, "scientific", scientific_settings,
                            research=research, grant_raw_doc=grant_raw_doc,
                            outcome_lessons=outcome_lessons, golden_benchmarks=golden_benchmarks,
-                           section_structure_block=section_structure_block),
+                           section_structure_block=section_structure_block,
+                           articulation_text=articulation_text,
+                           company_context=company_context),
         _run_coherence_review(grant, draft_text,
                               section_structure_block=section_structure_block,
                               research_block=_format_research_block(research),
